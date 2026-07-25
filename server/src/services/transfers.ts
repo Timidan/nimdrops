@@ -1,6 +1,7 @@
 import type { Pool, PoolClient } from 'pg'
-import type { ChainClient } from '../chain/types'
-import { type Alerts, errorMessage } from './alerts'
+import { MEMO_MAX_BYTES, type ChainClient } from '../chain/types'
+import { errorMessage } from '../config'
+import type { Alerts } from './alerts'
 import {
   PausedError,
   SolvencyError,
@@ -56,9 +57,6 @@ export const WORKER_LOCK_ID = 42
 
 /** Claim payout memo, per Global Constraints. 12 UTF-8 bytes (measured G0). */
 export const CLAIM_MEMO = '🧧 NimDrop'
-
-/** Protocol hard limit on transaction data; 65 bytes throws at build time (G0). */
-export const MEMO_MAX_BYTES = 64
 
 if (Buffer.byteLength(CLAIM_MEMO, 'utf8') > MEMO_MAX_BYTES) {
   throw new Error(`claim memo exceeds ${MEMO_MAX_BYTES} UTF-8 bytes`)
@@ -415,8 +413,13 @@ async function markBroadcast(pool: Pool, attempt: StoredAttempt): Promise<void> 
       [attempt.transferId, REBROADCAST_COOLDOWN_MS],
     )
     if (attempt.claimId) {
+      // `manual_review` is in the list on purpose: once an operator's recovery
+      // gets a payment broadcast, the claimant should see `confirming` again
+      // rather than stay on a flag that no longer describes their money. The
+      // only state deliberately left alone is `paid` — never walk that back.
       await client.query(
-        `UPDATE claims SET state = 'confirming' WHERE id = $1 AND state IN ('reserved', 'sending')`,
+        `UPDATE claims SET state = 'confirming'
+         WHERE id = $1 AND state IN ('reserved', 'sending', 'manual_review')`,
         [attempt.claimId],
       )
     }
@@ -566,6 +569,19 @@ async function confirmAttempt(
       ])
     }
     await client.query('COMMIT')
+    // The one line that says money finished moving. Emitted after COMMIT, so it
+    // can never claim a payment the database did not keep.
+    console.info(
+      JSON.stringify({
+        event: 'transfer_confirmed',
+        transferId: attempt.transferId,
+        attemptId: attempt.attemptId,
+        txHash: attempt.txHash,
+        sequence: attempt.sequence,
+        claimId: attempt.claimId,
+        includedHeight,
+      }),
+    )
     return true
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {})

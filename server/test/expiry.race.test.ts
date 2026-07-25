@@ -57,22 +57,22 @@ let chain: FakeChain
 // ---- alert spy ---------------------------------------------------------------
 
 interface SentAlert {
-  kind: AlertKind
+  alert: AlertKind
   detail: Record<string, unknown>
 }
 
 interface SpyAlerts extends Alerts {
   sent: SentAlert[]
-  kinds(): AlertKind[]
+  alertNames(): AlertKind[]
 }
 
 function spyAlerts(): SpyAlerts {
   const sent: SentAlert[] = []
   return {
     sent,
-    kinds: () => sent.map((a) => a.kind),
-    async notify(kind, detail) {
-      sent.push({ kind, detail })
+    alertNames: () => sent.map((a) => a.alert),
+    async notify(alert, detail) {
+      sent.push({ alert, detail })
     },
   }
 }
@@ -445,7 +445,7 @@ describe.skipIf(!hasDb)('expiry, exact refunds, settlement and draft GC (real Po
 
     const transfers = await readTransfers(publicId)
     expect(transfers.some((t) => t.state === 'manual_review')).toBe(true)
-    expect(alerts.kinds()).toContain('manual_review')
+    expect(alerts.alertNames()).toContain('manual_review')
 
     // Neither settled nor refunded: the drop stays open around stuck money.
     expect(await settleTerminal(pool)).toBe(0)
@@ -585,7 +585,7 @@ describe.skipIf(!hasDb)('expiry, exact refunds, settlement and draft GC (real Po
     await setPaused(true)
 
     expect(await sweepExpiry(pool, alerts)).toBe(0)
-    expect(alerts.kinds()).toContain('paused')
+    expect(alerts.alertNames()).toContain('paused')
     expect(await readRefunds(publicId)).toHaveLength(0)
     expect((await readDrop(publicId)).state).toBe('live')
 
@@ -605,7 +605,7 @@ describe.skipIf(!hasDb)('expiry, exact refunds, settlement and draft GC (real Po
     )
 
     expect(await runWorkerTick(pool, chain, alerts)).toBe('idle')
-    expect(alerts.kinds()).toContain('insolvent')
+    expect(alerts.alertNames()).toContain('insolvent')
 
     const payouts = (await readTransfers(publicId)).filter((t) => t.purpose === 'payout')
     expect(payouts[0].state).toBe('queued')

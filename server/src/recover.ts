@@ -3,8 +3,10 @@ import type { Pool, PoolClient } from 'pg'
 import { nimiqChainFromEnv } from './chain/nimiq'
 import type { ChainClient, ChainTx } from './chain/types'
 import { closePool, getPool } from './db/pool'
-import { type Alerts, consoleAlerts, errorMessage } from './services/alerts'
+import { errorMessage } from './config'
+import { type Alerts, consoleAlerts } from './services/alerts'
 import { MEMO_PREFIX } from './services/drops'
+import { type Controls, pause, readControls, unpause } from './services/solvency'
 import {
   type StoredAttempt,
   type TransferIntent,
@@ -21,6 +23,8 @@ import {
  *   pnpm tsx src/recover.ts resume <transferId>
  *   pnpm tsx src/recover.ts replace <transferId>
  *   pnpm tsx src/recover.ts deposits
+ *   pnpm tsx src/recover.ts pause <reason>
+ *   pnpm tsx src/recover.ts unpause
  *
  * The design's constraint on this file is one sentence: "a recovery command
  * that resumes an existing transfer intent or creates a replacement attempt
@@ -325,6 +329,37 @@ export async function replaceTransfer(
   }
 }
 
+// ---- pause / unpause -----------------------------------------------------------------
+
+/**
+ * Engage the global kill switch and report what it left behind.
+ *
+ * Delegates the write to `solvency.pause` — that function is the one every
+ * money path's `lockControls` is written against, and a second implementation
+ * here would be a second thing to keep true. This wrapper exists only so the
+ * operator sees the resulting controls rather than silence.
+ *
+ * Needs no `ChainClient`: pausing must work when the node is exactly the thing
+ * that is broken.
+ */
+export async function pauseCustody(pool: Pool, reason: string): Promise<Controls> {
+  await pause(pool, reason)
+  return readControls(pool)
+}
+
+/**
+ * Release the kill switch and report the resulting controls.
+ *
+ * Note what this does NOT do: it does not reconcile. If custody sat paused long
+ * enough for the balance to go stale, `lockControls` keeps failing closed until
+ * the worker's next `reconcile()` succeeds — unpausing is permission to resume,
+ * not an assertion that the balance is known.
+ */
+export async function unpauseCustody(pool: Pool): Promise<Controls> {
+  await unpause(pool)
+  return readControls(pool)
+}
+
 // ---- deposit reconciliation report --------------------------------------------------
 
 /**
@@ -474,37 +509,56 @@ export async function depositReport(
 const USAGE = `usage:
   pnpm tsx src/recover.ts resume <transferId>    reconcile or re-queue an existing intent
   pnpm tsx src/recover.ts replace <transferId>   replace a PROVEN DEAD attempt (same recipient+amount)
-  pnpm tsx src/recover.ts deposits               custody deposits matching no drop's funding predicate`
+  pnpm tsx src/recover.ts deposits               custody deposits matching no drop's funding predicate
+  pnpm tsx src/recover.ts pause <reason>         engage the global kill switch (fails every money path closed)
+  pnpm tsx src/recover.ts unpause                release the kill switch`
+
+const COMMANDS = ['resume', 'replace', 'deposits', 'pause', 'unpause'] as const
+/** Commands whose second word is required. `pause` takes a reason, not an id. */
+const NEEDS_ARGUMENT = new Set<string>(['resume', 'replace', 'pause'])
+/** Commands that talk to the chain. Pause must work when the node is down. */
+const NEEDS_CHAIN = new Set<string>(['resume', 'replace', 'deposits'])
 
 export async function main(argv: string[]): Promise<number> {
-  const [command, transferId] = argv
-  if (!command || !['resume', 'replace', 'deposits'].includes(command)) {
+  const [command, argument] = argv
+  if (!command || !(COMMANDS as readonly string[]).includes(command)) {
     console.error(USAGE)
     return 2
   }
-  if (command !== 'deposits' && !transferId) {
+  if (NEEDS_ARGUMENT.has(command) && !argument) {
     console.error(USAGE)
     return 2
   }
 
   const pool = getPool()
-  const chain = nimiqChainFromEnv()
+  const chain = NEEDS_CHAIN.has(command) ? nimiqChainFromEnv() : null
   const alerts = consoleAlerts()
+  const print = (value: unknown): void => {
+    console.log(JSON.stringify(value, null, 2))
+  }
+  const needChain = (): ChainClient => {
+    if (!chain) throw new RecoverError(`command ${command} requires a chain client`)
+    return chain
+  }
 
   try {
     if (command === 'resume') {
-      console.log(JSON.stringify(await resumeTransfer(pool, chain, alerts, transferId), null, 2))
+      print(await resumeTransfer(pool, needChain(), alerts, argument))
     } else if (command === 'replace') {
-      console.log(JSON.stringify(await replaceTransfer(pool, chain, alerts, transferId), null, 2))
+      print(await replaceTransfer(pool, needChain(), alerts, argument))
+    } else if (command === 'deposits') {
+      print(await depositReport(pool, needChain()))
+    } else if (command === 'pause') {
+      print(await pauseCustody(pool, argument))
     } else {
-      console.log(JSON.stringify(await depositReport(pool, chain), null, 2))
+      print(await unpauseCustody(pool))
     }
     return 0
   } catch (err) {
     console.error(errorMessage(err))
     return 1
   } finally {
-    await chain.close().catch(() => {})
+    await chain?.close().catch(() => {})
     await closePool().catch(() => {})
   }
 }

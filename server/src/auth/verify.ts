@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { PublicKey, Signature } from '@nimiq/core'
+import { PublicKey, Signature } from '../chain/crypto'
 
 /**
  * How the wallet turns the canonical challenge message into the bytes it signs.

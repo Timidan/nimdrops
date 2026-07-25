@@ -1,8 +1,9 @@
 import { serve } from '@hono/node-server'
 import { nimiqChainFromEnv } from './chain/nimiq'
+import { errorMessage, requireNetwork } from './config'
 import { closePool, getPool } from './db/pool'
 import { makeApp } from './http/app'
-import { createAlerts, errorMessage } from './services/alerts'
+import { createAlerts } from './services/alerts'
 
 /**
  * API entrypoint (design §11).
@@ -38,10 +39,8 @@ function requireEnv(): void {
   const missing = REQUIRED_ENV.filter((name) => !process.env[name])
   if (missing.length > 0) throw new Error(`missing required environment: ${missing.join(', ')}`)
 
-  const network = process.env.NIMIQ_NETWORK
-  if (network !== 'TestAlbatross' && network !== 'MainAlbatross') {
-    throw new Error(`NIMIQ_NETWORK must be TestAlbatross or MainAlbatross (got ${network ?? 'unset'})`)
-  }
+  requireNetwork()
+
   const scheme = process.env.SIG_SCHEME
   if (scheme !== 'raw' && scheme !== 'nimiq-signed-message') {
     throw new Error(`SIG_SCHEME must be raw or nimiq-signed-message (got ${scheme ?? 'unset'})`)

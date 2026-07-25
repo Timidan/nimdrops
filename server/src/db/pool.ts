@@ -1,4 +1,19 @@
 import pg from 'pg'
+import type { QueryResult, QueryResultRow } from 'pg'
+
+/**
+ * Anything that can run a query: a `Pool` (autocommit, read-only callers) or a
+ * `PoolClient` inside an explicit transaction (every write path).
+ *
+ * Defined once, here, so a helper can accept either without every module
+ * re-declaring its own structurally-identical copy.
+ */
+export interface Queryable {
+  query<R extends QueryResultRow = QueryResultRow>(
+    text: string,
+    values?: unknown[],
+  ): Promise<QueryResult<R>>
+}
 
 // Money safety: keep BIGINT (oid 20) as a string so luna values never pass
 // through a lossy JS number on the way out of the database. Callers convert

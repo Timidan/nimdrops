@@ -8,7 +8,9 @@ import {
   type Challenge,
 } from '../auth/challenge'
 import { addressFromPublicKey, verifyWalletSignature, type SigScheme } from '../auth/verify'
-import { ConflictError, bindIdem, idemKeyHash, lookupIdem, type Queryable } from '../http/idempotency'
+import { requireNetwork } from '../config'
+import type { Queryable } from '../db/pool'
+import { ConflictError, bindIdem, idemKeyHash, lookupIdem } from '../http/idempotency'
 import { statusToken, hashToken } from '../ids'
 import { formatNim } from '../money'
 import { DropNotFoundError } from './drops'
@@ -120,16 +122,6 @@ function requireOrigin(): string {
   return origin
 }
 
-function requireNetwork(): string {
-  const network = process.env.NIMIQ_NETWORK
-  if (network !== 'TestAlbatross' && network !== 'MainAlbatross') {
-    throw new ClaimError(
-      `NIMIQ_NETWORK must be TestAlbatross or MainAlbatross (got ${network ?? 'unset'})`,
-    )
-  }
-  return network
-}
-
 /**
  * Which bytes the wallet signs. Locked by the Task 7 device fixture and supplied
  * as config; an unset or unknown value fails closed rather than guessing, since
@@ -153,7 +145,11 @@ function nonceHash(nonce: string): string {
   return createHash('sha256').update(nonce, 'utf8').digest('hex')
 }
 
-interface DropRow {
+/**
+ * The claim path's slice of a drop row — deliberately narrower than the one
+ * `drops.ts` reads, and named apart from it so the two never get confused.
+ */
+interface ClaimDropRow {
   id: string
   state: string
   closing_reason: string | null
@@ -165,8 +161,8 @@ interface DropRow {
 const SELECT_DROP_COLUMNS =
   'id, state, closing_reason, claim_count, amount_each_luna, expires_at'
 
-async function loadDrop(db: Queryable, publicId: string): Promise<DropRow> {
-  const { rows } = await db.query<DropRow>(
+async function loadDropForClaim(db: Queryable, publicId: string): Promise<ClaimDropRow> {
+  const { rows } = await db.query<ClaimDropRow>(
     `SELECT ${SELECT_DROP_COLUMNS} FROM drops WHERE public_id = $1`,
     [publicId],
   )
@@ -182,7 +178,7 @@ async function loadDrop(db: Queryable, publicId: string): Promise<DropRow> {
  * place a challenge can be spent, and it re-validates everything.
  */
 export async function issueChallenge(pool: Pool, publicId: string): Promise<IssuedChallenge> {
-  const drop = await loadDrop(pool, publicId)
+  const drop = await loadDropForClaim(pool, publicId)
   if (drop.state !== 'live') {
     throw new ClaimRejectedError('drop_not_live', 'drop is not accepting claims')
   }
@@ -307,7 +303,7 @@ async function findExistingClaim(
  */
 export async function reserveClaim(pool: Pool, o: ReserveClaimInput): Promise<ClaimResult> {
   const scheme = requireSigScheme()
-  const drop = await loadDrop(pool, o.publicId)
+  const drop = await loadDropForClaim(pool, o.publicId)
 
   // ---- authorization, OUTSIDE any transaction --------------------------------
 
@@ -358,7 +354,7 @@ export async function reserveClaim(pool: Pool, o: ReserveClaimInput): Promise<Cl
     // 1. custody_controls first (throws PausedError / StaleReconciliationError),
     //    then the drop row. Never the other way round.
     const controls = await lockControls(client)
-    const { rows: lockedRows } = await client.query<DropRow>(
+    const { rows: lockedRows } = await client.query<ClaimDropRow>(
       `SELECT ${SELECT_DROP_COLUMNS} FROM drops WHERE id = $1 FOR UPDATE`,
       [drop.id],
     )
@@ -464,7 +460,7 @@ export async function reserveClaim(pool: Pool, o: ReserveClaimInput): Promise<Cl
 }
 
 /** Turn a non-live drop into the code the claimant's UI needs to render. */
-function closedRejection(drop: DropRow): ClaimRejectedError {
+function closedRejection(drop: ClaimDropRow): ClaimRejectedError {
   if (drop.state === 'closing' && drop.closing_reason === 'exhausted') {
     return new ClaimRejectedError('exhausted', 'every slot in this drop is taken')
   }

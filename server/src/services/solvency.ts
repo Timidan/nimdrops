@@ -1,5 +1,6 @@
-import type { Pool, PoolClient, QueryResult, QueryResultRow } from 'pg'
+import type { Pool, PoolClient } from 'pg'
 import type { ChainClient } from '../chain/types'
+import type { Queryable } from '../db/pool'
 
 /**
  * Solvency invariant and custody runtime controls (design §10.2, §10.3).
@@ -43,17 +44,6 @@ export interface Controls {
   lastReconciledAt: Date | null
   /** `null` before the first successful `reconcile()`. */
   reconciledConfirmedBalanceLuna: bigint | null
-}
-
-/**
- * Anything that can run a query: a `Pool` (autocommit, read-only callers) or a
- * `PoolClient` inside an explicit transaction (every write path).
- */
-export interface Queryable {
-  query<R extends QueryResultRow = QueryResultRow>(
-    text: string,
-    values?: unknown[],
-  ): Promise<QueryResult<R>>
 }
 
 interface ControlsRow {
@@ -253,4 +243,18 @@ export async function reconcile(pool: Pool, chain: ChainClient): Promise<void> {
 export async function pause(pool: Pool, reason: string): Promise<void> {
   await pool.query('UPDATE custody_controls SET paused = true WHERE singleton')
   console.warn(JSON.stringify({ event: 'custody_paused', reason }))
+}
+
+/**
+ * Release the operator pause switch.
+ *
+ * The mirror image of `pause`, and deliberately as dumb: it clears the flag and
+ * says so. It does NOT reconcile — a system that was paused long enough for the
+ * balance to go stale must still fail closed on staleness until the worker's
+ * next `reconcile()`, which is the correct order (know the balance, then move
+ * money). Idempotent: unpausing a running system is a no-op.
+ */
+export async function unpause(pool: Pool): Promise<void> {
+  await pool.query('UPDATE custody_controls SET paused = false WHERE singleton')
+  console.warn(JSON.stringify({ event: 'custody_unpaused' }))
 }

@@ -45,7 +45,7 @@ export interface DepositInput {
 }
 
 export interface FakeCall {
-  kind: 'build' | 'broadcast'
+  op: 'build' | 'broadcast'
   txHash: string
   /** set when a broadcast call threw */
   failed?: BroadcastFailureMode
@@ -160,7 +160,7 @@ export class FakeChain implements ChainClient {
     }
     const txHash = hashPayload(payload)
     const rawTxHex = Buffer.from(JSON.stringify(payload), 'utf8').toString('hex')
-    this.calls.push({ kind: 'build', txHash })
+    this.calls.push({ op: 'build', txHash })
     return { rawTxHex, txHash, feeLuna: this.feeLuna }
   }
 
@@ -171,12 +171,12 @@ export class FakeChain implements ChainClient {
     this.nextBroadcastFailure = null
 
     if (mode === 'timeout') {
-      this.calls.push({ kind: 'broadcast', txHash, failed: mode })
+      this.calls.push({ op: 'broadcast', txHash, failed: mode })
       throw new Error('timeout')
     }
 
     this.land(payload, txHash)
-    this.calls.push({ kind: 'broadcast', txHash, ...(mode ? { failed: mode } : {}) })
+    this.calls.push({ op: 'broadcast', txHash, ...(mode ? { failed: mode } : {}) })
     if (mode === 'timeout-but-lands') throw new Error('timeout')
   }
 
@@ -223,7 +223,7 @@ export class FakeChain implements ChainClient {
 
   /** How many times bytes for this hash were handed to `broadcast`. */
   broadcastCount(txHash: string): number {
-    return this.calls.filter((c) => c.kind === 'broadcast' && c.txHash === txHash).length
+    return this.calls.filter((c) => c.op === 'broadcast' && c.txHash === txHash).length
   }
 
   // ---- internals -----------------------------------------------------------

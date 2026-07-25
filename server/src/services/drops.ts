@@ -1,5 +1,7 @@
 import type { Pool, PoolClient } from 'pg'
-import type { ChainClient, ChainTx } from '../chain/types'
+import { MEMO_MAX_BYTES, type ChainClient, type ChainTx } from '../chain/types'
+import { errorMessage, requireNetwork } from '../config'
+import type { Queryable } from '../db/pool'
 import { newPublicId } from '../ids'
 import { assertCaps, formatNim } from '../money'
 import { assertSolvent, lockControls, reconcile } from './solvency'
@@ -31,11 +33,15 @@ import { assertSolvent, lockControls, reconcile } from './solvency'
 
 /** Versioned funding memo prefix. The `1` is the memo format version. */
 export const MEMO_PREFIX = 'ND1:'
-/** Nimiq basic-transaction data limit. */
-export const MEMO_MAX_BYTES = 64
 /** Expiry is measured from finalized activation, never from draft creation. */
 export const EXPIRY_HOURS = 24
 
+/**
+ * NOTE on `paused`: this is a PER-DROP state, never the operator kill switch.
+ * Global pause lives in `custody_controls.paused` (see `services/solvency.ts`
+ * and `recover.ts pause`), which is what every money path checks. Nothing
+ * currently writes this value; it is kept for a per-drop hold.
+ */
 export type DropState =
   | 'awaiting_funding'
   | 'funding_pending'
@@ -174,10 +180,6 @@ const SELECT_DROP = `
   WHERE d.public_id = $1
 `
 
-interface Queryable {
-  query: Pool['query']
-}
-
 async function loadDrop(db: Queryable, publicId: string): Promise<DropRow> {
   const { rows } = await db.query<DropRow>(SELECT_DROP, [publicId])
   const row = rows[0]
@@ -216,18 +218,10 @@ async function findTx(chain: ChainClient, txHash: string): Promise<ChainTx | nul
   try {
     return await chain.getTransaction(txHash)
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
+    const message = errorMessage(err)
     if (/not found|unknown transaction|no such transaction/i.test(message)) return null
     throw err
   }
-}
-
-function expectedNetwork(): 'TestAlbatross' | 'MainAlbatross' {
-  const network = process.env.NIMIQ_NETWORK
-  if (network !== 'TestAlbatross' && network !== 'MainAlbatross') {
-    throw new DropError(`NIMIQ_NETWORK must be TestAlbatross or MainAlbatross (got ${network ?? 'unset'})`)
-  }
-  return network
 }
 
 function isUniqueViolation(err: unknown): boolean {
@@ -285,10 +279,10 @@ export async function submitFunding(
 
   // ---- chain verification, OUTSIDE any database transaction ----------------
 
-  if (chain.network() !== expectedNetwork()) {
+  if (chain.network() !== requireNetwork()) {
     throw new FundingRejectedError(
       'wrong_network',
-      `funding observed on ${chain.network()}, expected ${expectedNetwork()}`,
+      `funding observed on ${chain.network()}, expected ${requireNetwork()}`,
     )
   }
 

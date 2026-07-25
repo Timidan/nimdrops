@@ -1,7 +1,9 @@
+import { pathToFileURL } from 'node:url'
 import { nimiqChainFromEnv } from './chain/nimiq'
 import type { ChainClient } from './chain/types'
 import { closePool, getPool } from './db/pool'
-import { type Alerts, createAlerts, errorMessage, throttled } from './services/alerts'
+import { errorMessage } from './config'
+import { type Alerts, createAlerts, throttled } from './services/alerts'
 import { gcDrafts, settleTerminal, sweepExpiry } from './services/expiry'
 import { reconcile } from './services/solvency'
 import {
@@ -149,7 +151,10 @@ async function main(): Promise<void> {
   }
 }
 
-const invokedDirectly = process.argv[1]?.endsWith('worker.ts') === true
+// Exact-path comparison, matching `recover.ts`: `endsWith('worker.ts')` also
+// fires for any other file whose name happens to end that way.
+const invokedDirectly =
+  process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href
 
 if (invokedDirectly) {
   main().catch((err: unknown) => {

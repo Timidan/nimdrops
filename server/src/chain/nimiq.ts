@@ -71,7 +71,8 @@ import {
   TransactionBuilder,
   type PlainTransactionDetails,
 } from '@nimiq/core'
-import type { ChainClient, ChainTx } from './types'
+import { requireNetwork } from '../config'
+import { MEMO_MAX_BYTES, type ChainClient, type ChainTx } from './types'
 
 export type NimiqNetwork = 'TestAlbatross' | 'MainAlbatross'
 
@@ -80,9 +81,6 @@ export const NETWORK_ID: Record<NimiqNetwork, number> = {
   TestAlbatross: 5,
   MainAlbatross: 24,
 }
-
-/** Hard protocol limit on a basic transaction's data field (API-DIVERGENCE 14). */
-export const MAX_TX_DATA_BYTES = 64
 
 /**
  * API-DIVERGENCE 15: seed nodes per network.
@@ -394,8 +392,8 @@ export class NimiqChain implements ChainClient {
     let tx
     if (o.dataUtf8 !== undefined && o.dataUtf8 !== '') {
       const data = new TextEncoder().encode(o.dataUtf8)
-      if (data.length > MAX_TX_DATA_BYTES) {
-        throw new Error(`tx data is ${data.length} bytes, limit is ${MAX_TX_DATA_BYTES}`)
+      if (data.length > MEMO_MAX_BYTES) {
+        throw new Error(`tx data is ${data.length} bytes, limit is ${MEMO_MAX_BYTES}`)
       }
       // API-DIVERGENCE 3: data is the third positional argument.
       tx = TransactionBuilder.newBasicWithData(
@@ -443,7 +441,9 @@ export class NimiqChain implements ChainClient {
 
 /** Convenience for entrypoints and spikes. Reads the documented env contract. */
 export function nimiqChainFromEnv(overrides: Partial<NimiqChainOptions> = {}): NimiqChain {
-  const network = (overrides.network ?? process.env.NIMIQ_NETWORK ?? 'TestAlbatross') as NimiqNetwork
+  // No default: a silent `TestAlbatross` fallback here would let a mainnet
+  // deployment sign with the wrong network id and never say so.
+  const network = overrides.network ?? requireNetwork()
   const custodyPrivateKeyHex = overrides.custodyPrivateKeyHex ?? process.env.CUSTODY_PRIVATE_KEY_HEX
   if (!custodyPrivateKeyHex) throw new Error('CUSTODY_PRIVATE_KEY_HEX is not set')
   return new NimiqChain({ ...overrides, network, custodyPrivateKeyHex })

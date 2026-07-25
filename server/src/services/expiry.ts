@@ -1,5 +1,6 @@
 import type { Pool, PoolClient } from 'pg'
-import { type Alerts, errorMessage } from './alerts'
+import { errorMessage } from '../config'
+import type { Alerts } from './alerts'
 import { PausedError, StaleReconciliationError, lockControls } from './solvency'
 
 /**

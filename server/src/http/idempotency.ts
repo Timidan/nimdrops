@@ -1,4 +1,4 @@
-import type { QueryResult, QueryResultRow } from 'pg'
+import type { Queryable } from '../db/pool'
 import { hashIdemKey } from '../ids'
 
 /**
@@ -22,13 +22,6 @@ export class ConflictError extends Error {
   constructor(message = 'idempotency key was already used for a different request') {
     super(message)
   }
-}
-
-export interface Queryable {
-  query<R extends QueryResultRow = QueryResultRow>(
-    text: string,
-    values?: unknown[],
-  ): Promise<QueryResult<R>>
 }
 
 export interface IdemRecord {

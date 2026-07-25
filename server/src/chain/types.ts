@@ -20,3 +20,12 @@ export interface ChainClient {
     Promise<{ rawTxHex: string; txHash: string; feeLuna: bigint }>
   broadcast(rawTxHex: string): Promise<void>
 }
+
+// protocol constant, not part of the frozen interface
+//
+// Hard Nimiq limit on a basic transaction's data field (API-DIVERGENCE 14).
+// It lives here because three unrelated modules need it — the funding memo
+// builder, the payout memo check and the real signer — and three copies of a
+// protocol constant is three chances to update two of them. Adding it below
+// the interfaces keeps the frozen contract above untouched.
+export const MEMO_MAX_BYTES = 64

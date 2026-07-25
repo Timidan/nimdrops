@@ -1,3 +1,5 @@
+import { errorMessage } from '../config'
+
 /**
  * Operator alerts (design §10.3, PLAN.md "Operator" target perspective).
  *
@@ -28,7 +30,7 @@ export type AlertKind =
   | 'heartbeat'
 
 export interface Alerts {
-  notify(kind: AlertKind, detail: Record<string, unknown>): Promise<void>
+  notify(alert: AlertKind, detail: Record<string, unknown>): Promise<void>
 }
 
 /** A slow webhook must never hold up a broadcast or a confirmation. */
@@ -49,8 +51,8 @@ export interface AlertsOptions {
  * signatures, no raw transactions, no full claimant addresses. Callers pass
  * internal IDs and hashes, which are already public on-chain identifiers.
  */
-function line(kind: AlertKind, detail: Record<string, unknown>, note?: string): string {
-  return JSON.stringify({ event: 'alert', kind, ...(note ? { note } : {}), detail })
+function line(alert: AlertKind, detail: Record<string, unknown>, note?: string): string {
+  return JSON.stringify({ event: 'alert', alert, ...(note ? { note } : {}), detail })
 }
 
 export function createAlerts(o: AlertsOptions = {}): Alerts {
@@ -58,19 +60,19 @@ export function createAlerts(o: AlertsOptions = {}): Alerts {
   const source = o.source ?? 'nimdrops'
 
   return {
-    async notify(kind, detail) {
+    async notify(alert, detail) {
       const url = o.webhookUrl ?? process.env.ALERT_WEBHOOK_URL
-      const body = { kind, source, at: new Date().toISOString(), detail }
+      const body = { alert, source, at: new Date().toISOString(), detail }
 
       // Always log: the webhook is best-effort, the log is not.
-      if (kind === 'heartbeat') console.info(line(kind, detail))
-      else console.warn(line(kind, detail))
+      if (alert === 'heartbeat') console.info(line(alert, detail))
+      else console.warn(line(alert, detail))
 
       if (!url) return
 
       const doFetch = o.fetchImpl ?? globalThis.fetch
       if (typeof doFetch !== 'function') {
-        console.warn(line(kind, detail, 'no fetch implementation available'))
+        console.warn(line(alert, detail, 'no fetch implementation available'))
         return
       }
 
@@ -81,10 +83,10 @@ export function createAlerts(o: AlertsOptions = {}): Alerts {
           body: JSON.stringify(body),
           signal: AbortSignal.timeout(timeoutMs),
         })
-        if (!res.ok) console.warn(line(kind, detail, `webhook responded ${res.status}`))
+        if (!res.ok) console.warn(line(alert, detail, `webhook responded ${res.status}`))
       } catch (err) {
         // Includes the 5s timeout abort. Never rethrow: see the module note.
-        console.warn(line(kind, detail, `webhook failed: ${errorMessage(err)}`))
+        console.warn(line(alert, detail, `webhook failed: ${errorMessage(err)}`))
       }
     },
   }
@@ -96,26 +98,45 @@ export function consoleAlerts(): Alerts {
 }
 
 /**
- * Suppress repeats of the same kind inside `windowMs`.
+ * Rate-limit repeats of the SAME INCIDENT inside `windowMs`.
  *
  * The worker ticks every 2s; a paused system with queued work would otherwise
  * emit an alert every 2s until an operator intervened. Throttling lives here
  * rather than in `transfers.ts` so the service stays pure and every alert is
  * observable in tests.
+ *
+ * Two properties keep this from hiding money problems:
+ *
+ *  1. The log gets EVERY alert, unconditionally, before any throttle decision.
+ *     What we rate-limit is the webhook, never the record. A suppressed alert
+ *     that left no trace would be worse than no throttling at all.
+ *  2. The window is keyed per incident, not per alert name. Keying on the name
+ *     alone meant once one transfer went to `manual_review`, the next five
+ *     minutes of *other* transfers failing were silently swallowed — the
+ *     operator would fix one stuck payout and never learn about the rest.
  */
 export function throttled(inner: Alerts, windowMs = 5 * 60_000): Alerts {
-  const lastSentAt = new Map<AlertKind, number>()
+  const lastSentAt = new Map<string, number>()
   return {
-    async notify(kind, detail) {
+    async notify(alert, detail) {
+      // (1) The unconditional record. Distinct event name so it is never
+      // confused with what actually went out over the webhook.
+      console.warn(JSON.stringify({ event: 'alert_raised', alert, detail }))
+
+      // (2) One bucket per incident. Alerts that name no subject (heartbeat,
+      // paused, insolvent) share the empty key and stay one-per-window.
+      const key = `${alert}:${incidentId(detail)}`
       const now = Date.now()
-      const previous = lastSentAt.get(kind)
+      const previous = lastSentAt.get(key)
       if (previous !== undefined && now - previous < windowMs) return
-      lastSentAt.set(kind, now)
-      await inner.notify(kind, detail)
+      lastSentAt.set(key, now)
+      await inner.notify(alert, detail)
     },
   }
 }
 
-export function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
+/** The subject of an alert, when it has one. Only ever used as a map key. */
+function incidentId(detail: Record<string, unknown>): string {
+  const subject = detail.transferId ?? detail.dropId ?? ''
+  return typeof subject === 'string' ? subject : String(subject)
 }

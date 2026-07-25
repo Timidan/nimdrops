@@ -3,14 +3,14 @@ import { KeyPair } from '@nimiq/core'
 import pg from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { FakeChain } from '../src/chain/fake'
-import type { ChainClient } from '../src/chain/types'
+import { nimiqChainFromEnv } from '../src/chain/nimiq'
+import { MEMO_MAX_BYTES, type ChainClient } from '../src/chain/types'
 import { migrate } from '../src/db/migrate'
 import type { AlertKind, Alerts } from '../src/services/alerts'
 import { issueChallenge, reserveClaim } from '../src/services/claims'
 import { createDraft, submitFunding } from '../src/services/drops'
 import {
   CLAIM_MEMO,
-  MEMO_MAX_BYTES,
   WORKER_LOCK_ID,
   acquireWorkerLock,
   evaluateProvenDead,
@@ -20,7 +20,14 @@ import {
   validityWindowBlocks,
   withWorkerLock,
 } from '../src/services/transfers'
-import { ReplaceRefusedError, depositReport, replaceTransfer, resumeTransfer } from '../src/recover'
+import {
+  ReplaceRefusedError,
+  depositReport,
+  pauseCustody,
+  replaceTransfer,
+  resumeTransfer,
+  unpauseCustody,
+} from '../src/recover'
 // Side-effect import: installs the int8-as-string parser so BIGINT luna never
 // passes through a lossy JS number. This suite builds its own pool, so it still
 // depends on that global parser being registered.
@@ -57,22 +64,22 @@ let chain: FakeChain
 // ---- alert spy ---------------------------------------------------------------
 
 interface SentAlert {
-  kind: AlertKind
+  alert: AlertKind
   detail: Record<string, unknown>
 }
 
 interface SpyAlerts extends Alerts {
   sent: SentAlert[]
-  kinds(): AlertKind[]
+  alertNames(): AlertKind[]
 }
 
 function spyAlerts(): SpyAlerts {
   const sent: SentAlert[] = []
   return {
     sent,
-    kinds: () => sent.map((a) => a.kind),
-    async notify(kind, detail) {
-      sent.push({ kind, detail })
+    alertNames: () => sent.map((a) => a.alert),
+    async notify(alert, detail) {
+      sent.push({ alert, detail })
     },
   }
 }
@@ -397,7 +404,7 @@ describe.skipIf(!hasDb)('transfer worker crash windows (real Postgres)', () => {
     expect(intentAtBroadcast).toBe('in_progress')
 
     // …and the chain saw the build strictly before the broadcast.
-    const order = chain.calls.map((c) => c.kind)
+    const order = chain.calls.map((c) => c.op)
     expect(order).toEqual(['build', 'broadcast'])
 
     const attempts = await readAttempts(payout.transferId)
@@ -427,7 +434,7 @@ describe.skipIf(!hasDb)('transfer worker crash windows (real Postgres)', () => {
     await runWorkerTick(pool, killedBeforeBroadcast(chain), alerts)
 
     // The bytes never reached the network, but they are durable.
-    expect(chain.calls.filter((c) => c.kind === 'broadcast')).toHaveLength(0)
+    expect(chain.calls.filter((c) => c.op === 'broadcast')).toHaveLength(0)
     const [signed] = await readAttempts(payout.transferId)
     expect(signed.state).toBe('signed')
     expect(custodyPayments()).toHaveLength(0)
@@ -525,7 +532,7 @@ describe.skipIf(!hasDb)('transfer worker crash windows (real Postgres)', () => {
     expect(dead).toHaveLength(1)
     expect(dead[0].state, 'the worker never marks proven_dead by itself').toBe('signed')
     expect((await readTransfer(payout.transferId)).state).toBe('manual_review')
-    expect(alerts.kinds()).toContain('manual_review')
+    expect(alerts.alertNames()).toContain('manual_review')
     expect(
       await evaluateProvenDead(chain, {
         txHash: signed.tx_hash,
@@ -576,7 +583,7 @@ describe.skipIf(!hasDb)('transfer worker crash windows (real Postgres)', () => {
     expect(await readAttempts(payout.transferId)).toHaveLength(0)
     expect((await readTransfer(payout.transferId)).state).toBe('queued')
     expect(chain.calls).toHaveLength(0)
-    expect(alerts.kinds()).toContain('paused')
+    expect(alerts.alertNames()).toContain('paused')
   })
 
   it('does nothing and alerts when reconciliation is stale', async () => {
@@ -587,7 +594,7 @@ describe.skipIf(!hasDb)('transfer worker crash windows (real Postgres)', () => {
 
     expect(await readAttempts(payout.transferId)).toHaveLength(0)
     expect((await readTransfer(payout.transferId)).state).toBe('queued')
-    expect(alerts.kinds()).toContain('stale_reconciliation')
+    expect(alerts.alertNames()).toContain('stale_reconciliation')
   })
 
   it('does nothing when the fee reserve is not covered', async () => {
@@ -617,7 +624,7 @@ describe.skipIf(!hasDb)('transfer worker crash windows (real Postgres)', () => {
     // budget the intent must keep waiting.
     await reconcileOnStartup(pool, lookupsFail(chain), alerts)
     expect((await readTransfer(payout.transferId)).state).toBe('in_progress')
-    expect(alerts.kinds()).not.toContain('manual_review')
+    expect(alerts.alertNames()).not.toContain('manual_review')
     expect((await readAttempts(payout.transferId))[0].last_error).toMatch(/rpc down/)
 
     await backdateAttempts(payout.transferId, '2 hours')
@@ -625,7 +632,7 @@ describe.skipIf(!hasDb)('transfer worker crash windows (real Postgres)', () => {
 
     expect((await readTransfer(payout.transferId)).state).toBe('manual_review')
     expect(await readClaimState(payout.claimId)).toBe('manual_review')
-    expect(alerts.kinds()).toContain('manual_review')
+    expect(alerts.alertNames()).toContain('manual_review')
     // Still exactly one attempt, still auditable.
     expect(await readAttempts(payout.transferId)).toHaveLength(1)
   })
@@ -699,6 +706,62 @@ describe.skipIf(!hasDb)('transfer worker crash windows (real Postgres)', () => {
     const transfer = await readTransfer(payout.transferId)
     expect(transfer.state).toBe('queued')
     expect(transfer.last_error).toBeNull()
+  })
+
+  it('a recovered payment promotes its claim out of manual_review to confirming', async () => {
+    const payout = await queuedPayout()
+    await runWorkerTick(pool, killedBeforeBroadcast(chain), alerts)
+
+    // The state an operator finds after the worker gave up on this attempt:
+    // both the intent and the claimant's own view are flagged.
+    await pool.query(`UPDATE outgoing_transfers SET state = 'manual_review' WHERE id = $1`, [
+      payout.transferId,
+    ])
+    await pool.query(`UPDATE claims SET state = 'manual_review' WHERE id = $1`, [payout.claimId])
+
+    const result = await resumeTransfer(pool, chain, alerts, payout.transferId)
+
+    expect(result.action).toBe('rebroadcast')
+    // The claimant must see the recovery, not stay stuck on a stale flag.
+    expect(await readClaimState(payout.claimId)).toBe('confirming')
+    expect(custodyPayments()).toHaveLength(1)
+  })
+
+  it('nimiqChainFromEnv fails closed on the network instead of defaulting', () => {
+    const savedKey = process.env.CUSTODY_PRIVATE_KEY_HEX
+    delete process.env.CUSTODY_PRIVATE_KEY_HEX
+    try {
+      delete process.env.NIMIQ_NETWORK
+      expect(() => nimiqChainFromEnv()).toThrow(/NIMIQ_NETWORK/)
+
+      // With a valid network the NEXT missing variable is reported, which is
+      // what proves the check above is the one that fired.
+      process.env.NIMIQ_NETWORK = 'TestAlbatross'
+      expect(() => nimiqChainFromEnv()).toThrow(/CUSTODY_PRIVATE_KEY_HEX/)
+    } finally {
+      if (savedKey === undefined) delete process.env.CUSTODY_PRIVATE_KEY_HEX
+      else process.env.CUSTODY_PRIVATE_KEY_HEX = savedKey
+    }
+  })
+
+  it('pause stops the money paths and unpause releases them, both reporting controls', async () => {
+    const payout = await queuedPayout()
+
+    const paused = await pauseCustody(pool, 'operator drill')
+    expect(paused.paused).toBe(true)
+    expect(await runWorkerTick(pool, chain, alerts)).toBe('idle')
+    expect(await readAttempts(payout.transferId)).toHaveLength(0)
+
+    const resumed = await unpauseCustody(pool)
+    expect(resumed.paused).toBe(false)
+    // The reconciled balance survives the pause, so work restarts immediately.
+    expect(await runWorkerTick(pool, chain, alerts)).toBe('worked')
+    expect(await readAttempts(payout.transferId)).toHaveLength(1)
+  })
+
+  it('unpause is idempotent on an already-running system', async () => {
+    expect((await unpauseCustody(pool)).paused).toBe(false)
+    expect((await unpauseCustody(pool)).paused).toBe(false)
   })
 
   it('replace refuses while the prior attempt could still land', async () => {
