@@ -1,6 +1,93 @@
 @import 'tailwindcss';
 
+/**
+ * Design §4.4: a sealed paper envelope, passed around one real group.
+ * A deep blue field, one gold accent, system type, and nothing else. Task 17
+ * builds the envelope moment on top of this; it should not need to undo any of
+ * it.
+ */
+@theme {
+  --color-ink: #1f2348;
+  --color-gold: #e9b213;
+  --color-gold-deep: #c8960b;
+  --color-paper: #fbf9f4;
+
+  --font-sans:
+    system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', sans-serif;
+}
+
 html {
-  background-color: white;
+  /* The paper column sits on the deep blue field. */
+  background-color: var(--color-ink);
   -webkit-text-size-adjust: 100%;
+}
+
+body {
+  font-family: var(--font-sans);
+  color: var(--color-ink);
+}
+
+/* One primary action per screen, and it always looks like this. */
+.nd-primary {
+  border-radius: 1rem;
+  background-color: var(--color-ink);
+  color: var(--color-paper);
+  font-size: 1rem;
+  font-weight: 600;
+  /* ~52px tall: comfortably past the 44px touch-target floor. */
+  padding: 0.9rem 1.25rem;
+  transition: opacity 120ms ease-out;
+}
+.nd-primary:disabled {
+  opacity: 0.35;
+}
+.nd-primary:not(:disabled):active {
+  opacity: 0.85;
+}
+
+.nd-secondary {
+  border-radius: 1rem;
+  border: 1px solid color-mix(in srgb, var(--color-ink) 14%, transparent);
+  background-color: transparent;
+  color: var(--color-ink);
+  font-size: 1rem;
+  font-weight: 600;
+  padding: 0.9rem 1.25rem;
+}
+
+:where(button, a, input):focus-visible {
+  outline: 2px solid var(--color-gold-deep);
+  outline-offset: 2px;
+}
+
+@keyframes nd-sheet-in {
+  from {
+    transform: translateY(12%);
+    opacity: 0.6;
+  }
+}
+
+@keyframes nd-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.nd-sheet {
+  animation: nd-sheet-in 180ms ease-out;
+}
+
+.nd-pulse {
+  animation: nd-pulse 1.6s ease-in-out infinite;
+}
+
+/* Design §4.4: every state is reachable with animation off. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
