@@ -2,6 +2,7 @@ import { nimiqChainFromEnv } from './chain/nimiq'
 import type { ChainClient } from './chain/types'
 import { closePool, getPool } from './db/pool'
 import { type Alerts, createAlerts, errorMessage, throttled } from './services/alerts'
+import { gcDrafts, settleTerminal, sweepExpiry } from './services/expiry'
 import { reconcile } from './services/solvency'
 import {
   acquireWorkerLock,
@@ -20,12 +21,16 @@ import {
  * if this process dies the session ends, Postgres drops the lock, and a
  * restarted worker picks the money back up from the database.
  *
- * Task 12 wires `sweepExpiry` + `settleTerminal` + draft GC into the same loop.
+ * Expiry, settlement and draft GC run in this same loop, and only here: they
+ * write outgoing liabilities, so they belong behind the single-worker advisory
+ * lock alongside signing, not in a second scheduler (PLAN.md kill criterion).
  */
 
 export const TICK_INTERVAL_MS = 2_000
 export const SOLVENCY_RECONCILE_INTERVAL_MS = 60_000
 export const HEARTBEAT_INTERVAL_MS = 24 * 60 * 60 * 1_000
+/** Drafts are collected on a 24h horizon; checking every 10 min is ample. */
+export const DRAFT_GC_INTERVAL_MS = 10 * 60_000
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -66,6 +71,7 @@ export async function runWorker(chain: ChainClient, alerts: Alerts): Promise<voi
 
     let lastSolvencyAt = Date.now()
     let lastHeartbeatAt = 0
+    let lastDraftGcAt = 0
 
     while (!stopping) {
       const now = Date.now()
@@ -86,12 +92,37 @@ export async function runWorker(chain: ChainClient, alerts: Alerts): Promise<voi
         await alerts.notify('heartbeat', { network: chain.network(), pid: process.pid })
       }
 
+      // Close expired drops BEFORE signing: a refund created this tick is then
+      // just another queued intent the same tick can pick up.
+      try {
+        await sweepExpiry(pool, alerts)
+      } catch (err) {
+        console.warn(JSON.stringify({ event: 'expiry_failed', error: errorMessage(err) }))
+      }
+
       try {
         await runWorkerTick(pool, chain, alerts)
       } catch (err) {
         // A tick never gives up: the database is the queue, so the next tick
         // retries from committed state.
         console.warn(JSON.stringify({ event: 'tick_failed', error: errorMessage(err) }))
+      }
+
+      // …and settle AFTER, so a drop whose last liability confirmed in this
+      // tick reaches its terminal state without waiting for the next one.
+      try {
+        await settleTerminal(pool)
+      } catch (err) {
+        console.warn(JSON.stringify({ event: 'settle_failed', error: errorMessage(err) }))
+      }
+
+      if (now - lastDraftGcAt >= DRAFT_GC_INTERVAL_MS) {
+        lastDraftGcAt = now
+        try {
+          await gcDrafts(pool)
+        } catch (err) {
+          console.warn(JSON.stringify({ event: 'draft_gc_failed', error: errorMessage(err) }))
+        }
       }
 
       await sleep(TICK_INTERVAL_MS)

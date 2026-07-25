@@ -780,6 +780,15 @@ async function signNextQueued(pool: Pool, chain: ChainClient, alerts: Alerts): P
             reason: errorMessage(err),
           }),
         )
+        // Money is owed and the invariant refuses to sign for it. Silence here
+        // would look exactly like an idle worker, so page the operator; the
+        // caller's throttling keeps a stuck queue from alerting every 2s.
+        await alerts.notify('insolvent', {
+          stage: 'transfer_worker',
+          transferId: intent.id,
+          purpose: intent.purpose,
+          message: errorMessage(err),
+        })
         return false
       }
       throw err

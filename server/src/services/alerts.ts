@@ -13,7 +13,19 @@
  * `console.warn` so the event still lands in the host's log.
  */
 
-export type AlertKind = 'manual_review' | 'paused' | 'stale_reconciliation' | 'heartbeat'
+/**
+ * `insolvent` covers every refusal of the design §10.2 invariant — a custody
+ * balance that no longer covers outstanding principal plus the fee reserve, or
+ * a live-principal cap that a signature would exceed. Both mean the same thing
+ * operationally: money is owed that the worker will not sign for until a human
+ * tops up custody or raises the cap.
+ */
+export type AlertKind =
+  | 'manual_review'
+  | 'paused'
+  | 'stale_reconciliation'
+  | 'insolvent'
+  | 'heartbeat'
 
 export interface Alerts {
   notify(kind: AlertKind, detail: Record<string, unknown>): Promise<void>
