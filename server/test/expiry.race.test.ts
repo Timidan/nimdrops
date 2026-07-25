@@ -296,6 +296,7 @@ describe.skipIf(!hasDb)('expiry, exact refunds, settlement and draft GC (real Po
        SET paused = false,
            max_live_principal_luna = 10000000,
            configured_fee_reserve_luna = ${FEE_FLOAT},
+           operator_float_luna = ${FEE_FLOAT},
            reconciled_confirmed_balance_luna = NULL,
            last_reconciled_height = NULL,
            last_reconciled_at = NULL
@@ -598,11 +599,10 @@ describe.skipIf(!hasDb)('expiry, exact refunds, settlement and draft GC (real Po
     const publicId = await liveDrop()
     await reserveOne(publicId)
 
-    // The reconciled balance can no longer cover outstanding principal plus the
-    // fee reserve: the worker must sign nothing and page the operator.
-    await pool.query(
-      'UPDATE custody_controls SET reconciled_confirmed_balance_luna = 0 WHERE singleton',
-    )
+    // The ledger balance can no longer cover outstanding principal plus the fee
+    // reserve — the operator float that backs the reserve is gone — so the
+    // worker must sign nothing and page the operator.
+    await pool.query('UPDATE custody_controls SET operator_float_luna = 0 WHERE singleton')
 
     expect(await runWorkerTick(pool, chain, alerts)).toBe('idle')
     expect(alerts.alertNames()).toContain('insolvent')

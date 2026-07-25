@@ -159,8 +159,18 @@ function fundingHashFor(publicId: string): string {
 }
 
 /** Create, deposit exact funding, finalize, and activate through the API. */
-async function liveDrop(): Promise<DraftBody> {
-  const draft = await createDrop()
+async function liveDrop(o: { claimCount?: number } = {}): Promise<DraftBody> {
+  const draft =
+    o.claimCount === undefined
+      ? await createDrop()
+      : await createDrop({
+          body: {
+            sponsorLabel: 'Nimiq Community',
+            message: 'thanks for shipping',
+            amountEach: AMOUNT_EACH_NIM,
+            claimCount: o.claimCount,
+          },
+        })
   const txHash = fundingHashFor(draft.publicId)
   chain.deposit({
     hash: txHash,
@@ -247,6 +257,7 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
        SET paused = false,
            max_live_principal_luna = 10000000,
            configured_fee_reserve_luna = ${FEE_FLOAT},
+           operator_float_luna = ${FEE_FLOAT},
            reconciled_confirmed_balance_luna = NULL,
            last_reconciled_height = NULL,
            last_reconciled_at = NULL
@@ -690,14 +701,41 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
     expect((await get(`/api/drops/${draft.publicId}`, { ip: '198.51.100.7' })).status).toBe(200)
   })
 
-  it('rate limits 10 claim attempts per minute per drop, across IPs and wallets', async () => {
-    const draft = await liveDrop()
+  it('rate limits 10 AUTHENTICATED claim attempts per minute per drop, across IPs and wallets', async () => {
+    // 20 slots so the per-drop limiter, not the drop's own capacity, is what
+    // ends the run.
+    const draft = await liveDrop({ claimCount: 20 })
+
     // Distinct IP and wallet each time, so only the per-drop bucket can trip.
-    // The bodies carry unknown challenges: the limiter must be enforced before
-    // the server does any real work, so the attempt still costs a token.
-    const attempt = (i: number) =>
+    for (let i = 0; i < 10; i++) {
+      const res = await claim(draft.publicId, newWallet(), { ip: `192.0.2.${i + 1}` })
+      expect(res.status, `claim ${i + 1} status ${res.status}`).toBe(202)
+    }
+    await expectEnvelope(
+      await claim(draft.publicId, newWallet(), { ip: '192.0.2.100' }),
+      429,
+      'rate_limited',
+    )
+
+    // Another drop is unaffected.
+    const other = await liveDrop()
+    expect((await claim(other.publicId, newWallet(), { ip: '192.0.2.201' })).status).toBe(202)
+  })
+
+  /**
+   * G1 review finding 8. The per-drop bucket used to be charged before the
+   * signature was checked, so ten junk requests a minute — costing an attacker
+   * nothing, and provable by nobody — locked every real claimant out of a
+   * named drop. Unauthenticated requests now pay the per-IP limiter instead,
+   * which is the bucket an attacker can only aim at themselves.
+   */
+  it('malformed claims cannot spend a drop’s claim budget, only the attacker’s own IP budget', async () => {
+    const draft = await liveDrop()
+    const ATTACKER_IP = '198.51.100.66'
+
+    const junk = () =>
       post(`/api/drops/${draft.publicId}/claims`, {
-        ip: `192.0.2.${i + 1}`,
+        ip: ATTACKER_IP,
         idemKey: randomUUID(),
         body: {
           challengeId: randomUUID(),
@@ -707,13 +745,23 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
       })
 
     for (let i = 0; i < 10; i++) {
-      await expectEnvelope(await attempt(i), 409, 'unknown_challenge')
+      await expectEnvelope(await junk(), 409, 'unknown_challenge')
     }
-    await expectEnvelope(await attempt(10), 429, 'rate_limited')
 
-    // Another drop is unaffected.
-    const other = await liveDrop()
-    expect((await claim(other.publicId, newWallet(), { ip: '192.0.2.201' })).status).toBe(202)
+    // The whole point: a real claimant on the targeted drop still gets in.
+    const victim = await claim(draft.publicId, newWallet(), { ip: '203.0.113.77' })
+    expect(victim.status, 'ten junk requests must not lock out a real claimant').toBe(202)
+
+    // The attacker still pays for the flood — on their own IP bucket, at its
+    // own threshold (60/min across every /api route, of which 10 are spent).
+    for (let i = 0; i < 50; i++) {
+      const res = await get(`/api/drops/${draft.publicId}`, { ip: ATTACKER_IP })
+      expect(res.status, `attacker request ${i + 11} status ${res.status}`).toBe(200)
+    }
+    await expectEnvelope(await junk(), 429, 'rate_limited')
+    // …and that 429 is the IP bucket, not the drop's: the victim's next claim
+    // from a clean IP is still served.
+    expect((await claim(draft.publicId, newWallet(), { ip: '203.0.113.78' })).status).toBe(202)
   })
 
   it('rate limits 5 claim attempts per minute per wallet, across drops', async () => {

@@ -4,6 +4,7 @@ import { errorMessage, requireNetwork } from './config'
 import { closePool, getPool } from './db/pool'
 import { makeApp } from './http/app'
 import { createAlerts } from './services/alerts'
+import { ensureNetworkBinding } from './services/solvency'
 
 /**
  * API entrypoint (design §11).
@@ -66,6 +67,14 @@ async function main(): Promise<void> {
 
   const pool = getPool()
   const chain = nimiqChainFromEnv()
+
+  // Fail at boot, not at the first funding submission (G1 review finding 6): an
+  // API process talking to a different chain than the database is bound to
+  // would verify funding against the wrong network. The first boot of a fresh
+  // database stamps the binding; every later boot must match it.
+  const network = await ensureNetworkBinding(pool, chain)
+  log('network_binding_verified', { network })
+
   const alerts = createAlerts({ source: 'nimdrops-api' })
   const app = makeApp({ pool, chain, alerts })
 

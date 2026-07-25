@@ -31,6 +31,72 @@ export function requireNetwork(): NetworkName {
   return network
 }
 
+// ---- protocol floors ---------------------------------------------------------
+//
+// G1 review findings 1 and 5. Both numbers below are PROTOCOL constants, not
+// preferences, and both fail in the double-payment direction when set too low:
+//
+//  - A validity window shorter than the chain's own makes a transaction that is
+//    still perfectly includable look permanently dead. `recover.ts replace`
+//    would then sign a second payment for the same claim while the first can
+//    still land.
+//  - A finality depth shallower than one batch (60 blocks) calls a transaction
+//    final before a macro block has finalised the batch it sits in, so a reorg
+//    can un-pay a claim we already reported as `paid`.
+//
+// Therefore the environment may only ever RAISE them. There is deliberately no
+// env-var escape hatch below the floor: a deployment that wants a smaller
+// number is a deployment that wants the bug.
+//
+// TEST SEAM: production code never passes a number to these readers, so the
+// floor is the only value a deployment can run with. Tests that need small
+// windows/depths inject them through explicit, documented parameters instead —
+// `evaluateProvenDead(..., { windowBlocks })`, `progressAttempt(..., { windowBlocks })`,
+// `replaceTransfer(..., { windowBlocks })`, `NimiqChainOptions.finalityDepthOverride`
+// and `FakeChainOptions.finalityDepth`. Those seams bypass the environment, not
+// the floor: nothing reachable from `index.ts` / `worker.ts` / `recover.ts` can
+// reach them.
+
+/** `Policy.TRANSACTION_VALIDITY_WINDOW_BLOCKS` on both Albatross networks (~2h). */
+export const VALIDITY_WINDOW_FLOOR_BLOCKS = 7_200
+
+/**
+ * One Albatross batch is 60 blocks (`Policy.BLOCKS_PER_BATCH`), so 64 blocks
+ * always spans at least one macro block wherever in the batch the transaction
+ * landed. Measured in `server/spike/g0-evidence.md`.
+ */
+export const FINALITY_DEPTH_FLOOR_BLOCKS = 64
+
+function envIntAtLeast(name: string, floor: number): number {
+  const raw = process.env[name]
+  if (raw === undefined || raw === '') return floor
+  const value = Number(raw)
+  if (!Number.isInteger(value)) {
+    throw new Error(`${name} must be an integer (got ${raw})`)
+  }
+  if (value < floor) {
+    throw new Error(`${name} must be at least ${floor} (got ${value}); the floor is a protocol constant`)
+  }
+  return value
+}
+
+/**
+ * How long a signed transaction stays includable after its validity start
+ * height. Floored at `VALIDITY_WINDOW_FLOOR_BLOCKS`; env may only raise it.
+ */
+export function validityWindowBlocks(): number {
+  return envIntAtLeast('NIMIQ_VALIDITY_WINDOW_BLOCKS', VALIDITY_WINDOW_FLOOR_BLOCKS)
+}
+
+/**
+ * Blocks after inclusion before a transaction may be called final — the ONLY
+ * authority for `confirmed`/`paid`. Floored at `FINALITY_DEPTH_FLOOR_BLOCKS`;
+ * env may only raise it.
+ */
+export function finalityDepthBlocks(): number {
+  return envIntAtLeast('NIMIQ_FINALITY_DEPTH', FINALITY_DEPTH_FLOOR_BLOCKS)
+}
+
 /** Uniform message extraction for the `catch (err: unknown)` sites. */
 export function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)

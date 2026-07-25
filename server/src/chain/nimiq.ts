@@ -68,10 +68,11 @@ import {
   KeyPair,
   Policy,
   PrivateKey,
+  Transaction,
   TransactionBuilder,
   type PlainTransactionDetails,
 } from '@nimiq/core'
-import { requireNetwork } from '../config'
+import { FINALITY_DEPTH_FLOOR_BLOCKS, finalityDepthBlocks, requireNetwork } from '../config'
 import { MEMO_MAX_BYTES, type ChainClient, type ChainTx } from './types'
 
 export type NimiqNetwork = 'TestAlbatross' | 'MainAlbatross'
@@ -124,14 +125,23 @@ export const DEFAULT_SEED_NODES: Record<NimiqNetwork, string[]> = {
  * roughly every 60 s. A depth of 64 > 60 therefore guarantees that at least one
  * macro block was produced after inclusion NO MATTER where in the batch the
  * transaction landed — that is the reason for the default, not a round number.
+ *
+ * Re-exported from `config.ts`, where it is also the HARD FLOOR: since G1 review
+ * finding 5, `NIMIQ_FINALITY_DEPTH` may raise this number and never lower it.
  */
-export const DEFAULT_FINALITY_DEPTH = 64
+export const DEFAULT_FINALITY_DEPTH = FINALITY_DEPTH_FLOOR_BLOCKS
 
 export interface NimiqChainOptions {
   network: NimiqNetwork
   custodyPrivateKeyHex: string
-  /** Defaults to `NIMIQ_FINALITY_DEPTH` env, else `DEFAULT_FINALITY_DEPTH`. */
-  finalityDepth?: number
+  /**
+   * @internal TEST-ONLY seam (finding 5). Bypasses `config.finalityDepthBlocks()`
+   * and therefore its 64-block floor, so a test can call a transaction final
+   * after a handful of blocks. No production entrypoint sets it: `index.ts`,
+   * `worker.ts` and `recover.ts` all build their client through
+   * `nimiqChainFromEnv`, which does not forward it.
+   */
+  finalityDepthOverride?: number
   /** Defaults to `NIMIQ_FEE_LUNA` env, else 0n (0-fee txs are accepted). */
   feeLuna?: bigint
   /** 'pico' (default) or 'light'. Only these two are supported by the web client. */
@@ -143,14 +153,6 @@ export interface NimiqChainOptions {
    * the WASM built-in list — see API-DIVERGENCE 15.
    */
   seedNodes?: string[]
-}
-
-function envInt(name: string, fallback: number): number {
-  const raw = process.env[name]
-  if (raw === undefined || raw === '') return fallback
-  const n = Number(raw)
-  if (!Number.isInteger(n) || n < 0) throw new Error(`${name} must be a non-negative integer`)
-  return n
 }
 
 function envBigint(name: string, fallback: bigint): bigint {
@@ -224,7 +226,9 @@ export class NimiqChain implements ChainClient {
     this.keyPair = KeyPair.derive(PrivateKey.fromHex(hex))
     this.custody = this.keyPair.toAddress().toUserFriendlyAddress()
 
-    this.finalityDepth = o.finalityDepth ?? envInt('NIMIQ_FINALITY_DEPTH', DEFAULT_FINALITY_DEPTH)
+    // Floored config, or the documented test-only override. There is no third
+    // path: a deployment cannot configure a depth below the protocol floor.
+    this.finalityDepth = o.finalityDepthOverride ?? finalityDepthBlocks()
     this.fee = o.feeLuna ?? envBigint('NIMIQ_FEE_LUNA', 0n)
     this.syncMode = o.syncMode ?? 'pico'
     this.logLevel = o.logLevel ?? 'warn'
@@ -297,6 +301,30 @@ export class NimiqChain implements ChainClient {
   /** Exposed for evidence/diagnostics; not part of the frozen interface. */
   feeLuna(): bigint {
     return this.fee
+  }
+
+  /**
+   * The network a stored signed transaction was built for (G1 review finding 6).
+   *
+   * `recover.ts replace` calls this on the bytes it is about to declare dead:
+   * bytes carrying another chain's network id could never have been included
+   * here, so their absence on this chain proves nothing at all.
+   *
+   * Deserialization, not byte-offset parsing — `Transaction.fromAny` already
+   * knows the wire format and exposes `networkId`, so the network id's position
+   * in the serialization is not something this file has to keep true. Returns
+   * `null` when the bytes do not parse or carry an id we do not map; callers
+   * must treat that as "unknown", never as a match.
+   */
+  rawTxNetwork(rawTxHex: string): NimiqNetwork | null {
+    let networkId: number
+    try {
+      networkId = Transaction.fromAny(rawTxHex).networkId
+    } catch {
+      return null
+    }
+    const match = Object.entries(NETWORK_ID).find(([, id]) => id === networkId)
+    return match ? (match[0] as NimiqNetwork) : null
   }
 
   // ---- ChainClient ---------------------------------------------------------
@@ -439,14 +467,21 @@ export class NimiqChain implements ChainClient {
   }
 }
 
-/** Convenience for entrypoints and spikes. Reads the documented env contract. */
+/**
+ * Convenience for entrypoints and spikes. Reads the documented env contract.
+ *
+ * `finalityDepthOverride` is stripped rather than forwarded: this function is
+ * what every production entrypoint calls, so the test-only seam must not be
+ * reachable through it even if a caller supplies one (finding 5).
+ */
 export function nimiqChainFromEnv(overrides: Partial<NimiqChainOptions> = {}): NimiqChain {
   // No default: a silent `TestAlbatross` fallback here would let a mainnet
   // deployment sign with the wrong network id and never say so.
   const network = overrides.network ?? requireNetwork()
   const custodyPrivateKeyHex = overrides.custodyPrivateKeyHex ?? process.env.CUSTODY_PRIVATE_KEY_HEX
   if (!custodyPrivateKeyHex) throw new Error('CUSTODY_PRIVATE_KEY_HEX is not set')
-  return new NimiqChain({ ...overrides, network, custodyPrivateKeyHex })
+  const { finalityDepthOverride: _ignored, ...rest } = overrides
+  return new NimiqChain({ ...rest, network, custodyPrivateKeyHex })
 }
 
 /** Re-exported for evidence: batch geometry behind DEFAULT_FINALITY_DEPTH. */

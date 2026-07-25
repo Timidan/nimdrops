@@ -5,7 +5,7 @@ import { closePool, getPool } from './db/pool'
 import { errorMessage } from './config'
 import { type Alerts, createAlerts, throttled } from './services/alerts'
 import { gcDrafts, settleTerminal, sweepExpiry } from './services/expiry'
-import { reconcile } from './services/solvency'
+import { ensureNetworkBinding, reconcile } from './services/solvency'
 import {
   acquireWorkerLock,
   reconcileOnStartup,
@@ -63,9 +63,16 @@ export async function runWorker(chain: ChainClient, alerts: Alerts): Promise<voi
   process.once('SIGTERM', () => stop('SIGTERM'))
 
   try {
+    // Before anything touches money: bind this database to this chain, or
+    // refuse to run at all (G1 review finding 6). A worker pointed at the wrong
+    // network would sign payouts with the wrong network id and reconcile
+    // against a chain that has never seen this custody wallet.
+    const network = await ensureNetworkBinding(pool, chain)
+    log('network_binding_verified', { network })
+
     // Order matters: refresh the custody balance FIRST, otherwise every
     // `lockControls` call fails closed as stale and the worker can do nothing.
-    await reconcile(pool, chain)
+    await reconcile(pool, chain, alerts)
     // Then resolve every attempt whose outcome is unknown, BEFORE signing any
     // new work (design §8.3).
     await reconcileOnStartup(pool, chain, alerts)
@@ -81,7 +88,7 @@ export async function runWorker(chain: ChainClient, alerts: Alerts): Promise<voi
       if (now - lastSolvencyAt >= SOLVENCY_RECONCILE_INTERVAL_MS) {
         lastSolvencyAt = now
         try {
-          await reconcile(pool, chain)
+          await reconcile(pool, chain, alerts)
         } catch (err) {
           // Leaving the balance stale fails closed on its own: `lockControls`
           // refuses new signatures until a reconcile succeeds.

@@ -21,11 +21,12 @@ import { assertSolvent, lockControls, reconcile } from './solvency'
  *     and without recording anything.
  *
  * Chain verification happens OUTSIDE the database transaction. Once the funding
- * is final we `reconcile()` — the invariant `balance >= outstanding + fee
- * reserve` is checked against the last reconciled balance, so activating on a
- * pre-funding snapshot would fail closed — and only then open the activation
+ * is final we `reconcile()` — which refreshes the chain cross-check and stamps
+ * the freshness the invariant demands — and only then open the activation
  * transaction, which takes locks in the mandated order `custody_controls` →
- * drop row.
+ * drop row. The invariant itself (`ledger balance >= outstanding + added +
+ * fee reserve`) runs inside that transaction, on the books rather than on the
+ * chain's head state (G1 review finding 4).
  *
  * All money is BIGINT luna; `db/pool.ts` keeps int8 as a string on the wire, so
  * every value is parsed with `BigInt(...)` at this boundary.
@@ -55,6 +56,29 @@ export type DropState =
 
 /** States that can still accept a funding transaction. */
 const FUNDABLE_STATES: readonly DropState[] = ['awaiting_funding', 'funding_pending']
+
+/**
+ * States a funding transaction may still ACTIVATE from (G1 review finding 7).
+ *
+ * `cancelled` is in this list and not in `FUNDABLE_STATES` on purpose. Draft GC
+ * (`expiry.gcDrafts`) cancels an unfunded draft 24 hours after it was created,
+ * and it can legitimately fire on a draft whose funding is mid-verification:
+ * the sponsor's transaction is on chain and final, `submitFunding` is between
+ * its chain reads and its activation transaction, and GC only looks at
+ * `funding_tx_hash IS NULL`. Refusing the activation afterwards would strand
+ * verified money in a cancelled drop and force a manual refund.
+ *
+ * Reactivating is safe because the ENTIRE §7 predicate is re-checked first —
+ * exact recipient, exact amount, exact memo, real sender, unused hash, our own
+ * finality — and `activate()` re-checks the drop row under the custody lock. A
+ * cancelled drop holds no claims, no liabilities and no expiry, so nothing was
+ * built on top of the cancellation that reactivation would contradict.
+ *
+ * `gcDrafts` itself is deliberately untouched: narrowing the collector would
+ * only move the race, and the collector's three guards are the reason it can
+ * never touch a drop that money was already attributed to.
+ */
+const ACTIVATABLE_STATES: readonly DropState[] = [...FUNDABLE_STATES, 'cancelled']
 
 export class DropError extends Error {}
 
@@ -260,10 +284,10 @@ export async function submitFunding(
   const drop = await loadDrop(pool, publicId)
 
   // Already activated by exactly this transaction: idempotent replay.
-  if (drop.funding_tx_hash === txHash && !FUNDABLE_STATES.includes(drop.state)) {
+  if (drop.funding_tx_hash === txHash && !ACTIVATABLE_STATES.includes(drop.state)) {
     return toPublic(drop)
   }
-  if (!FUNDABLE_STATES.includes(drop.state)) {
+  if (!ACTIVATABLE_STATES.includes(drop.state)) {
     throw new FundingRejectedError('drop_not_fundable', 'drop is not awaiting funding')
   }
   // A drop holds at most one funding transaction, for its whole life. A second
@@ -322,23 +346,31 @@ export async function submitFunding(
 
   // ---- activation ----------------------------------------------------------
 
-  // Invariant 1 compares the reconciled balance against COMMITTED outstanding
-  // principal. The funding just landed, so a stale snapshot would either be
-  // rejected as stale or read as insolvent: reconcile after finality, before
-  // the transaction.
+  // Reconcile after finality, before the transaction: `lockControls` refuses to
+  // move money on a stale reconciliation, and this is also where the chain
+  // cross-check would notice custody holding less than the books claim — before
+  // a new liability is added rather than after.
   await reconcile(pool, chain)
   await activate(pool, drop.id, publicId, txHash, tx, expectedFundingLuna)
   return getPublic(pool, publicId)
 }
 
-/** Record a verified-but-not-yet-final funding transaction against the drop. */
+/**
+ * Record a verified-but-not-yet-final funding transaction against the drop.
+ *
+ * `cancelled` is accepted here for the same reason `activate` accepts it
+ * (finding 7): the transaction has already passed every §7 predicate except our
+ * own finality, so the drop has verified money pointed at it and must stop
+ * being garbage. Recording the hash also takes it out of `gcDrafts`' reach for
+ * good.
+ */
 async function recordPending(pool: Pool, publicId: string, txHash: string): Promise<void> {
   try {
     await pool.query(
       `UPDATE drops
        SET state = 'funding_pending', funding_tx_hash = $2
        WHERE public_id = $1
-         AND state IN ('awaiting_funding', 'funding_pending')
+         AND state IN ('awaiting_funding', 'funding_pending', 'cancelled')
          AND (funding_tx_hash IS NULL OR funding_tx_hash = $2)`,
       [publicId, txHash],
     )
@@ -375,7 +407,7 @@ async function activate(
     const current = rows[0]
     if (!current) throw new DropNotFoundError(publicId)
 
-    if (!FUNDABLE_STATES.includes(current.state)) {
+    if (!ACTIVATABLE_STATES.includes(current.state)) {
       // A concurrent caller activated it first with this same transaction:
       // that is the idempotent outcome, not a conflict.
       if (current.funding_tx_hash === txHash) {

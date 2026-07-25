@@ -97,6 +97,15 @@ export interface ReserveClaimInput {
   idemKey: string
   /** Canonical hash of the request the key was used for. */
   requestHash: string
+  /**
+   * Called once the wallet signature has VERIFIED, before any reservation work
+   * (G1 review finding 8). The HTTP layer charges its per-drop rate-limit bucket
+   * here, so an unauthenticated flood — malformed bodies, unknown challenges,
+   * forged signatures — cannot spend a drop's claim budget and lock out its
+   * real claimants. Throwing from this hook aborts the reservation before
+   * anything is written.
+   */
+  onAuthenticated?: () => void | Promise<void>
 }
 
 export interface ClaimResult {
@@ -335,6 +344,12 @@ export async function reserveClaim(pool: Pool, o: ReserveClaimInput): Promise<Cl
   } catch {
     throw new ClaimRejectedError('invalid_signature', 'public key is not usable')
   }
+
+  // The request is now proven to come from the wallet that will be paid. Only
+  // authenticated requests may consume the per-drop claim budget (finding 8);
+  // everything above this line is charged to the per-IP and per-wallet limiters
+  // instead, which are the ones an attacker cannot aim at someone else's drop.
+  if (o.onAuthenticated) await o.onAuthenticated()
 
   const scope = claimIdemScope(o.publicId)
   const keyHash = idemKeyHash(scope, o.idemKey)

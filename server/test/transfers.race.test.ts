@@ -3,12 +3,14 @@ import { KeyPair } from '@nimiq/core'
 import pg from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { FakeChain } from '../src/chain/fake'
-import { nimiqChainFromEnv } from '../src/chain/nimiq'
+import { NimiqChain, nimiqChainFromEnv } from '../src/chain/nimiq'
 import { MEMO_MAX_BYTES, type ChainClient } from '../src/chain/types'
+import { FINALITY_DEPTH_FLOOR_BLOCKS, validityWindowBlocks } from '../src/config'
 import { migrate } from '../src/db/migrate'
 import type { AlertKind, Alerts } from '../src/services/alerts'
 import { issueChallenge, reserveClaim } from '../src/services/claims'
 import { createDraft, submitFunding } from '../src/services/drops'
+import { NetworkMismatchError, ensureNetworkBinding } from '../src/services/solvency'
 import {
   CLAIM_MEMO,
   WORKER_LOCK_ID,
@@ -17,7 +19,6 @@ import {
   reconcileOnStartup,
   releaseWorkerLock,
   runWorkerTick,
-  validityWindowBlocks,
   withWorkerLock,
 } from '../src/services/transfers'
 import {
@@ -260,16 +261,33 @@ interface AttemptRow {
   observed_height: string | null
   confirmed_height: string | null
   last_error: string | null
+  absent_checks: number
+  first_absent_at: Date | null
 }
 
 async function readAttempts(transferId: string): Promise<AttemptRow[]> {
   const { rows } = await pool.query<AttemptRow>(
     `SELECT id, sequence, state, encode(raw_signed_tx, 'hex') AS raw_hex, tx_hash, fee_luna,
-            validity_start_height, observed_height, confirmed_height, last_error
+            validity_start_height, observed_height, confirmed_height, last_error,
+            absent_checks, first_absent_at
      FROM transaction_attempts WHERE transfer_id = $1 ORDER BY sequence`,
     [transferId],
   )
   return rows
+}
+
+/**
+ * Age the absence series so the 5-minute spacing rule is satisfiable in a test
+ * that runs in milliseconds. Only the START of the series is moved — the number
+ * of observations is left exactly as the worker recorded it.
+ */
+async function ageAbsenceSeries(transferId: string, interval: string): Promise<void> {
+  await pool.query(
+    `UPDATE transaction_attempts
+     SET first_absent_at = now() - $2::interval
+     WHERE transfer_id = $1 AND first_absent_at IS NOT NULL`,
+    [transferId, interval],
+  )
 }
 
 async function readClaimState(claimId: string): Promise<string> {
@@ -345,9 +363,11 @@ describe.skipIf(!hasDb)('transfer worker crash windows (real Postgres)', () => {
        SET paused = false,
            max_live_principal_luna = 10000000,
            configured_fee_reserve_luna = ${FEE_FLOAT},
+           operator_float_luna = ${FEE_FLOAT},
            reconciled_confirmed_balance_luna = NULL,
            last_reconciled_height = NULL,
-           last_reconciled_at = NULL
+           last_reconciled_at = NULL,
+           network = NULL
        WHERE singleton`,
     )
     chain = newChain()
@@ -744,6 +764,54 @@ describe.skipIf(!hasDb)('transfer worker crash windows (real Postgres)', () => {
     }
   })
 
+  it('NimiqChain takes its finality depth from the floored config, and only tests may lower it', () => {
+    const savedDepth = process.env.NIMIQ_FINALITY_DEPTH
+    const custodyPrivateKeyHex = KeyPair.generate().privateKey.toHex()
+    const options = { network: 'TestAlbatross', custodyPrivateKeyHex } as const
+    try {
+      // An environment that tries to shorten finality is refused at construction.
+      process.env.NIMIQ_FINALITY_DEPTH = '1'
+      expect(() => new NimiqChain(options)).toThrow(/NIMIQ_FINALITY_DEPTH/)
+      process.env.NIMIQ_FINALITY_DEPTH = '63'
+      expect(() => new NimiqChain(options)).toThrow(/NIMIQ_FINALITY_DEPTH/)
+
+      // Unset means the floor, and the environment may still raise it.
+      delete process.env.NIMIQ_FINALITY_DEPTH
+      expect(new NimiqChain(options).finalityDepthBlocks()).toBe(FINALITY_DEPTH_FLOOR_BLOCKS)
+      process.env.NIMIQ_FINALITY_DEPTH = '128'
+      expect(new NimiqChain(options).finalityDepthBlocks()).toBe(128)
+
+      // The documented test-only seam is the ONLY way below the floor…
+      delete process.env.NIMIQ_FINALITY_DEPTH
+      expect(new NimiqChain({ ...options, finalityDepthOverride: 3 }).finalityDepthBlocks()).toBe(3)
+      // …and it is not reachable through the entrypoints' constructor.
+      process.env.NIMIQ_NETWORK = 'TestAlbatross'
+      process.env.CUSTODY_PRIVATE_KEY_HEX = custodyPrivateKeyHex
+      expect(nimiqChainFromEnv({ finalityDepthOverride: 3 }).finalityDepthBlocks()).toBe(
+        FINALITY_DEPTH_FLOOR_BLOCKS,
+      )
+    } finally {
+      delete process.env.CUSTODY_PRIVATE_KEY_HEX
+      if (savedDepth === undefined) delete process.env.NIMIQ_FINALITY_DEPTH
+      else process.env.NIMIQ_FINALITY_DEPTH = savedDepth
+    }
+  })
+
+  it('the validity window seam shortens only what a test hands it', async () => {
+    const attempt = { txHash: 'fake-nothing-here', validityStartHeight: 1_000 }
+    chain.setHead(1_100)
+
+    // 7200 blocks of window: at head 1100 the deadline is nowhere near.
+    expect(await evaluateProvenDead(chain, attempt)).toMatchObject({ windowPast: false })
+    // The same head against a test-injected 50-block window is past it. Only a
+    // test can do this — no environment variable reaches the same place.
+    expect(await evaluateProvenDead(chain, attempt, undefined, { windowBlocks: 50 })).toMatchObject({
+      windowPast: true,
+      absent: true,
+      provenDead: true,
+    })
+  })
+
   it('pause stops the money paths and unpause releases them, both reporting controls', async () => {
     const payout = await queuedPayout()
 
@@ -800,12 +868,92 @@ describe.skipIf(!hasDb)('transfer worker crash windows (real Postgres)', () => {
     expect((await readAttempts(payout.transferId))[0].state).toBe('signed')
   })
 
-  it('replace succeeds once proven dead, with recipient and amount taken from the intent', async () => {
+  // ---- SUSTAINED ABSENCE (G1 review finding 2) ---------------------------------
+
+  /**
+   * Sign one attempt whose bytes never reached the network, then move the head
+   * past its validity window. From here the ONLY thing standing between an
+   * operator and a second payment is the absence series.
+   */
+  async function deadLookingAttempt(): Promise<{ payout: QueuedPayout; attempt: AttemptRow }> {
     const payout = await queuedPayout()
     chain.failNextBroadcast('timeout')
     await runWorkerTick(pool, chain, alerts)
-    const [first] = await readAttempts(payout.transferId)
-    chain.setHead(Number(first.validity_start_height) + validityWindowBlocks() + 1)
+    const [attempt] = await readAttempts(payout.transferId)
+    chain.setHead(Number(attempt.validity_start_height) + validityWindowBlocks() + 1)
+    return { payout, attempt }
+  }
+
+  it('records absence as a series, and one observation never authorizes a replacement', async () => {
+    const { payout } = await deadLookingAttempt()
+
+    // Nothing has looked yet: no observations, no series.
+    let [row] = await readAttempts(payout.transferId)
+    expect(row.absent_checks).toBe(0)
+    expect(row.first_absent_at).toBeNull()
+
+    await reconcileOnStartup(pool, chain, alerts)
+    ;[row] = await readAttempts(payout.transferId)
+    expect(row.absent_checks).toBe(1)
+    expect(row.first_absent_at).not.toBeNull()
+
+    // One not-found answer is one node's opinion. Even with the window provably
+    // past — the other half of the old two-part proof — replace must refuse.
+    await expect(replaceTransfer(pool, chain, alerts, payout.transferId)).rejects.toBeInstanceOf(
+      ReplaceRefusedError,
+    )
+    expect((await readAttempts(payout.transferId))[0].state).toBe('signed')
+    expect(custodyPayments()).toHaveLength(0)
+
+    // A second observation taken in the same instant is not evidence either:
+    // the series has to be old enough that a slow node would have caught up.
+    await reconcileOnStartup(pool, chain, alerts)
+    expect((await readAttempts(payout.transferId))[0].absent_checks).toBe(2)
+    await expect(replaceTransfer(pool, chain, alerts, payout.transferId)).rejects.toBeInstanceOf(
+      ReplaceRefusedError,
+    )
+    expect(custodyPayments()).toHaveLength(0)
+  })
+
+  it('a single sighting resets the series, and the count starts again from zero', async () => {
+    const { payout, attempt } = await deadLookingAttempt()
+
+    await reconcileOnStartup(pool, chain, alerts)
+    await reconcileOnStartup(pool, chain, alerts)
+    await ageAbsenceSeries(payout.transferId, '10 minutes')
+    expect((await readAttempts(payout.transferId))[0].absent_checks).toBe(2)
+
+    // The transaction was in a mempool we could not see all along, and now the
+    // chain shows it. Everything the absence series claimed is void.
+    await chain.broadcast(attempt.raw_hex)
+    await reconcileOnStartup(pool, chain, alerts)
+
+    const [seen] = await readAttempts(payout.transferId)
+    expect(seen.absent_checks, 'a sighting must void the whole series').toBe(0)
+    expect(seen.first_absent_at).toBeNull()
+    await expect(replaceTransfer(pool, chain, alerts, payout.transferId)).rejects.toBeInstanceOf(
+      ReplaceRefusedError,
+    )
+
+    // Even after a reorg takes it away again the count restarts at one, so the
+    // operator cannot inherit credit for observations made before the sighting.
+    expect(chain.removeTx(attempt.tx_hash)).toBe(true)
+    await reconcileOnStartup(pool, chain, alerts)
+    expect((await readAttempts(payout.transferId))[0].absent_checks).toBe(1)
+    await expect(replaceTransfer(pool, chain, alerts, payout.transferId)).rejects.toBeInstanceOf(
+      ReplaceRefusedError,
+    )
+    expect(custodyPayments()).toHaveLength(0)
+  })
+
+  it('replace succeeds once proven dead, with recipient and amount taken from the intent', async () => {
+    const { payout, attempt: first } = await deadLookingAttempt()
+
+    // The full proof: window past, two recorded absences, a series older than
+    // five minutes, and a fresh lookup that is still absent.
+    await reconcileOnStartup(pool, chain, alerts)
+    await reconcileOnStartup(pool, chain, alerts)
+    await ageAbsenceSeries(payout.transferId, '6 minutes')
 
     const result = await replaceTransfer(pool, chain, alerts, payout.transferId)
 
@@ -827,6 +975,94 @@ describe.skipIf(!hasDb)('transfer worker crash windows (real Postgres)', () => {
     expect(payments).toHaveLength(1)
     expect(payments[0].recipient).toBe(payout.recipient)
     expect(payments[0].valueLuna).toBe(AMOUNT_EACH)
+  })
+
+  // ---- NETWORK BINDING (G1 review finding 6) -----------------------------------
+
+  async function readBoundNetwork(): Promise<string | null> {
+    const { rows } = await pool.query<{ network: string | null }>(
+      'SELECT network FROM custody_controls WHERE singleton',
+    )
+    return rows[0].network
+  }
+
+  it('stamps the network at first use and never restamps it', async () => {
+    expect(await readBoundNetwork(), 'a fresh database is unbound').toBeNull()
+
+    expect(await ensureNetworkBinding(pool, chain)).toBe('TestAlbatross')
+    expect(await readBoundNetwork()).toBe('TestAlbatross')
+
+    // Idempotent, and the stamp is what later boots are compared against.
+    expect(await ensureNetworkBinding(pool, chain)).toBe('TestAlbatross')
+    expect(await readBoundNetwork()).toBe('TestAlbatross')
+  })
+
+  it('refuses every chain-touching recovery command on a network mismatch, before touching the chain', async () => {
+    const payout = await queuedPayout()
+    await ensureNetworkBinding(pool, chain) // bound to TestAlbatross
+
+    // A mainnet process pointed at the testnet database. Every chain method
+    // throws, so any command that reaches the chain at all fails this test
+    // rather than reporting a mismatch.
+    const mainnet = new FakeChain({ custody: CUSTODY, finalityDepth: FINALITY_DEPTH, network: 'MainAlbatross' })
+    const untouchable = chainWith(mainnet, {
+      headHeight: async () => {
+        throw new Error('the chain must not be touched on a network mismatch')
+      },
+      getTransaction: async () => {
+        throw new Error('the chain must not be touched on a network mismatch')
+      },
+      confirmedBalanceLuna: async () => {
+        throw new Error('the chain must not be touched on a network mismatch')
+      },
+      buildSignedBasic: async () => {
+        throw new Error('the chain must not be touched on a network mismatch')
+      },
+      broadcast: async () => {
+        throw new Error('the chain must not be touched on a network mismatch')
+      },
+    })
+
+    await expect(ensureNetworkBinding(pool, untouchable)).rejects.toBeInstanceOf(NetworkMismatchError)
+    await expect(
+      resumeTransfer(pool, untouchable, alerts, payout.transferId),
+    ).rejects.toBeInstanceOf(NetworkMismatchError)
+    await expect(
+      replaceTransfer(pool, untouchable, alerts, payout.transferId),
+    ).rejects.toBeInstanceOf(NetworkMismatchError)
+    await expect(depositReport(pool, untouchable)).rejects.toBeInstanceOf(NetworkMismatchError)
+
+    // Nothing moved, and the binding was not rewritten by the attempt.
+    expect(await readBoundNetwork()).toBe('TestAlbatross')
+    expect(await readAttempts(payout.transferId)).toHaveLength(0)
+    expect((await readTransfer(payout.transferId)).state).toBe('queued')
+  })
+
+  it('refuses to replace an attempt whose stored bytes were signed for another network', async () => {
+    const { payout } = await deadLookingAttempt()
+    await reconcileOnStartup(pool, chain, alerts)
+    await reconcileOnStartup(pool, chain, alerts)
+    await ageAbsenceSeries(payout.transferId, '6 minutes')
+
+    // The database and the process agree on MainAlbatross, so the binding guard
+    // passes — but the stored attempt's own bytes say TestAlbatross, and bytes
+    // that could never have been included here prove nothing by being absent.
+    await pool.query(`UPDATE custody_controls SET network = 'MainAlbatross' WHERE singleton`)
+    const mainnet = new FakeChain({
+      custody: CUSTODY,
+      finalityDepth: FINALITY_DEPTH,
+      network: 'MainAlbatross',
+      headHeight: await chain.headHeight(),
+    })
+
+    const err = await replaceTransfer(pool, mainnet, alerts, payout.transferId).then(
+      () => null,
+      (e: unknown) => e,
+    )
+    expect(err).toBeInstanceOf(ReplaceRefusedError)
+    expect((err as Error).message).toMatch(/signed for TestAlbatross/)
+    expect(await readAttempts(payout.transferId)).toHaveLength(1)
+    expect(custodyPayments()).toHaveLength(0)
   })
 
   // ---- deposit reconciliation report ------------------------------------------

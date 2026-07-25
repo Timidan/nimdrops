@@ -11,6 +11,7 @@ import {
   getPublic,
   submitFunding,
 } from '../src/services/drops'
+import { gcDrafts } from '../src/services/expiry'
 import { CapExceededError, outstandingPrincipalLuna } from '../src/services/solvency'
 // Side-effect import: installs the int8-as-string parser so BIGINT luna never
 // passes through a lossy JS number. This suite builds its own pool, so it still
@@ -119,12 +120,24 @@ async function readDrop(publicId: string) {
   return rows[0]
 }
 
-async function setControls(o: { paused?: boolean; capLuna?: bigint; feeReserveLuna?: bigint }) {
+async function setControls(o: {
+  paused?: boolean
+  capLuna?: bigint
+  feeReserveLuna?: bigint
+  /** Operator-attested float; the ledger credit the fee reserve is spent from. */
+  operatorFloatLuna?: bigint
+}) {
   await pool.query(
     `UPDATE custody_controls
-     SET paused = $1, max_live_principal_luna = $2, configured_fee_reserve_luna = $3
+     SET paused = $1, max_live_principal_luna = $2, configured_fee_reserve_luna = $3,
+         operator_float_luna = $4
      WHERE singleton`,
-    [o.paused ?? false, (o.capLuna ?? 10_000_000n).toString(), (o.feeReserveLuna ?? FEE_FLOAT).toString()],
+    [
+      o.paused ?? false,
+      (o.capLuna ?? 10_000_000n).toString(),
+      (o.feeReserveLuna ?? FEE_FLOAT).toString(),
+      (o.operatorFloatLuna ?? FEE_FLOAT).toString(),
+    ],
   )
 }
 
@@ -440,6 +453,61 @@ describe.skipIf(!hasDb)('drop drafts and exact funding activation (real Postgres
     expect(pub.expiresAt?.getTime()).toBe(expires)
 
     expect(await outstandingPrincipalLuna(pool)).toBe(PRINCIPAL)
+  })
+
+  // ---- GC / activation race (G1 review finding 7) ------------------------------
+
+  it('activates a draft that draft GC cancelled while its funding was being verified', async () => {
+    const d = await draft()
+    const hash = fund(d.publicId)
+    finalize()
+
+    // The exact race: the sponsor's transaction is on chain and final, and the
+    // 24-hour collector fires on the draft before `submitFunding` reaches its
+    // activation transaction. GC's own guards are intact — the drop is still
+    // `awaiting_funding` with no recorded hash — so nothing here is a GC bug.
+    await pool.query(`UPDATE drops SET created_at = now() - interval '25 hours' WHERE public_id = $1`, [
+      d.publicId,
+    ])
+    expect(await gcDrafts(pool)).toBe(1)
+    expect((await readDrop(d.publicId)).state).toBe('cancelled')
+
+    // Verified money must not be stranded in a cancelled drop: the full §7
+    // predicate still passes, so the drop comes back to life.
+    const pub = await submitFunding(pool, chain, { publicId: d.publicId, txHash: hash })
+
+    expect(pub.state).toBe('live')
+    const row = await readDrop(d.publicId)
+    expect(row.funding_tx_hash).toBe(hash)
+    expect(row.creator_address).toBe(SPONSOR)
+    expect(row.expires_at).not.toBeNull()
+    expect(await outstandingPrincipalLuna(pool)).toBe(PRINCIPAL)
+  })
+
+  it('does not resurrect a cancelled drop for a transaction that fails any predicate', async () => {
+    const d = await draft()
+    // Right drop, one luna short: reactivation is not a second chance to be
+    // approximately right.
+    chain.deposit({
+      hash: 'short-funding',
+      sender: SPONSOR,
+      recipient: CUSTODY,
+      valueLuna: PRINCIPAL - 1n,
+      dataUtf8: `ND1:${d.publicId}`,
+      includedHeight: FUND_HEIGHT,
+    })
+    finalize()
+    await pool.query(`UPDATE drops SET created_at = now() - interval '25 hours' WHERE public_id = $1`, [
+      d.publicId,
+    ])
+    expect(await gcDrafts(pool)).toBe(1)
+
+    await expectRejection(
+      submitFunding(pool, chain, { publicId: d.publicId, txHash: 'short-funding' }),
+      'wrong_amount',
+    )
+    expect((await readDrop(d.publicId)).state).toBe('cancelled')
+    expect(await outstandingPrincipalLuna(pool)).toBe(0n)
   })
 
   it('is idempotent: the same submitFunding call twice returns the same result', async () => {

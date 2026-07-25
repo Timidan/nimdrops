@@ -21,9 +21,33 @@
 -- double-payment this column exists to prevent. After this migration every
 -- insert must state the height explicitly.
 --
--- Pre-existing rows are backfilled with 0. That is safe here only because no
--- deployment exists yet (see server/spike/g0-evidence.md §7): the sole rows are
--- local test artifacts, never money.
+-- GUARD (G1 review review finding 9). The paragraph above used to end "pre-existing
+-- rows are backfilled with 0, which is safe because no deployment exists yet".
+-- That safety argument is true of THIS repository and of nothing else: run
+-- against a 001-era database that does have attempt rows, the backfill gives
+-- every one of them validity_start_height = 0, whose window
+-- (0 + 7200) is past by construction at any real head. `recover.ts replace`
+-- would then read those live attempts as provably dead and sign a second
+-- payment for each. So the migration refuses rather than assumes.
+--
+-- Fresh deploys are unaffected: an empty table passes the check and the ALTER
+-- runs exactly as before. A non-empty one gets a loud, actionable failure and
+-- an operator who must state the real heights before proceeding.
+DO $$
+DECLARE
+  existing BIGINT;
+BEGIN
+  SELECT count(*) INTO existing FROM transaction_attempts;
+  IF existing > 0 THEN
+    RAISE EXCEPTION
+      'refusing to backfill validity_start_height = 0 for % existing transaction_attempts row(s): '
+      'a zero window reads as "provably dead" at any real head and would authorise a replacement '
+      'payment for an attempt that may still land. Backfill the true heights by hand first.',
+      existing;
+  END IF;
+END
+$$;
+
 ALTER TABLE transaction_attempts
   ADD COLUMN validity_start_height BIGINT NOT NULL DEFAULT 0;
 

@@ -27,6 +27,12 @@ export type FakeNetwork = 'TestAlbatross' | 'MainAlbatross'
 
 export interface FakeChainOptions {
   custody: string
+  /**
+   * TEST SEAM (G1 review finding 5): an explicit, unfloored depth. `FakeChain`
+   * is unreachable from every production entrypoint, so a small value here can
+   * only ever shorten a test — `NimiqChain` reads the floored
+   * `config.finalityDepthBlocks()` instead.
+   */
   finalityDepth: number
   network?: FakeNetwork
   headHeight?: number
@@ -62,6 +68,12 @@ interface SignedPayload {
   dataUtf8: string | null
   validityStartHeight: number
   feeLuna: string
+  /**
+   * The network these bytes were signed for, mirroring the real transaction's
+   * network id byte. `recover.ts` reads it back out of the stored attempt to
+   * refuse a replacement whose bytes belong to another chain (finding 6).
+   */
+  network: FakeNetwork
   /** per-instance account nonce: two otherwise identical builds are distinct txs, as on a real chain */
   nonce: number
 }
@@ -74,6 +86,7 @@ function canonical(p: SignedPayload): string {
     p.dataUtf8,
     p.validityStartHeight,
     p.feeLuna,
+    p.network,
     p.nonce,
   ])
 }
@@ -156,6 +169,7 @@ export class FakeChain implements ChainClient {
       dataUtf8: o.dataUtf8 ?? null,
       validityStartHeight: o.validityStartHeight,
       feeLuna: this.feeLuna.toString(),
+      network: this.net,
       nonce: this.nonce++,
     }
     const txHash = hashPayload(payload)
@@ -214,6 +228,20 @@ export class FakeChain implements ChainClient {
   /** Reorg simulation: a tx that was visible disappears before finality. */
   removeTx(hash: string): boolean {
     return this.txs.delete(hash)
+  }
+
+  /**
+   * The network a stored signed payload was built for — the fake's stand-in for
+   * the real transaction's network id byte (finding 6). Returns `null` for
+   * bytes this fake did not produce, which callers must treat as "unknown",
+   * never as a match.
+   */
+  rawTxNetwork(rawTxHex: string): FakeNetwork | null {
+    try {
+      return this.decode(rawTxHex).network ?? null
+    } catch {
+      return null
+    }
   }
 
   /** Every tx currently on chain, in insertion order. */

@@ -513,9 +513,6 @@ export function makeApp(deps: AppDeps): Hono {
 
   app.post('/api/drops/:publicId/claims', async (c) => {
     const publicId = requirePublicId(c)
-    // Per-drop limiter first, so a flood cannot make the server do real work
-    // (JSON parsing, Ed25519 verification, a database round trip) per request.
-    enforce(dropClaimBucket, publicId)
     const idemKey = requireIdemKey(c)
     const body = await readJsonObject(c)
     only(body, ['challengeId', 'publicKey', 'signature'])
@@ -537,6 +534,13 @@ export function makeApp(deps: AppDeps): Hono {
       signatureHex,
       idemKey,
       requestHash: requestHash(scope, { challengeId, publicKey: publicKeyHex, signature: signatureHex }),
+      // G1 review finding 8: the per-drop bucket is charged only AFTER the
+      // wallet signature verifies, and before any reservation work. Charging it
+      // up front made a targeted lockout cost nothing — ten junk requests a
+      // minute at one drop id and its real claimants got 429s while the
+      // attacker never signed anything. The per-IP limiter (which junk requests
+      // DO pay) is what bounds the work such a flood can cause.
+      onAuthenticated: () => enforce(dropClaimBucket, publicId),
     })
 
     // 202: the slot is reserved and the payout intent is committed, but the

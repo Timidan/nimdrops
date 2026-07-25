@@ -1,5 +1,8 @@
 import { randomUUID } from 'node:crypto'
-import type { Pool } from 'pg'
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import pg, { type Pool } from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { migrate } from '../src/db/migrate'
 import { getPool } from '../src/db/pool'
@@ -145,6 +148,96 @@ describe.skipIf(!hasDb)('schema invariants (real Postgres)', () => {
     await expect(
       insertAttempt(pool, { transferId: t.id, sequence: 2, state: 'signed' }),
     ).resolves.toBeDefined()
+  })
+
+  /**
+   * G1 review finding 9. `002` backfills `validity_start_height = 0`, and a zero
+   * window is past at any real head — every pre-existing attempt would read as
+   * "provably dead" to the recovery CLI, which is permission to sign a second
+   * payment. The guard makes that impossible to do by accident: on an empty
+   * table (every fresh deploy) it is invisible, on a populated one it raises.
+   */
+  describe('migration 002 refuses to backfill a populated table', () => {
+    const GUARD_SCHEMA = 'schema_guard_test'
+    const MIGRATIONS = fileURLToPath(new URL('../src/db/migrations/', import.meta.url))
+
+    async function sql(name: string): Promise<string> {
+      return readFile(join(MIGRATIONS, name), 'utf8')
+    }
+
+    /** A private schema holding ONLY 001, i.e. a 001-era database. */
+    async function fresh001(): Promise<pg.Pool> {
+      const admin = new pg.Pool({ connectionString: process.env.DATABASE_URL })
+      await admin.query(`DROP SCHEMA IF EXISTS ${GUARD_SCHEMA} CASCADE`)
+      await admin.query(`CREATE SCHEMA ${GUARD_SCHEMA}`)
+      await admin.end()
+      const scoped = new pg.Pool({
+        connectionString: process.env.DATABASE_URL,
+        options: `-c search_path=${GUARD_SCHEMA},public`,
+      })
+      await scoped.query(await sql('001_core.sql'))
+      return scoped
+    }
+
+    async function dropGuardSchema(): Promise<void> {
+      const admin = new pg.Pool({ connectionString: process.env.DATABASE_URL })
+      await admin.query(`DROP SCHEMA IF EXISTS ${GUARD_SCHEMA} CASCADE`)
+      await admin.end()
+    }
+
+    it('applies cleanly to an empty 001 schema', async () => {
+      const scoped = await fresh001()
+      try {
+        await expect(scoped.query(await sql('002_attempt_validity_window.sql'))).resolves.toBeDefined()
+        const { rows } = await scoped.query<{ column_name: string }>(
+          `SELECT column_name FROM information_schema.columns
+           WHERE table_schema = $1 AND table_name = 'transaction_attempts'
+             AND column_name = 'validity_start_height'`,
+          [GUARD_SCHEMA],
+        )
+        expect(rows).toHaveLength(1)
+      } finally {
+        await scoped.end()
+        await dropGuardSchema()
+      }
+    })
+
+    it('raises rather than backfilling height 0 when attempts already exist', async () => {
+      const scoped = await fresh001()
+      try {
+        const d = await insertDrop(scoped, ok())
+        const c = await insertClaim(scoped, d.id, 0, 'NQ07 LEGACY')
+        const { rows } = await scoped.query<{ id: string }>(
+          `INSERT INTO outgoing_transfers (idempotency_key, purpose, drop_id, claim_id,
+             recipient_address, amount_luna, state)
+           VALUES ($1, 'payout', $2, $3, 'NQ07 RECIPIENT', 100, 'in_progress')
+           RETURNING id`,
+          [`payout:${randomUUID()}`, d.id, c.id],
+        )
+        // A 001-era attempt: real money in flight, no validity height column.
+        await scoped.query(
+          `INSERT INTO transaction_attempts (transfer_id, sequence, state, raw_signed_tx, tx_hash, fee_luna)
+           VALUES ($1, 1, 'broadcast', $2, $3, 0)`,
+          [rows[0].id, Buffer.from('00ff', 'hex'), randomUUID()],
+        )
+
+        await expect(scoped.query(await sql('002_attempt_validity_window.sql'))).rejects.toThrow(
+          /refusing to backfill validity_start_height/i,
+        )
+
+        // …and the schema is untouched, so an operator can fix it by hand.
+        const { rows: columns } = await scoped.query(
+          `SELECT column_name FROM information_schema.columns
+           WHERE table_schema = $1 AND table_name = 'transaction_attempts'
+             AND column_name = 'validity_start_height'`,
+          [GUARD_SCHEMA],
+        )
+        expect(columns).toHaveLength(0)
+      } finally {
+        await scoped.end()
+        await dropGuardSchema()
+      }
+    })
   })
 
   it('forbids two claims for one wallet in one drop and two claims in one slot', async () => {

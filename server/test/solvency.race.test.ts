@@ -9,6 +9,8 @@ import {
   PausedError,
   StaleReconciliationError,
   assertSolvent,
+  ledgerBalanceLuna,
+  ledgerMovementsLuna,
   lockControls,
   outstandingPrincipalLuna,
   pause,
@@ -114,13 +116,23 @@ async function insertTransfer(
 
 async function insertAttempt(
   db: Queryable,
-  o: { transferId: string; state: 'signed' | 'broadcast' | 'confirmed' | 'proven_dead' },
+  o: {
+    transferId: string
+    state: 'signed' | 'broadcast' | 'confirmed' | 'proven_dead'
+    feeLuna?: bigint
+  },
 ): Promise<void> {
   await db.query(
     `INSERT INTO transaction_attempts (
        transfer_id, sequence, state, raw_signed_tx, tx_hash, fee_luna, validity_start_height
-     ) VALUES ($1, 1, $2, $3, $4, 0, 1)`,
-    [o.transferId, o.state, Buffer.from('00ff', 'hex'), randomUUID()],
+     ) VALUES ($1, 1, $2, $3, $4, $5, 1)`,
+    [
+      o.transferId,
+      o.state,
+      Buffer.from('00ff', 'hex'),
+      randomUUID(),
+      (o.feeLuna ?? 0n).toString(),
+    ],
   )
 }
 
@@ -128,6 +140,13 @@ async function setControls(o: {
   paused?: boolean
   capLuna?: bigint
   feeReserveLuna?: bigint
+  /**
+   * Operator-attested float: custody money that is not any drop's funding.
+   * Since finding 4 this — not the chain balance — is what the invariant can
+   * spend, so it is the knob these tests turn to make custody rich or poor.
+   */
+  operatorFloatLuna?: bigint
+  /** Chain cross-check value only; `null` = never reconciled. */
   balanceLuna?: bigint | null
   /** how long ago the last reconciliation happened; `null` = never reconciled */
   reconciledAgoMs?: number | null
@@ -140,6 +159,7 @@ async function setControls(o: {
        max_live_principal_luna = $2,
        configured_fee_reserve_luna = $3,
        reconciled_confirmed_balance_luna = $4,
+       operator_float_luna = $6,
        last_reconciled_height = CASE WHEN $5::float8 IS NULL THEN NULL ELSE 1000 END,
        last_reconciled_at = CASE WHEN $5::float8 IS NULL THEN NULL
                                  ELSE now() - make_interval(secs => $5::float8 / 1000) END
@@ -150,6 +170,7 @@ async function setControls(o: {
       (o.feeReserveLuna ?? 100_000n).toString(),
       balance === null ? null : balance.toString(),
       agoMs,
+      (o.operatorFloatLuna ?? 10_000_000n).toString(),
     ],
   )
 }
@@ -259,8 +280,10 @@ describe.skipIf(!hasDb)('solvency and custody controls (real Postgres)', () => {
     }
   })
 
-  it('rejects when the reconciled balance cannot cover principal plus the fee reserve', async () => {
-    await setControls({ balanceLuna: 550n, feeReserveLuna: 100n })
+  it('rejects when the ledger balance cannot cover principal plus the fee reserve', async () => {
+    // Float 50 backs a reserve of 100: the drop's own 500 of principal is
+    // matched exactly by its funding credit, so the shortfall is the reserve.
+    await setControls({ operatorFloatLuna: 50n, feeReserveLuna: 100n })
     await insertDrop(pool, { claimCount: 5, amountEachLuna: 100n })
 
     const client = await pool.connect()
@@ -272,6 +295,254 @@ describe.skipIf(!hasDb)('solvency and custody controls (real Postgres)', () => {
     } finally {
       client.release()
     }
+
+    // Top the float up to the reserve and the same check passes.
+    await setControls({ operatorFloatLuna: 100n, feeReserveLuna: 100n })
+    const ok = await pool.connect()
+    try {
+      await ok.query('BEGIN')
+      const controls = await lockControls(ok)
+      await expect(assertSolvent(ok, controls, 0n)).resolves.toBeUndefined()
+      await ok.query('ROLLBACK')
+    } finally {
+      ok.release()
+    }
+  })
+
+  // ---- G1 review finding 3: addLuna belongs in the balance requirement --------
+
+  it('refuses an activation whose new principal is not covered once prior fees are spent', async () => {
+    // The exact the reviewer scenario. The operator float is exactly the fee reserve,
+    // one earlier payout consumed a fee of f out of it, and a sponsor's new
+    // principal F is now verified and being activated.
+    const FEE = 30n
+    const RESERVE = 100n
+    await setControls({ operatorFloatLuna: RESERVE, feeReserveLuna: RESERVE })
+
+    // A prior drop that paid out in full, consuming FEE of custody money.
+    const prior = await insertDrop(pool, { claimCount: 5, amountEachLuna: 100n, state: 'settled' })
+    const claim = await insertClaim(pool, prior.id, 0)
+    const paid = await insertTransfer(pool, {
+      purpose: 'payout',
+      dropId: prior.id,
+      claimId: claim.id,
+      amountLuna: 500n,
+      state: 'confirmed',
+    })
+    await insertAttempt(pool, { transferId: paid.id, state: 'confirmed', feeLuna: FEE })
+
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      const controls = await lockControls(client)
+
+      // Before the fix this passed: the check only asked whether the balance
+      // covered the CURRENT outstanding principal plus the reserve, never the
+      // principal the activation was about to add. The fee that was already
+      // spent out of the reserve is the whole gap.
+      await expect(assertSolvent(client, controls, 500n)).rejects.toBeInstanceOf(InsolventError)
+      await client.query('ROLLBACK')
+    } finally {
+      client.release()
+    }
+
+    // Replace exactly what the fee took and the activation is allowed again.
+    await setControls({ operatorFloatLuna: RESERVE + FEE, feeReserveLuna: RESERVE })
+    const after = await pool.connect()
+    try {
+      await after.query('BEGIN')
+      const controls = await lockControls(after)
+      await expect(assertSolvent(after, controls, 500n)).resolves.toBeUndefined()
+      await after.query('ROLLBACK')
+    } finally {
+      after.release()
+    }
+  })
+
+  // ---- G1 review finding 4: the invariant runs on the ledger, not the chain ---
+
+  it('derives the balance from finalized funding, payouts and fees', async () => {
+    await setControls({ operatorFloatLuna: 1_000n })
+    expect(await ledgerMovementsLuna(pool)).toBe(0n)
+
+    const drop = await insertDrop(pool, { claimCount: 5, amountEachLuna: 100n })
+    expect(await ledgerMovementsLuna(pool)).toBe(500n)
+
+    const claim = await insertClaim(pool, drop.id, 0)
+    const transfer = await insertTransfer(pool, {
+      purpose: 'payout',
+      dropId: drop.id,
+      claimId: claim.id,
+      amountLuna: 100n,
+      state: 'in_progress',
+    })
+    // Broadcast is not paid: neither the principal nor its fee has left the
+    // ledger yet, exactly as `outstandingPrincipalLuna` still owes it.
+    await insertAttempt(pool, { transferId: transfer.id, state: 'broadcast', feeLuna: 7n })
+    expect(await ledgerMovementsLuna(pool)).toBe(500n)
+
+    await pool.query(`UPDATE transaction_attempts SET state = 'confirmed' WHERE transfer_id = $1`, [
+      transfer.id,
+    ])
+    await pool.query(`UPDATE outgoing_transfers SET state = 'confirmed' WHERE id = $1`, [
+      transfer.id,
+    ])
+    expect(await ledgerMovementsLuna(pool)).toBe(500n - 100n - 7n)
+
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      const controls = await lockControls(client)
+      expect(await ledgerBalanceLuna(client, controls)).toBe(1_000n + 393n)
+      await client.query('ROLLBACK')
+    } finally {
+      client.release()
+    }
+  })
+
+  it('cannot be made solvent by a chain credit the books never accepted', async () => {
+    // Custody is genuinely short: the operator never funded the fee float, so
+    // nothing covers the configured reserve.
+    await setControls({
+      operatorFloatLuna: 0n,
+      feeReserveLuna: 100n,
+      balanceLuna: null,
+      reconciledAgoMs: null,
+    })
+    await insertDrop(pool, { claimCount: 5, amountEachLuna: 100n })
+
+    const chain = new FakeChain({ custody: CUSTODY, finalityDepth: 5 })
+    chain.deposit({
+      hash: 'operator-float',
+      sender: 'NQ07 OPERATOR',
+      recipient: CUSTODY,
+      valueLuna: 100n,
+      includedHeight: 1,
+    })
+    chain.deposit({
+      hash: 'accepted-funding',
+      sender: 'NQ07 SPONSOR',
+      recipient: CUSTODY,
+      valueLuna: 500n,
+      includedHeight: 2,
+    })
+    // A stranger's deposit that funds no drop. The old invariant read the chain
+    // balance, so this money counted as capacity for anyone.
+    chain.deposit({
+      hash: 'unrelated-deposit',
+      sender: 'NQ07 STRANGER',
+      recipient: CUSTODY,
+      valueLuna: 10_000n,
+      includedHeight: 3,
+    })
+    chain.setHead(50)
+    await reconcile(pool, chain)
+
+    const { rows } = await pool.query<{ balance: string }>(
+      'SELECT reconciled_confirmed_balance_luna AS balance FROM custody_controls',
+    )
+    expect(BigInt(rows[0].balance), 'the chain balance is still recorded').toBe(10_600n)
+
+    // That recorded balance is what the old invariant compared against, and
+    // 10_600 >= 500 + 100 would have passed. The ledger knows better: it counts
+    // one accepted funding transaction and an operator float of zero, so every
+    // money path stays closed.
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      const controls = await lockControls(client)
+      await expect(assertSolvent(client, controls, 0n)).rejects.toBeInstanceOf(InsolventError)
+      await expect(assertSolvent(client, controls, 500n)).rejects.toBeInstanceOf(InsolventError)
+      await client.query('ROLLBACK')
+    } finally {
+      client.release()
+    }
+
+    // The reorg that takes the phantom credit away changes nothing at all —
+    // which is the point: it was never spendable, so it cannot be lost, and the
+    // chain sitting above the ledger is normal rather than an alarm.
+    expect(chain.removeTx('unrelated-deposit')).toBe(true)
+    await reconcile(pool, chain)
+    const again = await pool.connect()
+    try {
+      await again.query('BEGIN')
+      const controls = await lockControls(again)
+      expect(controls.paused).toBe(false)
+      await expect(assertSolvent(again, controls, 0n)).rejects.toBeInstanceOf(InsolventError)
+      await again.query('ROLLBACK')
+    } finally {
+      again.release()
+    }
+  })
+
+  it('pauses and alerts when the chain holds LESS than the books claim', async () => {
+    const alerted: { alert: string; detail: Record<string, unknown> }[] = []
+    const alerts = {
+      async notify(alert: string, detail: Record<string, unknown>) {
+        alerted.push({ alert, detail })
+      },
+    }
+
+    // The books say 5000 of operator float; the chain has 600.
+    await setControls({ operatorFloatLuna: 5_000n })
+    const chain = new FakeChain({ custody: CUSTODY, finalityDepth: 5 })
+    chain.deposit({
+      hash: 'short-float',
+      sender: 'NQ07 OPERATOR',
+      recipient: CUSTODY,
+      valueLuna: 600n,
+      includedHeight: 1,
+    })
+    chain.setHead(20)
+
+    await reconcile(pool, chain, alerts)
+
+    const { rows } = await pool.query<{ paused: boolean; balance: string }>(
+      'SELECT paused, reconciled_confirmed_balance_luna AS balance FROM custody_controls',
+    )
+    expect(rows[0].paused, 'a shortfall must fail every money path closed').toBe(true)
+    expect(BigInt(rows[0].balance)).toBe(600n)
+
+    const insolvent = alerted.filter((a) => a.alert === 'insolvent')
+    expect(insolvent).toHaveLength(1)
+    // Both numbers, so the operator can see the size of the hole immediately.
+    expect(insolvent[0].detail).toMatchObject({
+      reason: 'chain_below_ledger',
+      chainBalanceLuna: '600',
+      ledgerBalanceLuna: '5000',
+      shortfallLuna: '4400',
+    })
+  })
+
+  it('does not mistake an in-flight payout for a shortfall', async () => {
+    await setControls({ operatorFloatLuna: 100n })
+    const drop = await insertDrop(pool, { claimCount: 5, amountEachLuna: 100n })
+    const claim = await insertClaim(pool, drop.id, 0)
+    const transfer = await insertTransfer(pool, {
+      purpose: 'payout',
+      dropId: drop.id,
+      claimId: claim.id,
+      amountLuna: 100n,
+      state: 'in_progress',
+    })
+    await insertAttempt(pool, { transferId: transfer.id, state: 'broadcast', feeLuna: 5n })
+
+    // The chain has already debited the payment and its fee; our ledger waits
+    // for finality. That gap is expected, not a shortfall.
+    const chain = new FakeChain({ custody: CUSTODY, finalityDepth: 5 })
+    chain.deposit({
+      hash: 'float-and-funding',
+      sender: 'NQ07 OPERATOR',
+      recipient: CUSTODY,
+      valueLuna: 600n - 105n,
+      includedHeight: 1,
+    })
+    chain.setHead(20)
+
+    await reconcile(pool, chain)
+
+    const { rows } = await pool.query<{ paused: boolean }>('SELECT paused FROM custody_controls')
+    expect(rows[0].paused).toBe(false)
   })
 
   it('serializes two concurrent check-then-reserve paths on the controls lock', async () => {
@@ -332,7 +603,7 @@ describe.skipIf(!hasDb)('solvency and custody controls (real Postgres)', () => {
   })
 
   it('reconciles chain balance and height, clearing staleness', async () => {
-    await setControls({ reconciledAgoMs: null, balanceLuna: null })
+    await setControls({ reconciledAgoMs: null, balanceLuna: null, operatorFloatLuna: 0n })
     const chain = new FakeChain({ custody: CUSTODY, finalityDepth: 5 })
     chain.deposit({
       hash: 'f1',

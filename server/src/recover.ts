@@ -3,13 +3,22 @@ import type { Pool, PoolClient } from 'pg'
 import { nimiqChainFromEnv } from './chain/nimiq'
 import type { ChainClient, ChainTx } from './chain/types'
 import { closePool, getPool } from './db/pool'
-import { errorMessage } from './config'
+import { type NetworkName, errorMessage } from './config'
 import { type Alerts, consoleAlerts } from './services/alerts'
 import { MEMO_PREFIX } from './services/drops'
-import { type Controls, pause, readControls, unpause } from './services/solvency'
 import {
+  type Controls,
+  ensureNetworkBinding,
+  pause,
+  readControls,
+  unpause,
+} from './services/solvency'
+import {
+  ABSENCE_MIN_OBSERVATIONS,
+  ABSENCE_MIN_SPAN_MS,
   type StoredAttempt,
   type TransferIntent,
+  type WindowOptions,
   broadcastStored,
   evaluateProvenDead,
   loadOpenAttempts,
@@ -91,6 +100,11 @@ interface LatestAttempt {
   state: 'signed' | 'broadcast' | 'confirmed' | 'proven_dead'
   txHash: string
   validityStartHeight: number
+  rawTxHex: string
+  /** Consecutive not-found lookups recorded by the worker (finding 2). */
+  absentChecks: number
+  /** When the current absence series started; `null` when the series is broken. */
+  firstAbsentAt: Date | null
 }
 
 async function loadLatestAttempt(
@@ -104,8 +118,12 @@ async function loadLatestAttempt(
     state: LatestAttempt['state']
     tx_hash: string
     validity_start_height: string
+    raw_hex: string
+    absent_checks: number
+    first_absent_at: Date | null
   }>(
-    `SELECT id, sequence, state, tx_hash, validity_start_height
+    `SELECT id, sequence, state, tx_hash, validity_start_height,
+            encode(raw_signed_tx, 'hex') AS raw_hex, absent_checks, first_absent_at
      FROM transaction_attempts
      WHERE transfer_id = $1
      ORDER BY sequence DESC
@@ -120,7 +138,26 @@ async function loadLatestAttempt(
     state: row.state,
     txHash: row.tx_hash,
     validityStartHeight: Number(row.validity_start_height),
+    rawTxHex: row.raw_hex,
+    absentChecks: Number(row.absent_checks),
+    firstAbsentAt: row.first_absent_at,
   }
+}
+
+/**
+ * Network of a stored signed transaction, when the chain client can tell us
+ * (finding 6). Not part of the frozen `ChainClient` interface: `NimiqChain`
+ * reads it off the deserialized transaction and `FakeChain` off its payload,
+ * but a client that cannot answer must not block recovery — the primary guard
+ * is `custody_controls.network`, which every command checks unconditionally.
+ */
+interface NetworkDecoder {
+  rawTxNetwork(rawTxHex: string): NetworkName | null
+}
+
+function asNetworkDecoder(chain: ChainClient): NetworkDecoder | null {
+  const candidate = chain as ChainClient & Partial<NetworkDecoder>
+  return typeof candidate.rawTxNetwork === 'function' ? (candidate as NetworkDecoder) : null
 }
 
 // ---- resume -----------------------------------------------------------------------
@@ -148,6 +185,11 @@ export async function resumeTransfer(
   alerts: Alerts,
   transferId: string,
 ): Promise<ResumeResult> {
+  // Every chain-touching command binds first (finding 6): reconciling a mainnet
+  // attempt against a testnet node would rebroadcast bytes into the void and
+  // report "waiting" forever.
+  await ensureNetworkBinding(pool, chain)
+
   const intent = await loadIntent(pool, transferId)
   if (intent.state === 'confirmed') {
     return { transferId, action: 'noop', intentState: intent.state }
@@ -211,12 +253,23 @@ export interface ReplaceResult {
  * same immutable intent.
  *
  * This is the only function in the codebase that may spend the same intent's
- * money twice, so it refuses unless both halves of the proof hold right now,
+ * money twice, so it refuses unless EVERY part of the proof holds right now,
  * re-checked against the chain rather than trusted from an earlier reconcile:
  *
- *   - the hash is ABSENT (a lookup error is not absence — it refuses), and
+ *   - the database is bound to the network this process is talking to, and the
+ *     dead attempt's own bytes were signed for that same network (finding 6),
  *   - the head is strictly past `validity_start_height + window`, so the signed
- *     bytes can never be included by anyone, ever again.
+ *     bytes can never be included by anyone, ever again,
+ *   - the worker recorded a SUSTAINED absence — at least
+ *     `ABSENCE_MIN_OBSERVATIONS` consecutive not-found lookups whose series is
+ *     at least `ABSENCE_MIN_SPAN_MS` old (finding 2), and
+ *   - a fresh live lookup, right now, is ALSO absent (a lookup error is not
+ *     absence — it refuses).
+ *
+ * The sustained-absence requirement is what a single not-found answer cannot
+ * give: one node behind by a block, or one pico-client that lost consensus
+ * mid-call, answers "not found" about a transaction that is on chain. Acting on
+ * one such answer pays twice.
  *
  * `signed`, `broadcast`, ambiguous, or already-confirmed prior attempts are all
  * refused. Both attempts stay in the table afterwards: the audit trail keeps
@@ -227,7 +280,12 @@ export async function replaceTransfer(
   chain: ChainClient,
   alerts: Alerts,
   transferId: string,
+  opts?: WindowOptions,
 ): Promise<ReplaceResult> {
+  // Before ANY chain action: a testnet process must not be able to reason about
+  // mainnet money (finding 6). Throws NetworkMismatchError.
+  await ensureNetworkBinding(pool, chain)
+
   const intent = await loadIntent(pool, transferId)
   if (intent.state === 'confirmed') {
     throw new ReplaceRefusedError(`transfer ${transferId} is already confirmed`)
@@ -245,11 +303,23 @@ export async function replaceTransfer(
     )
   }
 
+  // The bytes we are about to declare dead must themselves belong to this
+  // network. A stored attempt signed with another network id could never have
+  // been included here, so "absent" would be trivially and misleadingly true.
+  const decoder = asNetworkDecoder(chain)
+  const signedFor = decoder ? decoder.rawTxNetwork(latest.rawTxHex) : null
+  if (signedFor !== null && signedFor !== chain.network()) {
+    throw new ReplaceRefusedError(
+      `attempt ${latest.txHash} was signed for ${signedFor} but this process runs against ` +
+        `${chain.network()}: its absence here proves nothing.`,
+    )
+  }
+
   const head = await chain.headHeight()
   let evidence: Record<string, unknown> = { alreadyProvenDead: true }
 
   if (latest.state !== 'proven_dead') {
-    const proof = await evaluateProvenDead(chain, latest, head)
+    const proof = await evaluateProvenDead(chain, latest, head, opts)
     if (proof.unknown) {
       throw new ReplaceRefusedError(
         `cannot prove attempt ${latest.txHash} is dead: chain lookup failed (${proof.lookupError}). ` +
@@ -267,7 +337,31 @@ export async function replaceTransfer(
           `validity deadline ${proof.deadlineHeight}. Absence alone is never proof of death.`,
       )
     }
-    evidence = { ...proof }
+
+    // Sustained absence (finding 2). `proof.absent` above is ONE lookup, taken
+    // just now; these two checks are the recorded series behind it.
+    const absenceAgeMs =
+      latest.firstAbsentAt === null ? 0 : Date.now() - latest.firstAbsentAt.getTime()
+    if (latest.absentChecks < ABSENCE_MIN_OBSERVATIONS || latest.firstAbsentAt === null) {
+      throw new ReplaceRefusedError(
+        `attempt ${latest.txHash} has only ${latest.absentChecks} recorded absence observation(s); ` +
+          `${ABSENCE_MIN_OBSERVATIONS} are required. One not-found answer is one node's opinion, ` +
+          'not proof. Let the worker keep reconciling and re-run.',
+      )
+    }
+    if (absenceAgeMs < ABSENCE_MIN_SPAN_MS) {
+      throw new ReplaceRefusedError(
+        `attempt ${latest.txHash} has been absent for only ${Math.round(absenceAgeMs / 1000)}s; ` +
+          `${ABSENCE_MIN_SPAN_MS / 1000}s of unbroken absence are required before it may be replaced.`,
+      )
+    }
+
+    evidence = {
+      ...proof,
+      absentChecks: latest.absentChecks,
+      firstAbsentAt: latest.firstAbsentAt.toISOString(),
+      absenceAgeMs,
+    }
   }
 
   const client = await pool.connect()
@@ -295,6 +389,17 @@ export async function replaceTransfer(
     const current = await loadLatestAttempt(client, transferId, true)
     if (!current || current.id !== latest.id) {
       throw new ReplaceRefusedError('a newer attempt appeared while we prepared — re-run')
+    }
+    // Re-read under the lock: a worker tick that SAW the transaction between our
+    // proof and this transaction resets the absence series, and that sighting
+    // outranks everything we decided a moment ago.
+    if (
+      current.state !== 'proven_dead' &&
+      (current.absentChecks < ABSENCE_MIN_OBSERVATIONS || current.firstAbsentAt === null)
+    ) {
+      throw new ReplaceRefusedError(
+        'the absence series was reset while we prepared — the chain has seen this attempt. Re-run.',
+      )
     }
     if (current.state === 'signed' || current.state === 'broadcast') {
       const updated = await client.query(
@@ -439,6 +544,8 @@ export async function depositReport(
   pool: Pool,
   chain: ChainClient,
 ): Promise<DepositReportResult> {
+  await ensureNetworkBinding(pool, chain)
+
   const source = asDepositSource(chain)
   if (!source) throw new DepositEnumerationUnavailableError()
 

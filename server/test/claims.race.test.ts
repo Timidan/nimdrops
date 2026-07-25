@@ -232,6 +232,7 @@ describe.skipIf(!hasDb)('claim reservation, idempotency and races (real Postgres
        SET paused = false,
            max_live_principal_luna = 10000000,
            configured_fee_reserve_luna = ${FEE_FLOAT},
+           operator_float_luna = ${FEE_FLOAT},
            reconciled_confirmed_balance_luna = NULL,
            last_reconciled_height = NULL,
            last_reconciled_at = NULL

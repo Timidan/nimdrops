@@ -1,6 +1,6 @@
 import type { Pool, PoolClient } from 'pg'
 import { MEMO_MAX_BYTES, type ChainClient } from '../chain/types'
-import { errorMessage } from '../config'
+import { errorMessage, validityWindowBlocks } from '../config'
 import type { Alerts } from './alerts'
 import {
   PausedError,
@@ -62,23 +62,35 @@ if (Buffer.byteLength(CLAIM_MEMO, 'utf8') > MEMO_MAX_BYTES) {
   throw new Error(`claim memo exceeds ${MEMO_MAX_BYTES} UTF-8 bytes`)
 }
 
-/** `Policy.TRANSACTION_VALIDITY_WINDOW_BLOCKS` on both Albatross networks (~2h). */
-export const DEFAULT_VALIDITY_WINDOW_BLOCKS = 7_200
+/**
+ * TEST SEAM (G1 review finding 1). Every function here that needs the validity
+ * window takes it as `opts.windowBlocks`, defaulting to `config.validityWindowBlocks()`
+ * — which is HARD FLOORED at 7200 and can only be raised by the environment.
+ *
+ * Production callers (`worker.ts`, `index.ts`, `recover.ts`) never pass the
+ * option, so a deployment cannot run with a window below the protocol constant
+ * no matter what its environment says. Tests that need a short window pass it
+ * explicitly through this parameter, which is unreachable from any entrypoint.
+ */
+export interface WindowOptions {
+  /** @internal test-only override; production reads the floored config. */
+  windowBlocks?: number
+}
+
+function windowOf(opts?: WindowOptions): number {
+  return opts?.windowBlocks ?? validityWindowBlocks()
+}
 
 /**
- * How long a transaction stays includable after its validity start height.
- * Read from the environment rather than hardcoded so a mainnet re-measurement
- * can change it without touching this logic.
+ * Sustained-absence rule for `proven_dead` (G1 review finding 2).
+ *
+ * A single not-found answer is one node's momentary opinion. Two of them, at
+ * least `ABSENCE_MIN_SPAN_MS` apart, with no sighting in between, is evidence.
+ * `recover.ts replace` requires both AND a validity window past AND a fresh
+ * live lookup that is still absent.
  */
-export function validityWindowBlocks(): number {
-  const raw = process.env.NIMIQ_VALIDITY_WINDOW_BLOCKS
-  if (raw === undefined || raw === '') return DEFAULT_VALIDITY_WINDOW_BLOCKS
-  const n = Number(raw)
-  if (!Number.isInteger(n) || n <= 0) {
-    throw new Error('NIMIQ_VALIDITY_WINDOW_BLOCKS must be a positive integer')
-  }
-  return n
-}
+export const ABSENCE_MIN_OBSERVATIONS = 2
+export const ABSENCE_MIN_SPAN_MS = 5 * 60_000
 
 /**
  * Do not rebroadcast the same bytes more often than this after an acknowledged
@@ -169,6 +181,10 @@ export interface OpenAttempt extends StoredAttempt {
   createdAt: Date
   transferState: string
   nextAttemptAt: Date | null
+  /** Consecutive not-found lookups; any sighting resets it to 0. */
+  absentChecks: number
+  /** When the current unbroken absence series started; `null` when not absent. */
+  firstAbsentAt: Date | null
 }
 
 interface OpenAttemptRow {
@@ -184,6 +200,8 @@ interface OpenAttemptRow {
   claim_id: string | null
   transfer_state: string
   next_attempt_at: Date | null
+  absent_checks: number
+  first_absent_at: Date | null
 }
 
 const OPEN_ATTEMPT_SELECT = `
@@ -196,6 +214,8 @@ const OPEN_ATTEMPT_SELECT = `
          a.validity_start_height,
          a.observed_height,
          a.created_at,
+         a.absent_checks,
+         a.first_absent_at,
          t.claim_id,
          t.state AS transfer_state,
          t.next_attempt_at
@@ -218,7 +238,41 @@ function toOpenAttempt(row: OpenAttemptRow): OpenAttempt {
     createdAt: row.created_at,
     transferState: row.transfer_state,
     nextAttemptAt: row.next_attempt_at,
+    absentChecks: Number(row.absent_checks),
+    firstAbsentAt: row.first_absent_at,
   }
+}
+
+/**
+ * Record one "the chain does not have this hash" observation (finding 2).
+ *
+ * `first_absent_at` is stamped ONCE per series (`COALESCE`), so the age of the
+ * series is the age of its first observation, not of its latest. That is what
+ * makes "two observations five minutes apart" mean five minutes of real time
+ * rather than two lookups in the same tick.
+ */
+async function recordAbsence(pool: Pool, attemptId: string): Promise<void> {
+  await pool.query(
+    `UPDATE transaction_attempts
+     SET absent_checks = absent_checks + 1,
+         first_absent_at = COALESCE(first_absent_at, now())
+     WHERE id = $1`,
+    [attemptId],
+  )
+}
+
+/**
+ * The chain showed us the transaction: the absence series is broken and must
+ * start over. Without this a transaction that was invisible for a while and
+ * then appeared would keep its stale absence evidence and stay replaceable.
+ */
+async function clearAbsence(pool: Pool, attemptId: string): Promise<void> {
+  await pool.query(
+    `UPDATE transaction_attempts
+     SET absent_checks = 0, first_absent_at = NULL
+     WHERE id = $1 AND (absent_checks <> 0 OR first_absent_at IS NOT NULL)`,
+    [attemptId],
+  )
 }
 
 /** Every attempt whose outcome is not yet known. Startup reconciles all of them. */
@@ -270,9 +324,10 @@ export async function evaluateProvenDead(
   chain: ChainClient,
   attempt: ProvenDeadInput,
   headHeight?: number,
+  opts?: WindowOptions,
 ): Promise<ProvenDeadEvidence> {
   const head = headHeight ?? (await chain.headHeight())
-  const deadlineHeight = attempt.validityStartHeight + validityWindowBlocks()
+  const deadlineHeight = attempt.validityStartHeight + windowOf(opts)
   const windowPast = head > deadlineHeight
 
   try {
@@ -449,6 +504,7 @@ export async function progressAttempt(
   alerts: Alerts,
   attempt: OpenAttempt,
   headHeight?: number,
+  opts?: WindowOptions,
 ): Promise<Progress> {
   const head = headHeight ?? (await chain.headHeight())
   const alreadyFlagged = attempt.transferState === 'manual_review'
@@ -476,6 +532,12 @@ export async function progressAttempt(
   }
 
   if (tx) {
+    // A sighting breaks any absence series (finding 2). This runs before every
+    // other branch on purpose: even an execution-failed or not-yet-final
+    // sighting is proof the hash reached the chain, and stale absence evidence
+    // is exactly what would let `replace` build a second payment.
+    await clearAbsence(pool, attempt.attemptId)
+
     if (!tx.executionOk) {
       // On chain and failed: no amount of waiting changes this.
       if (alreadyFlagged) return 'unchanged'
@@ -506,8 +568,13 @@ export async function progressAttempt(
   }
 
   // ---- not found -------------------------------------------------------------
-  // Mempool blindness (G0 §5A): absence is NOT evidence of death.
-  const deadlineHeight = attempt.validityStartHeight + validityWindowBlocks()
+  // Mempool blindness (G0 §5A): absence is NOT evidence of death. It is one
+  // observation, recorded BEFORE any early return below so that an intent
+  // already in `manual_review` keeps accumulating the evidence an operator
+  // needs — `recover.ts replace` reads this series and refuses without it.
+  await recordAbsence(pool, attempt.attemptId)
+
+  const deadlineHeight = attempt.validityStartHeight + windowOf(opts)
   if (head > deadlineHeight) {
     // Absent AND unincludable: this is the only shape a dead attempt can take.
     // The worker still does not mark it `proven_dead` — that transition creates
