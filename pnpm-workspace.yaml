@@ -1,0 +1,12 @@
+packages:
+  - server
+  - web
+
+# Install scripts are denied by default. Only esbuild (vitest's bundler) needs
+# one; bufferutil/utf-8-validate are optional native ws speedups and es5-ext
+# only prints a banner, so none of them may execute code at install time.
+allowBuilds:
+  bufferutil: false
+  es5-ext: false
+  esbuild: true
+  utf-8-validate: false
