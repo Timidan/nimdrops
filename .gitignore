@@ -1,3 +1,6 @@
 node_modules
 .env
 dist
+server/spike/.dev-key
+server/spike/*.json
+server/spike/g0-evidence.md
