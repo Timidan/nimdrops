@@ -51,6 +51,42 @@ export interface DropPublic {
   fundingTxHash?: string
 }
 
+/** `POST /api/drops/:publicId/challenge` — the exact bytes the wallet signs. */
+export interface Challenge {
+  challengeId: string
+  /** Sign this verbatim. Deriving or re-encoding it makes the signature invalid. */
+  message: string
+  expiresAt: string
+}
+
+/**
+ * The claim lifecycle as the SERVER tells it. `sending` means a transaction has
+ * been signed and broadcast, which is emphatically not `paid`.
+ */
+export type ClaimServerState = 'reserved' | 'sending' | 'confirming' | 'paid' | 'manual_review'
+
+/** `POST /api/drops/:publicId/claims` — 202: a slot is reserved, nothing is paid. */
+export interface ClaimAccepted {
+  claimId: string
+  /** Opaque bearer credential. Header only — never a URL, never a log line. */
+  statusToken: string
+  state: ClaimServerState
+}
+
+/** `GET /api/claims/:claimId` — the only source of payment truth. */
+export interface ClaimStatus {
+  state: ClaimServerState
+  /** Present only once an attempt is confirmed on chain. */
+  txHash?: string
+  amountEach: string
+}
+
+export interface SignedClaim {
+  challengeId: string
+  publicKey: string
+  signature: string
+}
+
 export interface CreateDropInput {
   sponsorLabel: string
   message?: string
@@ -167,4 +203,44 @@ export async function submitFunding(publicId: string, txHash: string): Promise<D
 
 export async function getDrop(publicId: string): Promise<DropPublic> {
   return request<DropPublic>(`/drops/${encodeURIComponent(publicId)}`)
+}
+
+/**
+ * Mint a one-use claim message. Short-lived by construction, so it is requested
+ * at the moment of the tap — never on page load, where it would expire while
+ * the claimant reads the card.
+ */
+export async function issueChallenge(publicId: string): Promise<Challenge> {
+  return request<Challenge>(`/drops/${encodeURIComponent(publicId)}/challenge`, { method: 'POST' })
+}
+
+/**
+ * Reserve one share. The idempotency key belongs to the caller because the
+ * caller is the only one who knows whether a retry is "the same signed request
+ * again" (safe to replay) or a genuinely new attempt.
+ */
+export async function submitClaim(
+  publicId: string,
+  signed: SignedClaim,
+  idempotencyKey: string,
+): Promise<ClaimAccepted> {
+  return request<ClaimAccepted>(`/drops/${encodeURIComponent(publicId)}/claims`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'Idempotency-Key': idempotencyKey,
+    },
+    body: JSON.stringify({
+      challengeId: signed.challengeId,
+      publicKey: signed.publicKey,
+      signature: signed.signature,
+    }),
+  })
+}
+
+/** Design §11: the status token travels as a bearer header, never in the path. */
+export async function getClaimStatus(claimId: string, statusToken: string): Promise<ClaimStatus> {
+  return request<ClaimStatus>(`/claims/${encodeURIComponent(claimId)}`, {
+    headers: { Authorization: `Bearer ${statusToken}` },
+  })
 }

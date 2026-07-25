@@ -24,10 +24,11 @@ describe('router', () => {
     expect(screen.getByLabelText(/NIM per person/i)).toBeTruthy()
   })
 
-  it('renders the campaign page for /d/:publicId with the campaign id', () => {
+  it('renders the campaign page for /d/:publicId', () => {
     at('/d/abc')
-    expect(screen.getByText(/abc/)).toBeTruthy()
-    expect(screen.getByText(/task 16/i)).toBeTruthy()
+    // The claim flow owns everything past this point; the router's job is only
+    // to hand `/d/:publicId` to it. Behaviour lives in `pages/Drop.test.tsx`.
+    expect(screen.getByText(/opening this nimdrop/i)).toBeTruthy()
   })
 
   it('sends unknown paths home', () => {
