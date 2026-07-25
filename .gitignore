@@ -4,3 +4,4 @@ dist
 server/spike/.dev-key
 server/spike/*.json
 server/spike/g0-evidence.md
+server/spike/g1-local-evidence.md
