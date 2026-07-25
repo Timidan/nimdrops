@@ -117,8 +117,9 @@ async function insertAttempt(
   o: { transferId: string; state: 'signed' | 'broadcast' | 'confirmed' | 'proven_dead' },
 ): Promise<void> {
   await db.query(
-    `INSERT INTO transaction_attempts (transfer_id, sequence, state, raw_signed_tx, tx_hash, fee_luna)
-     VALUES ($1, 1, $2, $3, $4, 0)`,
+    `INSERT INTO transaction_attempts (
+       transfer_id, sequence, state, raw_signed_tx, tx_hash, fee_luna, validity_start_height
+     ) VALUES ($1, 1, $2, $3, $4, 0, 1)`,
     [o.transferId, o.state, Buffer.from('00ff', 'hex'), randomUUID()],
   )
 }

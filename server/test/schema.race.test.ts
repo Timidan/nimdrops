@@ -72,8 +72,9 @@ async function insertAttempt(
   o: { transferId: string; sequence: number; state: string },
 ): Promise<{ id: string }> {
   const { rows } = await pool.query<{ id: string }>(
-    `INSERT INTO transaction_attempts (transfer_id, sequence, state, raw_signed_tx, tx_hash, fee_luna)
-     VALUES ($1, $2, $3, $4, $5, $6)
+    `INSERT INTO transaction_attempts (
+       transfer_id, sequence, state, raw_signed_tx, tx_hash, fee_luna, validity_start_height
+     ) VALUES ($1, $2, $3, $4, $5, $6, 1)
      RETURNING id`,
     [o.transferId, o.sequence, o.state, Buffer.from('00ff', 'hex'), randomUUID(), '0'],
   )
