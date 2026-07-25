@@ -1,0 +1,32 @@
+# NimDrops edge configuration.
+#
+# One site block, one upstream. The Hono server is the whole origin: `/api/*`,
+# the SSR campaign pages at `/d/:publicId`, the QR endpoint, the OG image and
+# the SPA's static assets all come from it (design §4.1). Nothing here routes by
+# path, because splitting the origin would put CORS on the money path.
+#
+# REPLACE `drops.example.com` with the real hostname before deploying. Caddy
+# provisions the TLS certificate from this name and nothing else; the automatic
+# HTTP→HTTPS redirect comes with it.
+drops.example.com {
+	encode zstd gzip
+
+	# `server` is the compose service name (docker-compose.yml). Running Caddy on
+	# the host instead of in compose? Use `127.0.0.1:8080`.
+	#
+	# Caddy APPENDS the real peer address to X-Forwarded-For, and `clientIp()` in
+	# server/src/http/app.ts reads the LAST entry for exactly that reason: a
+	# client-supplied prefix cannot be used to pick a rate-limit bucket.
+	reverse_proxy server:8080 {
+		# A slow chain RPC must not become a 502 mid-claim; the API's own timeouts
+		# and the worker's advisory lock are the real bounds.
+		transport http {
+			response_header_timeout 30s
+		}
+	}
+
+	log {
+		output stdout
+		format json
+	}
+}

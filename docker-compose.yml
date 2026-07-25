@@ -1,3 +1,32 @@
+# NimDrops deployment: Postgres, one API process, ONE worker, and Caddy.
+#
+# The single worker is a correctness constraint, not a resource decision: it
+# holds `pg_advisory_lock(42)` and is the only process that signs or broadcasts.
+# Never scale it — `docker compose up --scale worker=2` is a bug, not a knob.
+#
+# Schema migrations are NOT run automatically: a financial schema change should
+# be a deliberate operator action, taken before the new image starts serving.
+#   docker compose run --rm server pnpm exec tsx -e \
+#     "import {getPool} from './src/db/pool.ts';import {migrate} from './src/db/migrate.ts';await migrate(getPool());process.exit(0)"
+
+x-app: &app
+  build:
+    context: .
+    dockerfile: server/Dockerfile
+  restart: unless-stopped
+  depends_on:
+    postgres:
+      condition: service_healthy
+  environment:
+    # Every Global Constraints variable, passed through from the operator's .env.
+    DATABASE_URL: postgres://nimdrops:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/nimdrops
+    CUSTODY_PRIVATE_KEY_HEX: ${CUSTODY_PRIVATE_KEY_HEX:?set CUSTODY_PRIVATE_KEY_HEX in .env}
+    STATUS_TOKEN_SECRET: ${STATUS_TOKEN_SECRET:?set STATUS_TOKEN_SECRET in .env}
+    ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+    NIMIQ_NETWORK: ${NIMIQ_NETWORK:?set NIMIQ_NETWORK in .env}
+    PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?set PUBLIC_ORIGIN in .env}
+    SIG_SCHEME: ${SIG_SCHEME:-raw}
+
 services:
   postgres:
     image: postgres:16
@@ -16,5 +45,43 @@ services:
       timeout: 5s
       retries: 20
 
+  # HTTP only: API, SSR campaign pages, SPA assets. Signs nothing.
+  server:
+    <<: *app
+    command: ["pnpm", "exec", "tsx", "src/index.ts"]
+    expose:
+      - "8080"
+    healthcheck:
+      # `/health` stays 503 until the worker has reconciled, which is the
+      # intended reading: an unreconciled system must not be advertised ready.
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 60s
+
+  # The single writer to the chain. Exactly one replica, always.
+  worker:
+    <<: *app
+    command: ["pnpm", "exec", "tsx", "src/worker.ts"]
+    deploy:
+      replicas: 1
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - server
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
 volumes:
   pgdata:
+  caddy_data:
+  caddy_config:

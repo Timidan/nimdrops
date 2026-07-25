@@ -33,6 +33,7 @@ import {
   readControls,
 } from '../services/solvency'
 import { ConflictError, bindIdem, idemKeyHash, lookupIdem } from './idempotency'
+import { registerSsr } from './ssr'
 
 /**
  * The whole public HTTP surface (design §11), plus an unauthenticated
@@ -50,9 +51,8 @@ import { ConflictError, bindIdem, idemKeyHash, lookupIdem } from './idempotency'
  *  3. **Status tokens live in the `Authorization` header only.** They are never
  *     put in a path, a query string, a redirect, or a log line.
  *
- * `registerSsr` at the bottom is the mount point Task 14 replaces with the real
- * `/d/:publicId` renderer; it is a no-op today so the route order is already
- * fixed (API first, SSR/SPA catch-all last).
+ * `registerSsr` (`./ssr`) is mounted at the bottom, so the route order is fixed:
+ * API first, SSR and SPA assets last.
  */
 
 // ---- rate limits ---------------------------------------------------------------
@@ -585,18 +585,11 @@ export function makeApp(deps: AppDeps): Hono {
     return c.json({ ok, headHeight, workerFresh }, ok ? 200 : 503)
   })
 
-  // Task 14 replaces this single line with the real SSR + SPA registration.
-  registerSsr(app)
+  // Last, always: the `/d/:publicId` campaign page and the SPA's static files.
+  // Registered here so no SSR route can ever shadow an `/api` route.
+  registerSsr(app, { pool })
 
   return app
-}
-
-/**
- * Mount point for the `/d/:publicId` campaign page and the SPA (Task 14).
- * Registered last so no catch-all can ever shadow an `/api` route.
- */
-export function registerSsr(_app: Hono): void {
-  // no-op until Task 14
 }
 
 // ---- helpers -------------------------------------------------------------------------------
