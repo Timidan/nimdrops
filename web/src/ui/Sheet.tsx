@@ -58,7 +58,14 @@ export default function Sheet({ open, title, onClose, sealMark, children }: Shee
         aria-modal="true"
         aria-labelledby={titleId}
         tabIndex={-1}
-        className="nd-sheet relative w-full max-w-[430px] rounded-t-3xl bg-paper px-6 pt-5 pb-8 text-ink shadow-2xl outline-none"
+        /**
+         * The sheet scrolls itself rather than the page. The sponsor's
+         * disclosure is longer than a phone, and its fund button sits under
+         * the last point on purpose — reaching the button means the points
+         * have been past the eye. `overscroll-contain` keeps that scroll from
+         * escaping into the page behind the scrim once it hits the end.
+         */
+        className="nd-sheet relative max-h-[86svh] w-full max-w-[430px] overflow-y-auto overscroll-contain rounded-t-3xl bg-paper px-6 pt-5 pb-8 text-ink shadow-2xl outline-none"
       >
         <div aria-hidden="true" className="mx-auto mb-4 h-1 w-10 rounded-full bg-ink/15" />
         <div className="flex items-center gap-3">

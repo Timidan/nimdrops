@@ -3,7 +3,14 @@
  *
  * The rules these tests exist to defend:
  *  - the total is DERIVED (`amount_each × people`), never entered;
- *  - the custody disclosure (§10.4) is on screen before the wallet opens;
+ *  - the custody disclosure (§10.4) is on screen before the wallet opens, and
+ *    EVERY point `GET /api/custody` returns is rendered, in the server's order,
+ *    above the fund button — the server owns those words, so drift is the bug;
+ *  - a paused deployment stops the flow before a wallet prompt;
+ *  - `drop_too_large` and `no_capacity` are told apart: one can never work and
+ *    must not offer a retry, the other can and must;
+ *  - the room this draft holds in the cap is named and counted down, and the
+ *    limits are re-read when it lapses;
  *  - a wallet rejection is recoverable and NEVER reads as "fund it again";
  *  - `Detecting → Confirming → Live` is driven by polled server state, not by
  *    a timer we made up.
@@ -18,6 +25,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { CustodyDisclosure } from '../api'
 import { BridgeError, type BridgeResult, type WalletBridge } from '../sdk/adapter'
 import { MockBridge } from '../sdk/mock'
 import { FUNDING_STORAGE_KEY, FUNDING_TTL_MS, type FundedDraft } from '../state/funding'
@@ -26,15 +34,146 @@ import Create, { type CreateProps } from './Create'
 /** 22 base64url chars — the shape `ids.ts` mints and `app.ts` validates. */
 const PUBLIC_ID = 'Ab3Cd4Ef5Gh6Ij7Kl8Mn9O'
 const SHARE_URL = `https://nimdrops.example/d/${PUBLIC_ID}`
+const CUSTODY_ADDRESS = 'NQ34 248H 2M0X R0LB 9YT4 4BFD 8AXL SN0P R1KL'
 
 /** What `POST /api/drops` answers for 2 NIM × 5 people. */
 const DRAFT = {
   publicId: PUBLIC_ID,
-  fundingAddress: 'NQ34 248H 2M0X R0LB 9YT4 4BFD 8AXL SN0P R1KL',
+  fundingAddress: CUSTODY_ADDRESS,
   fundingMemo: `ND1:${PUBLIC_ID}`,
   expectedFunding: '10',
   expectedFundingLuna: '1000000',
   shareUrl: SHARE_URL,
+}
+
+/**
+ * `GET /api/custody` on a testnet deployment with room to spare — the default,
+ * because it is the shape under which every other behaviour in this file is
+ * meant to work. The strings are the server's own (`http/disclosure.ts`), not
+ * an approximation: these tests exist to catch the client rewording them.
+ */
+function disclosure(over: Partial<CustodyDisclosure> = {}): CustodyDisclosure {
+  return {
+    network: 'TestAlbatross',
+    chainLabel: 'the Nimiq test network',
+    custodyAddress: CUSTODY_ADDRESS,
+    mainnetPilot: false,
+    paused: false,
+    expiryHours: 24,
+    fundingWindowMinutes: 30,
+    limits: {
+      perDropMax: '100',
+      perDropMaxLuna: '10000000',
+      aggregateMax: '250',
+      aggregateMaxLuna: '25000000',
+      remaining: '250',
+      remainingLuna: '25000000',
+      maxLiveDrops: null,
+      liveDrops: 0,
+      reservedDrafts: 0,
+      remainingDrops: null,
+    },
+    summary:
+      'Your NIM goes to a wallet the operator controls, not to an escrow contract. Up to 250 NIM can be live at once.',
+    points: [
+      {
+        id: 'not_escrow',
+        text: 'This is not an escrow contract. Your NIM goes to one wallet the operator runs, and no code on chain holds it for you.',
+      },
+      {
+        id: 'operator_key',
+        text: 'The operator holds the only key to that wallet and can move everything in it, including your funding.',
+      },
+      {
+        id: 'limits',
+        text: 'One drop can hold up to 100 NIM. All live drops together can hold 250 NIM, and 250 NIM of that is free right now.',
+      },
+      {
+        id: 'destination',
+        text: `You are sending to ${CUSTODY_ADDRESS} on the Nimiq test network. Check that address in your wallet before you approve.`,
+      },
+      {
+        id: 'test_network',
+        text: 'This runs on the Nimiq test network. The NIM here is not real money.',
+      },
+      {
+        id: 'expiry_clock',
+        text: 'The 24 hour claim window starts when the network confirms your funding, not when you tap send.',
+      },
+      {
+        id: 'refunds',
+        text: 'Whatever nobody claims goes back to the wallet you fund from. The operator signs that transfer, so a pause or a manual check can hold it up.',
+      },
+      {
+        id: 'funding_window',
+        text: 'This drop holds its room in the cap for 30 minutes. Fund it in this session, or check the limits again before you send.',
+      },
+    ],
+    ...over,
+  }
+}
+
+/**
+ * The mainnet pilot: 2 NIM of live principal, one drop at a time, real money.
+ * The cap bites two orders of magnitude below the 100 NIM launch cap, which is
+ * the whole reason the ceiling has to be on screen before an amount is typed.
+ */
+function pilotDisclosure(over: Partial<CustodyDisclosure> = {}): CustodyDisclosure {
+  const base = disclosure()
+  return {
+    ...base,
+    network: 'MainAlbatross',
+    chainLabel: 'the Nimiq main network',
+    mainnetPilot: true,
+    limits: {
+      ...base.limits,
+      perDropMax: '2',
+      perDropMaxLuna: '200000',
+      aggregateMax: '2',
+      aggregateMaxLuna: '200000',
+      remaining: '2',
+      remainingLuna: '200000',
+      maxLiveDrops: 1,
+      liveDrops: 0,
+      reservedDrafts: 0,
+      remainingDrops: 1,
+    },
+    summary:
+      'Your NIM goes to a wallet the operator controls, not to an escrow contract. Up to 2 NIM can be live at once.',
+    points: [
+      ...base.points.slice(0, 2),
+      {
+        id: 'limits',
+        text: 'One drop can hold up to 2 NIM. All live drops together can hold 2 NIM, and 2 NIM of that is free right now. Only one drop can run at a time.',
+      },
+      {
+        id: 'destination',
+        text: `You are sending to ${CUSTODY_ADDRESS} on the Nimiq main network. Check that address in your wallet before you approve.`,
+      },
+      {
+        id: 'first_mainnet_run',
+        text: 'This is the first run with real NIM. Send a small amount and expect to watch it.',
+      },
+      ...base.points.slice(5),
+    ],
+    ...over,
+  }
+}
+
+/** The server puts the closed notice first, and the client must not re-sort. */
+function pausedDisclosure(): CustodyDisclosure {
+  const base = pilotDisclosure()
+  return {
+    ...base,
+    paused: true,
+    points: [
+      {
+        id: 'paused',
+        text: 'Funding is closed right now. The operator has to open it before a new drop can start.',
+      },
+      ...base.points,
+    ],
+  }
 }
 
 function dropBody(state: string, remaining = 5) {
@@ -53,6 +192,8 @@ function dropBody(state: string, remaining = 5) {
 interface Reply {
   status: number
   body: unknown
+  /** Only `Retry-After` is ever read, and only off a refusal. */
+  headers?: Record<string, string>
 }
 
 interface FetchScript {
@@ -65,6 +206,12 @@ interface FetchScript {
   funding?: Reply | Reply[]
   /** Consumed one per `GET`; the last entry repeats forever. */
   drops?: Reply[]
+  /**
+   * `GET /api/custody`, consumed one per call with the last repeating. Defaults
+   * to a roomy testnet deployment so every other test in this file describes
+   * the flow rather than the cap.
+   */
+  custody?: Reply | Reply[]
 }
 
 /** Take the next reply, holding the last one once the queue runs dry. */
@@ -72,27 +219,41 @@ function next(queue: Reply[]): Reply | undefined {
   return queue.length > 1 ? queue.shift() : queue[0]
 }
 
+function queueOf(value: Reply | Reply[] | undefined, fallback: Reply[]): Reply[] {
+  if (Array.isArray(value)) return [...value]
+  return value ? [value] : fallback
+}
+
 function installFetch(script: FetchScript) {
   const calls: { url: string; method: string; init: RequestInit | undefined }[] = []
   const drops = [...(script.drops ?? [])]
-  const funding = Array.isArray(script.funding)
-    ? [...script.funding]
-    : script.funding
-      ? [script.funding]
-      : []
+  const funding = queueOf(script.funding, [])
+  const custody = queueOf(script.custody, [{ status: 200, body: disclosure() }])
   const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
     const url = String(input)
     const method = (init?.method ?? 'GET').toUpperCase()
     calls.push({ url, method, init })
     let reply: Reply | undefined
-    if (method === 'POST' && url.endsWith('/funding')) reply = next(funding)
+    if (url.endsWith('/api/custody')) reply = next(custody)
+    else if (method === 'POST' && url.endsWith('/funding')) reply = next(funding)
     else if (method === 'POST') reply = script.create
     else reply = next(drops)
     if (!reply) throw new Error(`unscripted fetch: ${method} ${url}`)
-    return { ok: reply.status < 400, status: reply.status, json: async () => reply.body }
+    const headers = reply.headers ?? {}
+    return {
+      ok: reply.status < 400,
+      status: reply.status,
+      json: async () => reply.body,
+      headers: { get: (name: string) => headers[name.toLowerCase()] ?? null },
+    }
   })
   vi.stubGlobal('fetch', fetchMock)
   return { fetchMock, calls }
+}
+
+/** How many times the screen has asked the server for the live disclosure. */
+function custodyCalls(calls: { url: string }[]) {
+  return calls.filter((call) => call.url.endsWith('/api/custody')).length
 }
 
 /** The record `state/funding.ts` writes once the wallet has answered. */
@@ -171,6 +332,21 @@ function fillForm(opts: { amount?: string; people?: string; from?: string } = {}
 function openReview() {
   fireEvent.click(screen.getByRole('button', { name: /review drop/i }))
   return screen.getByRole('dialog')
+}
+
+/** Render, then wait for `GET /api/custody` to land before touching anything. */
+async function renderLoaded(props: CreateProps = {}, script: FetchScript = {}) {
+  installFetch(script)
+  const result = renderCreate(props)
+  await screen.findByTestId('live-limits')
+  return result
+}
+
+/** The `id` of every disclosure point on screen, in document order. */
+function pointIds(scope: HTMLElement) {
+  return Array.from(scope.querySelectorAll('[data-point]')).map((node) =>
+    node.getAttribute('data-point'),
+  )
 }
 
 async function tick(ms: number) {
@@ -264,18 +440,37 @@ describe('Create — "Drop one back" prefill', () => {
 })
 
 describe('Create — review sheet', () => {
-  it('shows the custody disclosure, expiry and refund rule before the wallet opens', () => {
-    renderCreate({ discoverBridge: bridgeOf(new MockBridge()) })
+  it('shows the custody disclosure, expiry and refund rule before the wallet opens', async () => {
+    await renderLoaded({ discoverBridge: bridgeOf(new MockBridge()) })
     fillForm()
     const sheet = openReview()
     expect(within(sheet).getByText('10 NIM')).toBeTruthy()
-    // §10.4: funds are temporarily held by the operator.
-    expect(within(sheet).getByText(/temporarily held/i)).toBeTruthy()
+    // §10.4: the operator holds it, and the words are the server's.
+    expect(within(sheet).getByText(/no code on chain holds it for you/i)).toBeTruthy()
+    expect(within(sheet).getByText(/holds the only key/i)).toBeTruthy()
     // §10.4: default expiry and the exact refund rule.
-    expect(within(sheet).getAllByText(/24 hours/i).length).toBeGreaterThan(0)
-    expect(within(sheet).getByText(/refunded to the wallet that funded/i)).toBeTruthy()
+    expect(within(sheet).getAllByText(/24 hour/i).length).toBeGreaterThan(0)
+    expect(within(sheet).getByText(/goes back to the wallet you fund from/i)).toBeTruthy()
     // §10.4: first come, first served, one per wallet, no personhood proof.
     expect(within(sheet).getByText(/one per wallet/i)).toBeTruthy()
+  })
+
+  it('falls back to shipped custody copy when the live disclosure will not load', async () => {
+    installFetch({ custody: { status: 503, body: { error: { code: 'degraded', message: 'no' } } } })
+    renderCreate({ discoverBridge: bridgeOf(new MockBridge()) })
+    fillForm()
+    const sheet = await waitFor(() => {
+      fireEvent.click(screen.getByRole('button', { name: /review drop/i }))
+      const dialog = screen.getByRole('dialog')
+      within(dialog).getByTestId('custody-fallback')
+      return dialog
+    })
+    // The two facts a sponsor may never fund without, even offline.
+    expect(within(sheet).getByText(/not to an escrow contract/i)).toBeTruthy()
+    expect(within(sheet).getByText(/goes back to the wallet you fund from/i)).toBeTruthy()
+    // And a plain account of what is missing, with a way to ask again.
+    expect(within(sheet).getByText(/the live limits did not load/i)).toBeTruthy()
+    expect(within(sheet).getByRole('button', { name: /load the limits again/i })).toBeTruthy()
   })
 
   it('seals the envelope: the sponsor initial is pressed into wax on the sheet', () => {
@@ -291,6 +486,353 @@ describe('Create — review sheet', () => {
     expect(wax?.querySelector('.nd-wax-mark')?.textContent).toBe('T')
     // Decorative only — it must not have crowded out the dialog's own label.
     expect(within(sheet).getByRole('heading', { name: /before you fund/i })).toBeTruthy()
+  })
+})
+
+/**
+ * The single most important honesty surface in the product. NimDrops is a
+ * custodial hot wallet with a disclosed cap and no on-chain escrow, and the
+ * sponsor has to understand that BEFORE a wallet asks them to approve anything.
+ *
+ * The server owns the words — it enforces the caps and holds the key, so any
+ * sentence written on this side could drift away from what is actually true.
+ * These tests defend the two properties that follow from that: every point it
+ * sends is rendered, and it is rendered in the order it sent them.
+ */
+describe('Create — the custody disclosure', () => {
+  it('renders every point the server sent, in the order it sent them', async () => {
+    const live = disclosure()
+    await renderLoaded({ discoverBridge: bridgeOf(new MockBridge()) })
+    fillForm()
+    const sheet = openReview()
+
+    const list = within(sheet).getByTestId('custody-points')
+    expect(pointIds(list)).toEqual(live.points.map((point) => point.id))
+    // Not just present in the right order — present verbatim.
+    const rendered = Array.from(list.querySelectorAll('[data-point]')).map(
+      (node) => node.textContent ?? '',
+    )
+    for (const [index, point] of live.points.entries()) {
+      expect(rendered[index]).toBe(point.text)
+    }
+  })
+
+  it('puts every point above the fund button', async () => {
+    await renderLoaded({ discoverBridge: bridgeOf(new MockBridge()) })
+    fillForm()
+    const sheet = openReview()
+
+    const list = within(sheet).getByTestId('custody-points')
+    const button = within(sheet).getByRole('button', { name: /fund drop/i })
+    // DOCUMENT_POSITION_FOLLOWING: the button comes after the whole list, so
+    // there is no way to reach it without the disclosure having gone past.
+    expect(list.compareDocumentPosition(button) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('carries the server summary beside the fund button', async () => {
+    await renderLoaded({ discoverBridge: bridgeOf(new MockBridge()) })
+    fillForm()
+    const sheet = openReview()
+    expect(within(sheet).getByTestId('custody-summary').textContent).toBe(disclosure().summary)
+  })
+
+  it('offers the same points as a card the sponsor can read while deciding', async () => {
+    const live = disclosure()
+    await renderLoaded({ discoverBridge: bridgeOf(new MockBridge()) })
+
+    // The scariest fact is the headline of the card, not a footnote.
+    const card = screen.getByTestId('custody-card')
+    expect(card.textContent).toMatch(/no contract holds it for you/i)
+
+    fireEvent.click(card)
+    const sheet = screen.getByRole('dialog')
+    expect(within(sheet).getByRole('heading', { name: /what you are trusting/i })).toBeTruthy()
+    expect(pointIds(within(sheet).getByTestId('custody-points'))).toEqual(
+      live.points.map((point) => point.id),
+    )
+    // Reading the disclosure is not a step in paying: no fund button here.
+    expect(within(sheet).queryByRole('button', { name: /fund drop/i })).toBeNull()
+  })
+})
+
+describe('Create — the live cap', () => {
+  it('shows the ceiling and the headroom before an amount is typed', async () => {
+    installFetch({ custody: { status: 200, body: pilotDisclosure() } })
+    renderCreate({ discoverBridge: bridgeOf(new MockBridge()) })
+
+    const limits = await screen.findByTestId('live-limits')
+    expect(within(limits).getByText('2 NIM')).toBeTruthy()
+    expect(within(limits).getByText('2 of 2 NIM')).toBeTruthy()
+    expect(within(limits).getByText('0 of 1')).toBeTruthy()
+    // On screen before the field it constrains, not after a refusal.
+    expect(amountField().value).toBe('')
+  })
+
+  it('refuses a total over the cap on this screen rather than at the server', async () => {
+    installFetch({ custody: { status: 200, body: pilotDisclosure() } })
+    renderCreate({ discoverBridge: bridgeOf(new MockBridge()) })
+    await screen.findByTestId('live-limits')
+
+    fillForm({ amount: '2', people: '5' })
+    expect(screen.getByTestId('over-cap').textContent).toMatch(
+      /a drop can hold up to 2 NIM right now/i,
+    )
+    expect((screen.getByRole('button', { name: /review drop/i }) as HTMLButtonElement).disabled).toBe(
+      true,
+    )
+
+    // Back under the cap and the flow reopens.
+    fillForm({ amount: '0.4', people: '5' })
+    expect(screen.queryByTestId('over-cap')).toBeNull()
+    expect((screen.getByRole('button', { name: /review drop/i }) as HTMLButtonElement).disabled).toBe(
+      false,
+    )
+  })
+})
+
+describe('Create — funding is closed', () => {
+  it('says so unmissably and lets no wallet prompt happen', async () => {
+    const bridge = new MockBridge()
+    const send = vi.spyOn(bridge, 'sendWithData')
+    const script = installFetch({ custody: { status: 200, body: pausedDisclosure() } })
+    renderCreate({ discoverBridge: bridgeOf(bridge) })
+
+    const banner = await screen.findByTestId('funding-closed')
+    expect(banner.textContent).toMatch(/funding is closed/i)
+    // The server's own sentence, not one invented here.
+    expect(banner.textContent).toMatch(/the operator has to open it/i)
+
+    fillForm()
+    const review = screen.getByRole('button', { name: /review drop/i }) as HTMLButtonElement
+    expect(review.disabled).toBe(true)
+    fireEvent.click(review)
+
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(send).not.toHaveBeenCalled()
+    expect(script.calls.some((call) => call.url.endsWith('/api/drops'))).toBe(false)
+  })
+
+  it('puts the closed notice first in the list, exactly where the server put it', async () => {
+    installFetch({ custody: { status: 200, body: pausedDisclosure() } })
+    renderCreate({ discoverBridge: bridgeOf(new MockBridge()) })
+    await screen.findByTestId('funding-closed')
+
+    fireEvent.click(screen.getByTestId('custody-card'))
+    const sheet = screen.getByRole('dialog')
+    expect(pointIds(within(sheet).getByTestId('custody-points'))).toEqual(
+      pausedDisclosure().points.map((point) => point.id),
+    )
+    expect(pointIds(within(sheet).getByTestId('custody-points'))[0]).toBe('paused')
+  })
+
+  it('stops at a closed screen when funding shuts between the check and the tap', async () => {
+    const bridge = new MockBridge()
+    const send = vi.spyOn(bridge, 'sendWithData')
+    await renderLoaded(
+      { discoverBridge: bridgeOf(bridge) },
+      {
+        // Open when the screen loaded, closed by the time the drop was created.
+        custody: [
+          { status: 200, body: disclosure() },
+          { status: 200, body: pausedDisclosure() },
+          { status: 200, body: disclosure() },
+        ],
+        create: { status: 503, body: { error: { code: 'paused', message: 'payouts are paused' } } },
+      },
+    )
+    fillForm()
+    fireEvent.click(within(openReview()).getByRole('button', { name: /fund drop/i }))
+
+    const closed = await screen.findByTestId('funding-closed-screen')
+    expect(within(closed).getByRole('heading', { name: /funding is closed right now/i })).toBeTruthy()
+    expect(send).not.toHaveBeenCalled()
+
+    // Checking again once the operator reopens returns the sponsor to the form
+    // with their drop intact.
+    fireEvent.click(within(closed).getByRole('button', { name: /check again/i }))
+    await waitFor(() => screen.getByRole('button', { name: /review drop/i }))
+    expect(amountField().value).toBe('2')
+  })
+})
+
+/**
+ * The two capacity refusals have different answers, so they get different
+ * screens. Retrying `drop_too_large` can never work; retrying `no_capacity`
+ * usually will. A single "try again" would be wrong for one of them.
+ */
+describe('Create — capacity refusals', () => {
+  function refuse(reply: Reply, custody = pilotDisclosure()) {
+    const bridge = new MockBridge()
+    const send = vi.spyOn(bridge, 'sendWithData')
+    const script = installFetch({ custody: { status: 200, body: custody }, create: reply })
+    return { bridge, send, script }
+  }
+
+  async function fundWith(bridge: WalletBridge, amount = '0.4') {
+    renderCreate({ discoverBridge: bridgeOf(bridge) })
+    await screen.findByTestId('live-limits')
+    fillForm({ amount })
+    fireEvent.click(within(openReview()).getByRole('button', { name: /fund drop/i }))
+  }
+
+  it('tells a sponsor a too-large drop can only get smaller, and never offers a retry', async () => {
+    const { bridge, send } = refuse({
+      status: 422,
+      body: {
+        error: { code: 'drop_too_large', message: 'this pilot holds up to 2 NIM across all live drops' },
+      },
+    })
+    await fundWith(bridge)
+
+    const screen_ = await screen.findByTestId('drop-too-large')
+    expect(within(screen_).getByRole('heading', { name: /over the cap/i })).toBeTruthy()
+    // The live ceiling, and the two things that change it.
+    expect(screen_.textContent).toMatch(/a drop can hold up to 2 NIM right now/i)
+    expect(screen_.textContent).toMatch(/lower the amount per person or the number of people/i)
+    // No retry: this request cannot succeed later, and a retry button would
+    // walk the sponsor into the same 422.
+    expect(within(screen_).queryByRole('button', { name: /try again/i })).toBeNull()
+    expect(send).not.toHaveBeenCalled()
+
+    fireEvent.click(within(screen_).getByRole('button', { name: /change the amount/i }))
+    expect(screen.getByRole('button', { name: /review drop/i })).toBeTruthy()
+    expect(amountField().value).toBe('0.4')
+  })
+
+  it('tells a sponsor with no room how long to wait and how much is free', async () => {
+    const busy = pilotDisclosure()
+    busy.limits = { ...busy.limits, remaining: '0.5', remainingDrops: 1, liveDrops: 0 }
+    const { bridge, send } = refuse(
+      {
+        status: 503,
+        body: {
+          error: { code: 'no_capacity', message: 'this drop needs 2 NIM and 0.5 NIM is free' },
+        },
+        headers: { 'retry-after': '30' },
+      },
+      busy,
+    )
+    await fundWith(bridge, '0.4')
+
+    const screen_ = await screen.findByTestId('no-capacity')
+    expect(within(screen_).getByRole('heading', { name: /no room for another drop/i })).toBeTruthy()
+    expect(screen_.textContent).toMatch(/this drop needs 2 NIM/i)
+    expect(screen_.textContent).toMatch(/0\.5 NIM of the 2 NIM cap is free right now/i)
+    // Retry-After, turned into a number the sponsor can act on.
+    expect(screen_.textContent).toMatch(/try again in about 30 seconds/i)
+    // Both honest answers are offered, because both work.
+    expect(within(screen_).getByRole('button', { name: /try again/i })).toBeTruthy()
+    expect(within(screen_).getByRole('button', { name: /change the amount/i })).toBeTruthy()
+    expect(send).not.toHaveBeenCalled()
+  })
+
+  it('names the slot, not the NIM, when the pilot is simply running a drop', async () => {
+    const running = pilotDisclosure()
+    running.limits = { ...running.limits, liveDrops: 1, remainingDrops: 0, remaining: '0' }
+    const { bridge } = refuse(
+      {
+        status: 503,
+        body: { error: { code: 'no_capacity', message: 'a drop is already running' } },
+        headers: { 'retry-after': '30' },
+      },
+      running,
+    )
+    await fundWith(bridge, '0.4')
+
+    const screen_ = await screen.findByTestId('no-capacity')
+    expect(screen_.textContent).toMatch(/another drop is already running/i)
+    expect(screen_.textContent).toMatch(/this pilot runs one at a time/i)
+  })
+
+  it('re-reads the limits after a refusal so the numbers on screen are current', async () => {
+    const { bridge, script } = refuse({
+      status: 422,
+      body: { error: { code: 'drop_too_large', message: 'too large' } },
+    })
+    await fundWith(bridge)
+    await screen.findByTestId('drop-too-large')
+    // Once on mount, once because the refusal proves the mounted copy was stale.
+    expect(custodyCalls(script.calls)).toBeGreaterThan(1)
+  })
+})
+
+/**
+ * Capacity is reserved when the funding instructions are issued and released
+ * again 30 minutes later, so a sponsor who leaves the wallet open and comes
+ * back may find the room gone. Saying so is the difference between a refusal
+ * they understand and one that looks like a bug.
+ */
+describe('Create — the funding reservation window', () => {
+  /** A wallet that opens and never answers: the sponsor is mid-approval. */
+  function hangingBridge(): WalletBridge {
+    return {
+      ready: async () => {},
+      sign: async () => ({ publicKey: '', signature: '' }),
+      sendWithData: () => new Promise(() => {}),
+    }
+  }
+
+  /**
+   * Park the flow at "approve in Nimiq Pay", which is exactly where a sponsor
+   * lingers. Fake timers throughout, because the thing under test is a clock.
+   */
+  async function reachApproving(reservedForMs: number) {
+    vi.useFakeTimers()
+    const roomier = pilotDisclosure()
+    roomier.limits = { ...roomier.limits, remaining: '0.75' }
+    const script = installFetch({
+      custody: [
+        { status: 200, body: pilotDisclosure() },
+        { status: 200, body: roomier },
+      ],
+      create: {
+        status: 201,
+        body: {
+          ...DRAFT,
+          reservationExpiresAt: new Date(Date.now() + reservedForMs).toISOString(),
+          disclosure: pilotDisclosure(),
+        },
+      },
+    })
+    renderCreate({ discoverBridge: bridgeOf(hangingBridge()) })
+    await tick(1)
+    screen.getByTestId('live-limits')
+    fillForm({ amount: '0.4' })
+    fireEvent.click(within(openReview()).getByRole('button', { name: /fund drop/i }))
+    await tick(1)
+    screen.getByTestId('reservation-note')
+    return script
+  }
+
+  it('names how long the room is held while the wallet is open', async () => {
+    await reachApproving(120_000)
+    expect(screen.getByRole('heading', { name: /approve in nimiq pay/i })).toBeTruthy()
+    expect(screen.getByTestId('reservation-note').textContent).toMatch(
+      /held for another 2 minutes/i,
+    )
+  })
+
+  it('re-reads the limits the moment the hold lapses, and says what is free now', async () => {
+    const script = await reachApproving(120_000)
+    const before = custodyCalls(script.calls)
+
+    await tick(121_000)
+
+    const note = screen.getByTestId('reservation-note').textContent ?? ''
+    expect(note).toMatch(/the 30 minute hold on your room has ended/i)
+    // The headroom in that sentence is the re-read one, not the stale one.
+    expect(note).toMatch(/0\.75 NIM of the 2 NIM cap is free right now/i)
+    expect(custodyCalls(script.calls)).toBeGreaterThan(before)
+    // A lapse is not a payment: nothing here suggests sending twice.
+    expect(document.body.textContent ?? '').not.toMatch(/fund again|send again|re-?fund/i)
+  })
+
+  it('counts down under a minute without pretending the room is gone', async () => {
+    await reachApproving(120_000)
+    await tick(70_000)
+    expect(screen.getByTestId('reservation-note').textContent).toMatch(
+      /held for less than a minute more/i,
+    )
   })
 })
 

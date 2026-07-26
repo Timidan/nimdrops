@@ -25,6 +25,53 @@ export type DropState =
   | 'manual_review'
   | 'cancelled'
 
+/**
+ * One line of the custody disclosure, as the server wrote it.
+ *
+ * The text is never rewritten here. The server enforces the caps, holds the
+ * key and knows the chain, so it owns the sentences that describe them —
+ * anything this client paraphrased could drift away from what is actually
+ * enforced. `id` is stable, so a screen can style or test one point without
+ * matching prose.
+ */
+export interface DisclosurePoint {
+  id: string
+  text: string
+}
+
+/** The live ceiling. NIM strings are for display; luna strings for arithmetic. */
+export interface PilotLimits {
+  perDropMax: string
+  perDropMaxLuna: string
+  aggregateMax: string
+  aggregateMaxLuna: string
+  remaining: string
+  remainingLuna: string
+  /** `null` when only the principal cap applies. */
+  maxLiveDrops: number | null
+  liveDrops: number
+  reservedDrafts: number
+  remainingDrops: number | null
+}
+
+/** `GET /api/custody`, and the same object on the `POST /api/drops` 201. */
+export interface CustodyDisclosure {
+  network: string
+  chainLabel: string
+  custodyAddress: string
+  mainnetPilot: boolean
+  /** Funding is closed while this is true. */
+  paused: boolean
+  expiryHours: number
+  /** Minutes a draft holds its room in the aggregate cap. */
+  fundingWindowMinutes: number
+  limits: PilotLimits
+  /** One line for the space beside the fund button. */
+  summary: string
+  /** Every point, in reading order. All of them go above the fund button. */
+  points: DisclosurePoint[]
+}
+
 /** `POST /api/drops` — funding instructions for an unfunded draft. */
 export interface Draft {
   publicId: string
@@ -36,6 +83,17 @@ export interface Draft {
   /** The same amount in luna, as a string. `BigInt()` it for the wallet call. */
   expectedFundingLuna: string
   shareUrl: string
+  /**
+   * When this draft stops holding room in the aggregate cap, or `null` when it
+   * holds none. Optional in the type because a record stored by an older build
+   * will not carry it.
+   */
+  reservationExpiresAt?: string | null
+  /**
+   * The disclosure that applied to THIS drop, read inside the same transaction
+   * that reserved its room. Absent only when the body could not be read.
+   */
+  disclosure?: CustodyDisclosure
 }
 
 /** `GET /api/drops/:publicId` — the public projection; no claimant data. */
@@ -99,11 +157,14 @@ export class ApiError extends Error {
   readonly status: number
   /** The envelope's `error.code` — the only thing screens are allowed to branch on. */
   readonly code: string
-  constructor(status: number, code: string, message: string) {
+  /** `Retry-After`, in seconds, when the server said how long to wait. */
+  readonly retryAfterSeconds?: number
+  constructor(status: number, code: string, message: string, retryAfterSeconds?: number) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.code = code
+    if (retryAfterSeconds !== undefined) this.retryAfterSeconds = retryAfterSeconds
   }
 }
 
@@ -115,15 +176,37 @@ export class NetworkError extends Error {
   }
 }
 
-function envelopeOf(status: number, body: unknown): ApiError {
+function envelopeOf(status: number, body: unknown, retryAfterSeconds?: number): ApiError {
   const error = (body as { error?: { code?: unknown; message?: unknown } } | null)?.error
   const code = typeof error?.code === 'string' ? error.code : 'unknown'
   const message = typeof error?.message === 'string' ? error.message : 'something went wrong'
-  return new ApiError(status, code, message)
+  return new ApiError(status, code, message, retryAfterSeconds)
+}
+
+interface HttpResponse {
+  ok: boolean
+  status: number
+  json: () => Promise<unknown>
+  /** Optional: a stubbed response in a test need not carry headers. */
+  headers?: { get?: (name: string) => string | null }
+}
+
+/**
+ * `Retry-After` in seconds, when the server sent a usable one.
+ *
+ * Read defensively rather than assumed: the header is optional, its delta-seconds
+ * form is the only one this API sends, and a screen that turned a missing header
+ * into `NaN seconds` would be worse than one that simply says "try again".
+ */
+function retryAfterOf(response: HttpResponse): number | undefined {
+  const raw = response.headers?.get?.('retry-after')
+  if (typeof raw !== 'string') return undefined
+  const seconds = Number.parseInt(raw, 10)
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds : undefined
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  let response: { ok: boolean; status: number; json: () => Promise<unknown> }
+  let response: HttpResponse
   try {
     response = await fetch(`${BASE}${path}`, init)
   } catch (cause) {
@@ -135,8 +218,58 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   } catch {
     body = null
   }
-  if (!response.ok) throw envelopeOf(response.status, body)
+  if (!response.ok) throw envelopeOf(response.status, body, retryAfterOf(response))
   return body as T
+}
+
+// ---- the custody disclosure ------------------------------------------------------
+
+function isLimits(value: unknown): value is PilotLimits {
+  const l = value as Partial<PilotLimits> | null
+  const nullableNumber = (n: unknown) => n === null || typeof n === 'number'
+  return (
+    typeof l?.perDropMax === 'string' &&
+    typeof l.perDropMaxLuna === 'string' &&
+    typeof l.aggregateMax === 'string' &&
+    typeof l.aggregateMaxLuna === 'string' &&
+    typeof l.remaining === 'string' &&
+    typeof l.remainingLuna === 'string' &&
+    nullableNumber(l.maxLiveDrops) &&
+    typeof l.liveDrops === 'number' &&
+    typeof l.reservedDrafts === 'number' &&
+    nullableNumber(l.remainingDrops)
+  )
+}
+
+/**
+ * A disclosure, or `null` if the body is not one.
+ *
+ * The one place in this file that inspects a shape instead of trusting it.
+ * Everything else here is read by a screen that would show a wrong number at
+ * worst; a half-parsed disclosure would show a *missing* point, and a sponsor
+ * who was never told the operator holds the key has not been disclosed to. So
+ * the shape either arrives whole or the screen falls back to copy it ships with.
+ */
+export function asDisclosure(value: unknown): CustodyDisclosure | null {
+  const d = value as Partial<CustodyDisclosure> | null
+  if (!d || typeof d !== 'object') return null
+  if (!Array.isArray(d.points) || d.points.length === 0) return null
+  if (!d.points.every((p) => typeof p?.id === 'string' && typeof p?.text === 'string')) return null
+  if (typeof d.summary !== 'string' || typeof d.paused !== 'boolean') return null
+  if (typeof d.custodyAddress !== 'string' || typeof d.chainLabel !== 'string') return null
+  if (typeof d.expiryHours !== 'number' || typeof d.fundingWindowMinutes !== 'number') return null
+  if (!isLimits(d.limits)) return null
+  return d as CustodyDisclosure
+}
+
+/**
+ * What the sponsor must read before their wallet asks them to approve anything.
+ * Unauthenticated and cheap, so the create screen asks for it on first paint.
+ */
+export async function getCustody(): Promise<CustodyDisclosure> {
+  const parsed = asDisclosure(await request<unknown>('/custody'))
+  if (!parsed) throw new ApiError(200, 'unreadable_disclosure', 'the custody disclosure could not be read')
+  return parsed
 }
 
 // ---- idempotency ---------------------------------------------------------------
@@ -196,7 +329,7 @@ export function forgetDraftKeys(): void {
 // ---- endpoints -------------------------------------------------------------------
 
 export async function createDrop(input: CreateDropInput): Promise<Draft> {
-  return request<Draft>('/drops', {
+  const draft = await request<Draft>('/drops', {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
@@ -209,6 +342,15 @@ export async function createDrop(input: CreateDropInput): Promise<Draft> {
       claimCount: input.claimCount,
     }),
   })
+  // The draft's own disclosure and reservation are held to the same standard as
+  // `/custody`: whole, or absent. A screen may show neither, never half of one.
+  const disclosure = asDisclosure(draft.disclosure)
+  return {
+    ...draft,
+    reservationExpiresAt:
+      typeof draft.reservationExpiresAt === 'string' ? draft.reservationExpiresAt : null,
+    ...(disclosure ? { disclosure } : { disclosure: undefined }),
+  }
 }
 
 /**

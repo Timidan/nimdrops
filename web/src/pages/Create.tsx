@@ -4,11 +4,14 @@ import {
   ApiError,
   createDrop,
   forgetDraftKeys,
+  getCustody,
   getDrop,
   submitFunding,
+  type CustodyDisclosure,
   type Draft,
   type DropPublic,
   type DropState,
+  type PilotLimits,
 } from '../api'
 import { capProblem, formatNim, lunaFromNim, MAX_CLAIMS, MIN_CLAIMS } from '../money'
 import { nimiqPayDeeplink, resolveBridge, type BridgeResult } from '../sdk/adapter'
@@ -40,10 +43,27 @@ import Sheet from '../ui/Sheet'
  * `live`, a sponsor who closes the app while funding confirms has no other copy
  * of it. `state/funding.ts` therefore remembers the funded draft, and this
  * screen resumes from it on mount.
+ *
+ * **The sponsor is trusting a person, and has to be told so before they pay.**
+ * NimDrops is a custodial hot wallet: the operator holds a key that can spend
+ * the whole balance, and no on-chain escrow exists because a Nimiq HTLC has one
+ * recipient and cannot express "N unknown claimants". `GET /api/custody` is the
+ * server's own account of that, and every point it returns is rendered here, in
+ * the order it returns them, above the fund button. Not paraphrased: the server
+ * enforces the caps and holds the key, so any wording invented on this side
+ * could drift away from what is actually true.
  */
 
 /** Design §4.2 step 5: poll the public state, do not guess. */
 const POLL_MS = 3000
+
+/**
+ * How often the reservation countdown redraws. The number on screen is in
+ * minutes, so a second is far finer than it needs to be — but it is also what
+ * makes the lapse land on the second it happens rather than up to a minute
+ * later, and the lapse is the moment the sponsor's room stops being theirs.
+ */
+const RESERVATION_TICK_MS = 1000
 
 /** How many people the form starts on, and the count a `?amount=` is judged against. */
 const DEFAULT_CLAIM_COUNT = 5
@@ -82,7 +102,19 @@ type Phase =
   | 'live'
   /** Production browser with no Nimiq Pay provider. */
   | 'no-wallet'
+  /**
+   * `drop_too_large` (422). The total is bigger than the cap can ever hold, so
+   * the only move is a smaller drop. Deliberately NOT a retry screen.
+   */
+  | 'too-large'
+  /** `no_capacity` (503). The room exists; somebody else has it right now. */
+  | 'no-capacity'
+  /** The operator has funding closed. No wallet prompt from here. */
+  | 'closed'
   | 'failed'
+
+/** Whether the live disclosure has arrived, and what to show while it has not. */
+type CustodyState = 'loading' | 'ready' | 'unavailable'
 
 function phaseForDrop(state: DropState): Phase {
   if (state === 'funding_pending') return 'confirming'
@@ -101,6 +133,20 @@ const FINISHED: readonly DropState[] = ['settled', 'refunded', 'cancelled']
 /** Phases whose truth lives on the server, so they keep asking it. */
 const POLLED: readonly Phase[] = ['detecting', 'confirming', 'unconfirmed']
 
+/** `BigInt()` on a string the server chose, without trusting it to be a number. */
+function lunaOf(value: string): bigint | null {
+  try {
+    return BigInt(value)
+  } catch {
+    return null
+  }
+}
+
+/** The server's own sentence for a closed deployment, when it sent one. */
+function pausedPoint(custody: CustodyDisclosure | null): string | null {
+  return custody?.points.find((point) => point.id === 'paused')?.text ?? null
+}
+
 export interface CreateProps {
   /**
    * Test seam. Production renders `<Create />` and gets the real provider
@@ -118,7 +164,8 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
   const [sponsorLabel, setSponsorLabel] = useState('')
   const [message, setMessage] = useState('')
 
-  const [reviewOpen, setReviewOpen] = useState(false)
+  /** One sheet at a time: the disclosure on its own, or the review that funds. */
+  const [sheet, setSheet] = useState<'none' | 'custody' | 'review'>('none')
   // Read once, synchronously, before the first paint: a sponsor who funded a
   // drop from this browser must never see the empty form flash past on the way
   // to their link.
@@ -127,12 +174,53 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
   const [draft, setDraft] = useState<Draft | null>(null)
   const [drop, setDrop] = useState<DropPublic | null>(null)
   const [failure, setFailure] = useState('')
+  const [custody, setCustody] = useState<CustodyDisclosure | null>(null)
+  const [custodyState, setCustodyState] = useState<CustodyState>('loading')
+  const [retryAfter, setRetryAfter] = useState<number | null>(null)
+
+  /**
+   * Read the live disclosure. Returns it as well as storing it, because two
+   * callers need to act on the answer rather than just show it.
+   *
+   * A refresh that fails keeps whatever was already on screen: numbers a minute
+   * old are closer to the truth than no numbers, and the server re-checks the
+   * cap when the drop is created anyway.
+   */
+  const loadCustody = useCallback(async (): Promise<CustodyDisclosure | null> => {
+    try {
+      const next = await getCustody()
+      setCustody(next)
+      setCustodyState('ready')
+      return next
+    } catch {
+      setCustodyState((previous) => (previous === 'ready' ? previous : 'unavailable'))
+      return null
+    }
+  }, [])
+
+  const refreshCustody = useCallback(() => {
+    void loadCustody()
+  }, [loadCustody])
+
+  useEffect(() => {
+    void loadCustody()
+  }, [loadCustody])
+
+  const paused = custody?.paused === true
 
   const amountLuna = lunaFromNim(amountEach)
   const problem = capProblem(amountLuna, claimCount)
   const totalLuna = amountLuna === null ? null : amountLuna * BigInt(claimCount)
   const totalText = totalLuna === null || problem === 'amount' ? '—' : `${formatNim(totalLuna)} NIM`
-  const ready = problem === null && sponsorLabel.trim().length > 0
+  /**
+   * The deployment's own ceiling, which on the mainnet pilot is two orders of
+   * magnitude under the 100 NIM launch cap in `money.ts`. Checked here so a
+   * sponsor meets the limit while they are still choosing a number, rather than
+   * as a 422 after they have committed to one.
+   */
+  const capLuna = custody === null ? null : lunaOf(custody.limits.perDropMaxLuna)
+  const overCap = totalLuna !== null && capLuna !== null && totalLuna > capLuna
+  const ready = problem === null && sponsorLabel.trim().length > 0 && !overCap && !paused
 
   // A draft that has already been created is reused on retry: the sponsor is
   // approving THE SAME funding request, not a new one.
@@ -210,9 +298,16 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
   )
 
   const fund = useCallback(async () => {
-    setReviewOpen(false)
+    setSheet('none')
     if (draftRef.current) {
       await approve(draftRef.current)
+      return
+    }
+    // Belt and braces behind the disabled review button: the operator can close
+    // funding while a sheet is open, and a wallet prompt for a drop the server
+    // will refuse costs the sponsor a real transaction.
+    if (paused) {
+      setPhase('closed')
       return
     }
     setPhase('creating')
@@ -225,14 +320,53 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
         claimCount,
       })
     } catch (err) {
+      /**
+       * The three capacity refusals, which are the only money-shaped refusals a
+       * sponsor meets before they have paid anything. Each gets its own screen
+       * because each has a different answer, and "try again" on the one that
+       * can never succeed would send the sponsor round a loop.
+       */
+      if (err instanceof ApiError && err.code === 'drop_too_large') {
+        refreshCustody()
+        setPhase('too-large')
+        return
+      }
+      if (err instanceof ApiError && err.code === 'no_capacity') {
+        setRetryAfter(err.retryAfterSeconds ?? null)
+        refreshCustody()
+        setPhase('no-capacity')
+        return
+      }
+      if (err instanceof ApiError && err.code === 'paused') {
+        refreshCustody()
+        setPhase('closed')
+        return
+      }
       setFailure(err instanceof ApiError ? err.message : 'we could not reach NimDrops just now')
       setPhase('failed')
       return
     }
+    // The disclosure on the 201 is the one that applied to THIS drop, read
+    // inside the transaction that reserved its room. It wins over the copy
+    // fetched on mount.
+    if (created.disclosure) {
+      setCustody(created.disclosure)
+      setCustodyState('ready')
+    }
     draftRef.current = created
     setDraft(created)
     await approve(created)
-  }, [amountEach, approve, claimCount, message, sponsorLabel])
+  }, [amountEach, approve, claimCount, message, paused, refreshCustody, sponsorLabel])
+
+  /**
+   * Ask again whether funding has reopened. Only the closed screen calls it, and
+   * only a genuine `paused: false` moves off that screen — a failed check leaves
+   * the sponsor where they are rather than walking them into a refusal.
+   */
+  const recheckFunding = useCallback(async () => {
+    const next = await loadCustody()
+    if (next && !next.paused) setPhase('form')
+  }, [loadCustody])
 
   /**
    * Come back to a drop this browser funded.
@@ -344,6 +478,7 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
     setDraft(null)
     setDrop(null)
     setFailure('')
+    setRetryAfter(null)
     setAmountEach('')
     setClaimCount(DEFAULT_CLAIM_COUNT)
     setSponsorLabel('')
@@ -367,6 +502,24 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
 
   if (phase === 'no-wallet') return <NoWallet />
 
+  /**
+   * The room this draft holds in the cap, counting down.
+   *
+   * Shown only while the sponsor still has a decision to make. Once the wallet
+   * has reported a hash the reservation stops mattering — the server keeps a
+   * paid draft's room regardless — so the note would be a worry with no action
+   * behind it.
+   */
+  const reservationNote =
+    draft?.reservationExpiresAt && custody ? (
+      <ReservationNote
+        expiresAt={draft.reservationExpiresAt}
+        windowMinutes={custody.fundingWindowMinutes}
+        custody={custody}
+        onLapsed={refreshCustody}
+      />
+    ) : null
+
   if (phase === 'rejected' && draft) {
     return (
       <Recover
@@ -374,6 +527,58 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
         body="Your wallet closed without approving the transaction, so nothing was sent and nothing was charged."
         action="Try again"
         onAction={() => void approve(draft)}
+        note={reservationNote}
+      />
+    )
+  }
+
+  /**
+   * 422. The requested total is larger than the whole cap, so there is no
+   * later at which it would work and no retry button on this screen.
+   */
+  if (phase === 'too-large') {
+    return (
+      <Recover
+        testId="drop-too-large"
+        title="That total is over the cap"
+        body={
+          custody
+            ? `A drop can hold up to ${custody.limits.perDropMax} NIM right now. Lower the amount per person or the number of people, then review it again.`
+            : 'This drop is larger than the cap allows. Lower the amount per person or the number of people, then review it again.'
+        }
+        action="Change the amount"
+        onAction={() => setPhase('form')}
+      />
+    )
+  }
+
+  /** 503. The room exists, someone else has it, and waiting is a real answer. */
+  if (phase === 'no-capacity') {
+    return (
+      <Recover
+        testId="no-capacity"
+        title="No room for another drop right now"
+        body={noCapacityBody({ custody, totalText, retryAfter })}
+        action="Try again"
+        onAction={() => void fund()}
+        secondary="Change the amount"
+        onSecondary={() => setPhase('form')}
+      />
+    )
+  }
+
+  if (phase === 'closed') {
+    return (
+      <Recover
+        testId="funding-closed-screen"
+        title="Funding is closed right now"
+        body={
+          pausedPoint(custody) ??
+          'The operator has to open funding before a new drop can start. Nothing has been sent and nothing has been charged.'
+        }
+        action="Check again"
+        onAction={() => void recheckFunding()}
+        quiet
       />
     )
   }
@@ -408,7 +613,9 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
     phase === 'detecting' ||
     phase === 'confirming'
   ) {
-    return <Progress phase={phase} draft={draft} />
+    return (
+      <Progress phase={phase} draft={draft} note={phase === 'approving' ? reservationNote : null} />
+    )
   }
 
   return (
@@ -419,6 +626,24 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
           One transaction from you. A fixed, equal share for everyone who opens the link.
         </p>
       </header>
+
+      {/* The ceiling, before a number is typed against it — or, when the
+          operator has closed funding, the one fact that matters more. */}
+      {paused ? (
+        <div
+          data-testid="funding-closed"
+          role="status"
+          className="mt-6 rounded-2xl border border-gold/50 bg-gold/15 p-4"
+        >
+          <p className="text-sm font-semibold text-ink">Funding is closed</p>
+          <p className="mt-1 text-xs leading-relaxed text-ink/70">
+            {pausedPoint(custody) ??
+              'The operator has to open funding before a new drop can start.'}
+          </p>
+        </div>
+      ) : custody ? (
+        <LiveLimits limits={custody.limits} />
+      ) : null}
 
       <div className="mt-8 space-y-6">
         <AmountInput
@@ -446,32 +671,79 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
           {totalText}
         </p>
       </div>
-      {problem === 'total' ? (
+      {overCap && custody ? (
+        <p data-testid="over-cap" className="mt-2 text-right text-xs text-ink/60">
+          A drop can hold up to {custody.limits.perDropMax} NIM right now. Lower the amount or the
+          number of people.
+        </p>
+      ) : problem === 'total' ? (
         <p className="mt-2 text-right text-xs text-ink/60">
           A drop can hold up to 100 NIM while NimDrops is new.
         </p>
       ) : null}
 
+      {/* The study's Ugly Cash move: the least reassuring fact about the
+          product is the headline of a card, not a footnote under a button.
+          The same words the claimant's card uses on the other side of the
+          link, aimed at the person who is about to pay for it. */}
+      <button
+        type="button"
+        data-testid="custody-card"
+        aria-haspopup="dialog"
+        aria-expanded={sheet === 'custody'}
+        onClick={() => setSheet('custody')}
+        className="mt-8 block w-full rounded-2xl border border-ink/10 bg-ink/4 p-4 text-left"
+      >
+        <span className="block text-sm font-semibold text-ink/80">
+          NimDrops holds your NIM, and no contract holds it for you
+        </span>
+        <span className="mt-1 block text-xs leading-relaxed text-ink/55">
+          Who can move it, the limits right now, and what happens if nobody claims.
+        </span>
+      </button>
+
       <button
         type="button"
         disabled={!ready}
-        onClick={() => setReviewOpen(true)}
-        className="nd-primary mt-6 w-full"
+        onClick={() => setSheet('review')}
+        className="nd-primary mt-5 w-full"
       >
         Review drop
       </button>
-      {/* §10.4 in one line on the create screen itself; the full disclosure is
-          in the review sheet, before the wallet ever opens. */}
       <p className="mt-3 text-center text-xs text-ink/50">
-        NimDrops holds your NIM until each share is claimed. Nothing is sent until you approve it in
-        Nimiq Pay.
+        Nothing is sent until you approve it in Nimiq Pay.
       </p>
 
+      {/* The disclosure on its own, reachable while the sponsor is still
+          deciding how much to send. Same points, same order, no fund button —
+          reading it is not a step in paying. */}
       <Sheet
-        open={reviewOpen}
+        open={sheet === 'custody'}
+        title="What you are trusting"
+        onClose={() => setSheet('none')}
+      >
+        <CustodyBody
+          custody={custody}
+          custodyState={custodyState}
+          onRetry={refreshCustody}
+          heading={false}
+        />
+        <ShareRules />
+        <button
+          type="button"
+          data-testid="custody-sheet-close"
+          onClick={() => setSheet('none')}
+          className="nd-secondary mt-6 w-full"
+        >
+          Close
+        </button>
+      </Sheet>
+
+      <Sheet
+        open={sheet === 'review'}
         title="Before you fund"
         sealMark={sponsorLabel.trim().slice(0, 1).toUpperCase()}
-        onClose={() => setReviewOpen(false)}
+        onClose={() => setSheet('none')}
       >
         <dl className="divide-y divide-ink/10 text-sm">
           <Row label="Each person gets">{`${amountEach || '0'} NIM`}</Row>
@@ -482,9 +754,21 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
           <Row label="Expires">24 hours after it goes live</Row>
         </dl>
 
-        <Disclosure />
+        {/* Every point, in the server's order, above the button that opens the
+            wallet. The sheet scrolls, so reaching the button means scrolling
+            past them. */}
+        <CustodyBody custody={custody} custodyState={custodyState} onRetry={refreshCustody} />
+        <ShareRules />
 
-        <button type="button" onClick={() => void fund()} className="nd-primary mt-6 w-full">
+        {custody ? (
+          <p
+            data-testid="custody-summary"
+            className="mt-6 text-sm leading-relaxed font-medium text-ink"
+          >
+            {custody.summary}
+          </p>
+        ) : null}
+        <button type="button" onClick={() => void fund()} className="nd-primary mt-4 w-full">
           Fund drop
         </button>
         <p className="mt-3 text-center text-xs text-ink/50">
@@ -519,38 +803,225 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
   )
 }
 
+// ---- the custody disclosure ----------------------------------------------------
+
 /**
- * The disclosure design §10.4 requires on the create screen, in plain words:
- * who holds the money, what a claim is, when it expires, where the rest goes,
- * and what "paid" waits for.
+ * The live ceiling, on the form, above the fields.
+ *
+ * A sponsor choosing an amount needs the number they are choosing against. The
+ * mainnet pilot's aggregate cap is two orders of magnitude under the 100 NIM
+ * launch cap, so this is the difference between typing a total that works and
+ * typing one the server has to refuse.
  */
-function Disclosure() {
+function LiveLimits({ limits }: { limits: PilotLimits }) {
   return (
-    <div className="mt-5 rounded-2xl bg-ink/4 p-4 text-xs leading-relaxed text-ink/70">
-      <p>
-        Your NIM is <strong className="font-semibold text-ink">temporarily held</strong> by the NimDrops
-        operator until each share is claimed. This is custody, not a smart contract.
-      </p>
-      <p className="mt-2">
-        Shares are fixed and first come, first served — one per wallet. Nothing here proves a person is
-        unique.
-      </p>
-      <p className="mt-2">
-        The drop expires <strong className="font-semibold text-ink">24 hours</strong> after it goes live.
-        Every unclaimed share is then{' '}
-        <strong className="font-semibold text-ink">refunded to the wallet that funded</strong> it — the
-        sender of your funding transaction, never an address typed into this app.
-      </p>
-      <p className="mt-2">
-        Payouts and returns wait for chain confirmation, and can go to manual review during network or
-        signer incidents.
-      </p>
-      <p className="mt-2">
-        Wallet addresses and transactions are public on the Nimiq blockchain. NimDrops keeps only the
-        minimum operational records described in its privacy note.
-      </p>
+    <div data-testid="live-limits" className="mt-6 rounded-2xl bg-ink/4 px-4 py-3">
+      <p className="text-xs font-semibold tracking-wide text-ink/55 uppercase">Limits right now</p>
+      <dl className="mt-1.5 divide-y divide-ink/8 text-sm">
+        <Row label="Most in one drop">{limits.perDropMax} NIM</Row>
+        <Row label="Free across all drops">
+          {limits.remaining} of {limits.aggregateMax} NIM
+        </Row>
+        {limits.maxLiveDrops === null ? null : (
+          <Row label="Drops running">
+            {limits.liveDrops} of {limits.maxLiveDrops}
+          </Row>
+        )}
+      </dl>
     </div>
   )
+}
+
+/**
+ * Every disclosure point the server sent, in the order it sent them.
+ *
+ * The order is the reading order the server chose — what this is, who can take
+ * it, how much, where it goes, which run this is, when the clock starts, how
+ * money comes back — and when funding is closed the server puts that first.
+ * Nothing here re-sorts, re-words or filters, because the point of fetching
+ * these rather than shipping them is that they cannot drift away from what the
+ * backend actually enforces.
+ *
+ * The first point gets the darker ink. It is the one the sponsor is most likely
+ * to read and the one they most need to.
+ */
+function CustodyPoints({ points }: { points: { id: string; text: string }[] }) {
+  return (
+    <ul data-testid="custody-points" className="mt-3 space-y-2.5">
+      {points.map((point, index) => (
+        <li
+          key={point.id}
+          data-point={point.id}
+          className={`flex gap-2.5 text-sm leading-relaxed break-words ${
+            index === 0 ? 'font-medium text-ink' : 'text-ink/70'
+          }`}
+        >
+          <span
+            aria-hidden="true"
+            className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-gold-deep"
+          />
+          <span className="min-w-0">{point.text}</span>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
+/**
+ * The server's points, or the words this app ships with when they did not load.
+ *
+ * The fallback is short on purpose: it carries the two facts a sponsor cannot
+ * be allowed to fund without — custody, and where unclaimed NIM goes — and says
+ * plainly that the live numbers are missing. It does not block funding, because
+ * the server re-checks every cap when the drop is created and now says exactly
+ * why when it refuses.
+ */
+function CustodyBody({
+  custody,
+  custodyState,
+  onRetry,
+  /** Off in the sheet whose dialog title already says it. */
+  heading = true,
+}: {
+  custody: CustodyDisclosure | null
+  custodyState: CustodyState
+  onRetry: () => void
+  heading?: boolean
+}) {
+  return (
+    <section className={heading ? 'mt-6' : ''}>
+      {heading ? <h3 className="text-sm font-semibold text-ink">What you are trusting</h3> : null}
+      {custody ? (
+        <CustodyPoints points={custody.points} />
+      ) : (
+        <div data-testid="custody-fallback" className="mt-3 space-y-2.5 text-sm leading-relaxed text-ink/70">
+          <p className="font-medium text-ink">
+            Your NIM goes to one wallet the NimDrops operator runs, not to an escrow contract. The
+            operator holds the only key and can move everything in it.
+          </p>
+          <p>
+            A drop stops accepting claims 24 hours after it goes live. Whatever nobody claims goes
+            back to the wallet you fund from.
+          </p>
+          {custodyState === 'unavailable' ? (
+            <>
+              <p>
+                The live limits did not load, so this screen cannot tell you how much room is left.
+                NimDrops checks the cap again when the drop is created and says what to do if there
+                is none.
+              </p>
+              <button type="button" onClick={onRetry} className="nd-secondary mt-1 w-full">
+                Load the limits again
+              </button>
+            </>
+          ) : null}
+        </div>
+      )}
+    </section>
+  )
+}
+
+/**
+ * What the server's points deliberately leave to this side: how a share is
+ * won, and what is public afterwards. The same three facts the claimant's own
+ * disclosure sheet gives, so both ends of the link are told one story.
+ */
+function ShareRules() {
+  return (
+    <section className="mt-6">
+      <h3 className="text-sm font-semibold text-ink">How the shares work</h3>
+      <div className="mt-2 space-y-2 text-sm leading-relaxed text-ink/70">
+        <p>
+          Shares are fixed and first come, first served — one per wallet. A signature proves control
+          of one wallet, not one person.
+        </p>
+        <p>
+          Payouts and returns wait for the network to confirm them, and can go to a person for
+          review during an incident.
+        </p>
+        <p>
+          Funding, payouts and refunds are ordinary Nimiq transactions: public and permanent on the
+          chain.
+        </p>
+      </div>
+    </section>
+  )
+}
+
+/**
+ * How long this draft's room in the cap is still its own.
+ *
+ * Capacity is committed when the funding instructions are issued and released
+ * again after `fundingWindowMinutes`, so a sponsor who leaves the wallet open
+ * and comes back an hour later may find the room gone. Saying so is the whole
+ * job; the lapse also re-reads `/api/custody`, so the sentence that replaces the
+ * countdown carries the headroom as it is now rather than as it was.
+ */
+function ReservationNote({
+  expiresAt,
+  windowMinutes,
+  custody,
+  onLapsed,
+}: {
+  expiresAt: string
+  windowMinutes: number
+  custody: CustodyDisclosure
+  onLapsed: () => void
+}) {
+  const deadline = Date.parse(expiresAt)
+  const usable = Number.isFinite(deadline)
+  const [now, setNow] = useState(() => Date.now())
+  const lapsed = usable && deadline <= now
+
+  useEffect(() => {
+    if (!usable || lapsed) return
+    const timer = setInterval(() => setNow(Date.now()), RESERVATION_TICK_MS)
+    return () => clearInterval(timer)
+  }, [usable, lapsed])
+
+  useEffect(() => {
+    if (lapsed) onLapsed()
+  }, [lapsed, onLapsed])
+
+  if (!usable) return null
+
+  const minutesLeft = Math.max(1, Math.ceil((deadline - now) / 60_000))
+  const text = lapsed
+    ? `The ${windowMinutes} minute hold on your room has ended. ${custody.limits.remaining} NIM of the ${custody.limits.aggregateMax} NIM cap is free right now, so funding may still work — it is just no longer held for you.`
+    : minutesLeft <= 1
+      ? 'Your room in the cap is held for less than a minute more.'
+      : `Your room in the cap is held for another ${minutesLeft} minutes.`
+
+  return (
+    <p data-testid="reservation-note" role="status" className="mt-8 text-xs leading-relaxed text-ink/55">
+      {text}
+    </p>
+  )
+}
+
+/**
+ * What to say when the server had no room. Three answers, because there are
+ * three different situations and only two of them are worth retrying.
+ */
+function noCapacityBody(o: {
+  custody: CustodyDisclosure | null
+  totalText: string
+  retryAfter: number | null
+}): string {
+  const { custody, totalText, retryAfter } = o
+  const wait =
+    retryAfter !== null && retryAfter > 0
+      ? `try again in about ${retryAfter} seconds`
+      : 'try again shortly'
+  if (custody && custody.limits.remainingDrops === 0) {
+    const sentence = wait.charAt(0).toUpperCase() + wait.slice(1)
+    return `Another drop is already running, and this pilot runs one at a time. ${sentence}.`
+  }
+  if (custody) {
+    return `This drop needs ${totalText}, and ${custody.limits.remaining} NIM of the ${custody.limits.aggregateMax} NIM cap is free right now. Lower the total, or ${wait}.`
+  }
+  const sentence = wait.charAt(0).toUpperCase() + wait.slice(1)
+  return `Someone else is holding the room in the cap. ${sentence}.`
 }
 
 function PeopleStepper({ value, onChange }: { value: number; onChange: (n: number) => void }) {
@@ -682,7 +1153,15 @@ const PENDING_SHARE_NOTE =
 const PENDING_LEAVE_NOTE =
   'You can close NimDrops. Reopen it on this device and you land back on this drop.'
 
-function Progress({ phase, draft }: { phase: Phase; draft: Draft | null }) {
+function Progress({
+  phase,
+  draft,
+  note,
+}: {
+  phase: Phase
+  draft: Draft | null
+  note?: ReactNode
+}) {
   const copy = PROGRESS_COPY[phase] ?? PROGRESS_COPY.creating
   const steps: { key: Phase; label: string }[] = [
     { key: 'detecting', label: 'Detecting' },
@@ -727,6 +1206,8 @@ function Progress({ phase, draft }: { phase: Phase; draft: Draft | null }) {
             Funding {draft.expectedFunding} NIM to the NimDrops custody address.
           </p>
         ) : null}
+
+        {note}
       </div>
     </Screen>
   )
@@ -738,21 +1219,40 @@ function Recover({
   action,
   onAction,
   quiet,
+  secondary,
+  onSecondary,
+  note,
+  testId,
 }: {
   title: string
   body: string
   action: string
   onAction: () => void
   quiet?: boolean
+  /** A second way out, for a refusal that has two honest answers. */
+  secondary?: string
+  onSecondary?: () => void
+  note?: ReactNode
+  testId?: string
 }) {
   return (
     <Screen>
-      <div className="flex flex-1 flex-col justify-center py-16">
+      <div
+        {...(testId ? { 'data-testid': testId } : {})}
+        className="flex flex-1 flex-col justify-center py-16"
+      >
         <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
         <p className="mt-3 text-sm leading-relaxed text-ink/60">{body}</p>
         <button type="button" onClick={onAction} className={quiet ? 'nd-secondary mt-8 w-full' : 'nd-primary mt-8 w-full'}>
           {action}
         </button>
+        {secondary && onSecondary ? (
+          <button type="button" onClick={onSecondary} className="nd-secondary mt-3 w-full">
+            {secondary}
+          </button>
+        ) : null}
+
+        {note}
       </div>
     </Screen>
   )
