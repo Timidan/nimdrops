@@ -1,0 +1,37 @@
+# TLS edge overlay. Kept separate from docker-compose.yml because compose
+# interpolates every service on every invocation: a required PUBLIC_HOSTNAME in
+# the base file makes `docker compose run`, `logs` and `ps` fail on a host that
+# has no DNS name yet (learned the hard way on the deployment).
+#
+# Going live:
+#   1. point an A/AAAA record at this host
+#   2. in .env set PUBLIC_HOSTNAME=<name> and PUBLIC_ORIGIN=https://<same name>
+#   3. docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d
+#
+# Ports 80 and 443 must be reachable from the internet or the ACME challenge
+# cannot complete. PUBLIC_ORIGIN must match the certificate name: it is baked
+# into every share link and into the signed claim challenge, so a mismatch
+# invalidates challenges and produces links nobody can open.
+services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - server
+    environment:
+      # Caddy substitutes this into the site block in ./Caddyfile. Required here
+      # rather than defaulted: a placeholder name would burn ACME rate limits on
+      # a domain nobody controls.
+      PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME:?set PUBLIC_HOSTNAME to the public DNS name, e.g. drops.example.com}
+    ports:
+      - '80:80'
+      - '443:443'
+      - '443:443/udp'
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

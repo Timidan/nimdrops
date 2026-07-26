@@ -137,6 +137,16 @@ The invariants that actually protect other people's money:
 docker compose up -d --build
 ```
 
+That brings up Postgres, the API and the worker, reachable only on the docker
+network. **TLS is a separate overlay** so the base stack works on a host with no
+DNS name yet:
+
+```bash
+# once an A/AAAA record points here and .env has PUBLIC_HOSTNAME plus
+# PUBLIC_ORIGIN=https://<same name>
+docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d
+```
+
 **Apply migrations.** They are deliberately not automatic; a financial schema change should be an operator action taken before the new image serves traffic. `migrate()` is idempotent and takes an advisory lock, so concurrent invocations are safe.
 
 ```bash

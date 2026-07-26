@@ -95,26 +95,12 @@ services:
     deploy:
       replicas: 1
 
-  caddy:
-    image: caddy:2
-    restart: unless-stopped
-    depends_on:
-      - server
-    environment:
-      # Caddy substitutes this into the site block in ./Caddyfile. Required —
-      # compose fails fast rather than serving on a placeholder hostname and
-      # burning ACME rate limits on a name nobody controls.
-      PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME:?set PUBLIC_HOSTNAME to the public DNS name, e.g. drops.example.com}
-    ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
+# The TLS edge lives in docker-compose.tls.yml, deliberately NOT here: compose
+# interpolates every service on every invocation, so a required PUBLIC_HOSTNAME
+# in this file would break `docker compose run migrate`, `logs`, `ps` and every
+# other command on a host that has no DNS name yet.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d
 
 volumes:
   pgdata:
-  caddy_data:
-  caddy_config:
