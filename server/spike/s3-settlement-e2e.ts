@@ -261,6 +261,9 @@ function git(...args: string[]): string {
   return (r.stdout ?? '').trim()
 }
 
+/** Sentinel: the run could not identify its own commit, so it certifies nothing. */
+const UNKNOWN_COMMIT = '<unknown — no .git and no NIMDROPS_COMMIT>'
+
 interface Provenance {
   hostname: string
   commit: string
@@ -293,9 +296,13 @@ async function collectProvenance(pool: pg.Pool): Promise<Provenance> {
   )
   return {
     hostname: osHostname(),
-    commit: git('rev-parse', 'HEAD') || '<not a git checkout>',
-    dirty: git('status', '--porcelain') !== '',
-    branch: git('rev-parse', '--abbrev-ref', 'HEAD') || '<unknown>',
+    // Inside the deploy image there is no .git, so git() returns nothing. The
+    // deployer passes the commit it built from as NIMDROPS_COMMIT; if neither
+    // source is available the commit is UNKNOWN and `dirty` must not be read as
+    // "clean" — an unknown checkout cannot certify that the named code ran.
+    commit: git('rev-parse', 'HEAD') || process.env.NIMDROPS_COMMIT || UNKNOWN_COMMIT,
+    dirty: git('rev-parse', 'HEAD') ? git('status', '--porcelain') !== '' : false,
+    branch: git('rev-parse', '--abbrev-ref', 'HEAD') || process.env.NIMDROPS_BRANCH || '<unknown>',
     network: NETWORK,
     database: `${rows[0].db} as ${rows[0].usr} at ${redactedDatabaseUrl()}`,
     serverVersion: rows[0].ver.split(' ').slice(0, 2).join(' '),
@@ -322,9 +329,14 @@ function provenanceLines(p: Provenance): string[] {
     `- run schema: \`${p.runSchema}\` (throwaway, dropped at the end of the run)`,
     `- process exit code: \`${EXIT_CODE_PLACEHOLDER}\``,
     '',
-    p.dirty
-      ? 'NOTE: the working tree was DIRTY. The commit named above is not exactly the code that ran.'
-      : 'The working tree was clean, so the commit named above is exactly the code that ran.',
+    p.commit === UNKNOWN_COMMIT
+      ? 'WARNING: the running code could not identify its own commit — no .git in this ' +
+        'image and no NIMDROPS_COMMIT passed in. This artefact therefore does NOT establish ' +
+        'which code produced it; treat its provenance as operator-attested, and re-run with ' +
+        '`-e NIMDROPS_COMMIT=$(git rev-parse HEAD)` for a self-certifying record.'
+      : p.dirty
+        ? 'NOTE: the working tree was DIRTY. The commit named above is not exactly the code that ran.'
+        : 'The working tree was clean, so the commit named above is exactly the code that ran.',
     '',
     '### Migrations applied to the run schema',
     '',
