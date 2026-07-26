@@ -54,7 +54,7 @@ They deliberately do not carry: private keys, signatures, public keys, raw seria
 
 Honest caveat: this is enforced at the call sites, by choosing what to pass, rather than by a serializer that strips these fields structurally. A structural redactor is a planned hardening item and is not written yet. The reverse proxy also writes ordinary HTTP access logs, which include client IP addresses.
 
-Client IP addresses are used in memory for rate limiting, keyed on the last `X-Forwarded-For` hop so a client cannot choose its own bucket. Those buckets live in the API process's memory and are not written to the database.
+Client IP addresses are used in memory for rate limiting. The API reads no forwarding header directly: it buckets by the socket peer, unless the request carries an address nominated by our own reverse proxy and authenticated with a shared secret, which is how the real client is recovered when a CDN sits in front. Anything a client sends itself — `X-Forwarded-For`, `X-Real-IP`, `CF-Connecting-IP` — is ignored, and every misconfiguration collapses everyone into one shared bucket rather than letting anyone choose their own. Those buckets live in the API process's memory and are never written to the database. The reverse proxy separately writes ordinary HTTP access logs, which do include client IP addresses.
 
 ## Third parties
 
