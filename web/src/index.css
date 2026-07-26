@@ -109,7 +109,9 @@ body {
      mounts it. */
   color: var(--color-ink);
   box-shadow: 0 18px 44px -20px rgb(0 0 0 / 0.6);
-  transition: transform 620ms cubic-bezier(0.22, 1.15, 0.36, 1);
+  /* Second beat: the sheet lifts with the flap, not ahead of it. See the
+     reveal ladder note above `.nd-flap`. */
+  transition: transform 620ms cubic-bezier(0.22, 1.15, 0.36, 1) 90ms;
 }
 
 /* Room for the flap and the wax that straddles its point. */
@@ -143,7 +145,8 @@ body {
     rgb(92 72 34 / 0) 100%
   );
   opacity: 0;
-  transition: opacity 520ms ease-out;
+  /* Third beat: depth appears once the flap has cleared the top of the sheet. */
+  transition: opacity 520ms ease-out 220ms;
   pointer-events: none;
 }
 
@@ -151,6 +154,29 @@ body {
   opacity: 1;
 }
 
+/**
+ * The reveal is a sequence, not a chord.
+ *
+ * Nine things used to start on the same frame, so the eye had no order to
+ * follow and the gold bloom peaked (38% of 900ms ≈ 340ms) while the flap was
+ * still halfway through its 640ms travel — warmth arriving before the thing it
+ * was warming. The delays below stage it the way a seal actually breaks:
+ *
+ *   0ms    the wax splits          — it is the thing being broken
+ *   90ms   the flap swings, the face lifts — paper follows the seal
+ *   220ms  the liner fades in      — depth appears as the flap clears
+ *   260ms  the bloom starts        — peaks ~600ms, with the flap's arrival
+ *   180ms  the receipt rises       — only on `paid`
+ *
+ * Wall clock goes to ~830ms and felt time goes down, because it now has a
+ * beginning, a middle and an end.
+ *
+ * These delays are load-bearing for `prefers-reduced-motion`: the global block
+ * at the bottom of this file has to zero `transition-delay` and
+ * `animation-delay` as well as the durations, or a reduced-motion user spends
+ * 260ms looking at a screen where nothing has happened yet. `Envelope.test.tsx`
+ * asserts both halves.
+ */
 .nd-flap {
   position: absolute;
   top: 0;
@@ -160,7 +186,7 @@ body {
   height: var(--nd-flap-h);
   transform-origin: top center;
   transform: rotateX(0deg);
-  transition: transform 640ms cubic-bezier(0.22, 1.15, 0.36, 1);
+  transition: transform 640ms cubic-bezier(0.22, 1.15, 0.36, 1) 90ms;
   pointer-events: none;
 }
 
@@ -348,7 +374,10 @@ body {
   );
   filter: blur(18px);
   opacity: 0;
-  animation: nd-bloom 900ms ease-out 1;
+  /* Fourth beat, 260ms in: the warmth peaks as the flap lands, not before it
+     has moved. `BLOOM_MS` in `Envelope.tsx` covers delay + duration, so the
+     element is never unmounted mid-fade. */
+  animation: nd-bloom 900ms ease-out 260ms 1;
   pointer-events: none;
 }
 
@@ -366,9 +395,9 @@ body {
   }
 }
 
-/** The receipt rising into the opened envelope. */
+/** The receipt rising into the opened envelope, after the flap has moved. */
 .nd-rise {
-  animation: nd-rise 520ms cubic-bezier(0.22, 1.1, 0.36, 1) both;
+  animation: nd-rise 520ms cubic-bezier(0.22, 1.1, 0.36, 1) 180ms both;
 }
 
 @keyframes nd-rise {
@@ -444,13 +473,22 @@ body {
  * `[data-envelope-open='true']`, reached by transition. Killing the durations
  * here therefore lands on the finished, legible opened envelope rather than
  * skipping it.
+ *
+ * The DELAYS have to go too, and that is not the same statement. The reveal
+ * ladder staggers the flap, the liner and the bloom by up to 260ms; a rule that
+ * zeroed only the durations would leave a reduced-motion user waiting out those
+ * delays in front of a screen where nothing is happening — a slower reveal than
+ * the animated one, made of nothing. Zeroing both lands every stage on its
+ * finished state on the same frame.
  */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
   *::after {
     animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
   }
 }

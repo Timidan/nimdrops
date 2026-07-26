@@ -36,8 +36,12 @@ export interface EnvelopeProps {
   children: ReactNode
 }
 
-/** How long the gold bloom is mounted; matches `nd-bloom` in `index.css`. */
-const BLOOM_MS = 1000
+/**
+ * How long the gold bloom is mounted: `nd-bloom`'s 260ms delay plus its 900ms
+ * duration, with a frame to spare. Unmounting before the animation has spent
+ * itself would cut the warmth off mid-fade.
+ */
+const BLOOM_MS = 1200
 
 export default function Envelope({ open, tone = 'live', sealMark, children }: EnvelopeProps) {
   /**

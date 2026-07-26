@@ -44,7 +44,7 @@ export default function Receipt({ publicId, amountEach, txHash, sponsorLabel }: 
         <div className="flex items-baseline justify-between gap-3 px-4 py-3">
           <dt className="shrink-0 text-ink/55">From</dt>
           <dd className="min-w-0 text-right [overflow-wrap:anywhere]">
-            {sponsorLabel} <span className="text-xs text-ink/40">(unverified)</span>
+            {sponsorLabel} <span className="text-xs text-ink/40">(name unverified)</span>
           </dd>
         </div>
         <div className="flex items-baseline justify-between gap-3 px-4 py-3">
@@ -73,8 +73,10 @@ export default function Receipt({ publicId, amountEach, txHash, sponsorLabel }: 
       >
         Drop one back
       </Link>
+      {/* "Drop", not "Campaign": a gift is not a campaign, and "campaign" is
+          sponsor-side vocabulary that a claimant never asked for. */}
       <p className="mt-3 text-center text-xs text-ink/45">
-        Campaign <code className="font-mono">{publicId.slice(0, 8)}…</code>
+        Drop <code className="font-mono">{publicId.slice(0, 8)}…</code>
       </p>
     </section>
   )

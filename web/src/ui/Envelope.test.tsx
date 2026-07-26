@@ -160,6 +160,86 @@ describe('prefers-reduced-motion', () => {
     expect(reduced).toMatch(/animation-duration:\s*0\.01ms\s*!important/)
     expect(reduced).toMatch(/transition-duration:\s*0\.01ms\s*!important/)
   })
+
+  /**
+   * The trap in a staged reveal, and the reason the ladder and this assertion
+   * had to ship together.
+   *
+   * Zeroing durations is not enough once anything is delayed. A reduced-motion
+   * user would sit out the full 260ms of the ladder in front of a screen where
+   * nothing had happened yet, then have the finished envelope appear all at
+   * once — a *slower* reveal than the animated one, made of nothing. Both
+   * delays have to be crushed alongside both durations.
+   */
+  it('zeroes the reveal delays too, not only the durations', () => {
+    const css = readFileSync(resolve(process.cwd(), 'src/index.css'), 'utf8')
+    const at = css.indexOf('@media (prefers-reduced-motion: reduce)')
+    expect(at).toBeGreaterThan(-1)
+    const reduced = css.slice(at)
+
+    expect(reduced).toMatch(/transition-delay:\s*0m?s\s*!important/)
+    expect(reduced).toMatch(/animation-delay:\s*0m?s\s*!important/)
+
+    // …and on the universal selector, so nothing added later can escape it.
+    expect(reduced).toMatch(/\*,\s*\*::before,\s*\*::after\s*\{[^}]*transition-delay:\s*0m?s\s*!important/)
+    expect(reduced).toMatch(/\*,\s*\*::before,\s*\*::after\s*\{[^}]*animation-delay:\s*0m?s\s*!important/)
+  })
+})
+
+/**
+ * Nine animations used to fire on the same frame. The eye had no order to
+ * follow, and the gold bloom peaked (38% of 900ms ≈ 340ms) while the flap was
+ * halfway through its 640ms travel, so the warmth arrived before the thing it
+ * was warming.
+ *
+ * These read the stylesheet rather than the DOM for the same reason the
+ * overflow assertions above do: jsdom has no layout or animation engine, so a
+ * timing assertion made against it would defend nothing.
+ */
+describe('the reveal is a sequence, not a chord', () => {
+  const css = readFileSync(resolve(process.cwd(), 'src/index.css'), 'utf8')
+
+  /** The delay in the `transition`/`animation` shorthand of one rule. */
+  function delayOf(selector: string, property: 'transition' | 'animation'): number {
+    const block = css.match(new RegExp(`\\n${selector.replace('.', '\\.')}\\s*\\{([^}]*)\\}`))?.[1]
+    expect(block, `${selector} should exist`).toBeTruthy()
+    // The delay is the SECOND bare time in the shorthand; the first is duration.
+    const declaration = block!.match(new RegExp(`${property}:([^;]*);`))?.[1] ?? ''
+    const times = [...declaration.matchAll(/(\d+(?:\.\d+)?)m?s/g)].map((m) => Number(m[1]))
+    return times.length >= 2 ? times[1]! : 0
+  }
+
+  it('stages the seal, then the paper, then the depth, then the warmth', () => {
+    const wax = delayOf('.nd-seal', 'transition')
+    const flap = delayOf('.nd-flap', 'transition')
+    const face = delayOf('.nd-face', 'transition')
+    const liner = delayOf('.nd-liner', 'transition')
+    const bloom = delayOf('.nd-bloom', 'animation')
+
+    // The seal is the thing being broken, so it leads and nothing waits on it.
+    expect(wax).toBe(0)
+    // Paper follows the seal; the sheet lifts with the flap, not against it.
+    expect(flap).toBeGreaterThan(wax)
+    expect(face).toBe(flap)
+    // Depth appears as the flap clears, and the warmth peaks as it lands.
+    expect(liner).toBeGreaterThan(flap)
+    expect(bloom).toBeGreaterThan(liner)
+
+    // A reveal, not a wait: the last thing to start still starts inside 300ms.
+    expect(bloom).toBeLessThanOrEqual(300)
+  })
+
+  it('keeps the bloom mounted for its delay as well as its duration', async () => {
+    const rule = css.match(/\.nd-bloom\s*\{([^}]*)\}/)?.[1] ?? ''
+    const times = [...(rule.match(/animation:([^;]*);/)?.[1] ?? '').matchAll(/(\d+(?:\.\d+)?)m?s/g)]
+      .map((m) => Number(m[1]))
+    expect(times.length).toBeGreaterThanOrEqual(2)
+
+    const source = readFileSync(resolve(process.cwd(), 'src/ui/Envelope.tsx'), 'utf8')
+    const mounted = Number(source.match(/const BLOOM_MS = (\d+)/)?.[1])
+    // Unmounting early would cut the warmth off mid-fade.
+    expect(mounted).toBeGreaterThanOrEqual(times[0]! + times[1]!)
+  })
 })
 
 /**

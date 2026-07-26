@@ -1,13 +1,15 @@
 /**
- * The campaign page a stranger opens from a group chat (design §4.1, §4.3).
+ * The drop page a stranger opens from a group chat (design §4.1, §4.3).
  *
  * The rules these tests exist to defend:
  *  - a link opened in a plain browser is NOT a dead end: deep link, QR and a
  *    copy button are all on screen (this is the most-travelled path for a
  *    shared link, so it gets its own test);
- *  - the button never promises "one tap" — it says "tap and approve";
+ *  - the button never promises "one tap" — the approval is stated in the line
+ *    beneath it, and it is never reduced to a single gesture;
  *  - "on its way" while pending, "Paid" only when the backend says paid;
- *  - degradation disables the claim button, it does not delete it.
+ *  - degradation disables the claim button, it does not delete it;
+ *  - "Share the app" shares the app, not the drop the claimant just emptied.
  */
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
@@ -119,9 +121,16 @@ afterEach(() => {
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
   localStorage.clear()
+  // Tests that need a Web Share API or a clipboard define one on `navigator`;
+  // jsdom ships neither, so the honest reset is to take them away again.
+  for (const key of ['share', 'clipboard']) {
+    if (Object.getOwnPropertyDescriptor(navigator, key)?.configurable) {
+      delete (navigator as unknown as Record<string, unknown>)[key]
+    }
+  }
 })
 
-describe('Drop — the campaign card', () => {
+describe('Drop — the drop card', () => {
   it('shows sponsor, the unverified chip, the fixed amount, what is left, and the message', async () => {
     installFetch({ drop: { status: 200, body: dropBody() } })
     mount()
@@ -135,22 +144,92 @@ describe('Drop — the campaign card', () => {
     expect(screen.getByText(/expires in/i)).toBeTruthy()
   })
 
-  it('labels the action exactly "Claim 2 NIM — tap and approve"', async () => {
+  /**
+   * A first-time claimant has never heard of NimDrops. Above the fold they need
+   * who sent it, what it is in one clause, how much, and one action — in that
+   * order, and with nothing else competing.
+   */
+  it('introduces itself to someone who has never seen a NimDrop', async () => {
     installFetch({ drop: { status: 200, body: dropBody() } })
     mount()
 
-    const button = await screen.findByRole('button', { name: /claim 2 NIM/i })
-    expect(button.textContent).toBe('Claim 2 NIM — tap and approve')
+    expect(await screen.findByText(/sent you a NimDrop/i)).toBeTruthy()
+    expect(screen.getByText(/a fixed share of NIM/i)).toBeTruthy()
+
+    // The sponsor's own words come before the mechanics, not below them.
+    const body = document.body.textContent ?? ''
+    expect(body.indexOf('Thanks for a good week')).toBeLessThan(body.indexOf('shares left'))
+
+    // "Campaign" is sponsor-side vocabulary and must not reach a claimant.
+    expect(body).not.toMatch(/campaign/i)
+  })
+
+  it('labels the action exactly "Open — 2 NIM"', async () => {
+    installFetch({ drop: { status: 200, body: dropBody() } })
+    mount()
+
+    const button = await screen.findByRole('button', { name: /open . 2 NIM/i })
+    expect(button.textContent).toBe('Open — 2 NIM')
+    // The approval expectation lives under the button, not on it.
+    expect(document.body.textContent ?? '').toMatch(/you approve one signature/i)
+    // …and the button says nothing the 3.5rem amount above it already said.
+    expect(button.textContent).not.toMatch(/approve|tap/i)
   })
 
   it('never promises one tap, anywhere on the page', async () => {
     installFetch({ drop: { status: 200, body: dropBody() } })
     mount()
-    await screen.findByRole('button', { name: /claim 2 NIM/i })
+    await screen.findByRole('button', { name: /open . 2 NIM/i })
 
     expect(document.body.textContent ?? '').not.toMatch(/one[\s-]?tap/i)
     // Banned vocabulary: shares are fixed and equal, never a game of chance.
     expect(document.body.textContent ?? '').not.toMatch(/luck|random/i)
+  })
+
+  it('does not stack a "Live" pill on top of a button that already says so', async () => {
+    installFetch({ drop: { status: 200, body: dropBody() } })
+    mount()
+
+    await screen.findByRole('button', { name: /open . 2 NIM/i })
+    expect(screen.queryByTestId('status-pill')).toBe(null)
+  })
+})
+
+/**
+ * The claimant is the person being asked to trust a custodian, and used to see
+ * two grey footer lines about it while the sponsor got the whole disclosure.
+ */
+describe('Drop — the custody disclosure', () => {
+  it('opens a sheet with the facts a claimant is entitled to before they trust it', async () => {
+    installFetch({ drop: { status: 200, body: dropBody() } })
+    mount()
+
+    const card = await screen.findByTestId('custody-disclosure')
+    expect(card.textContent).toMatch(/holding this NIM/i)
+    expect(card.getAttribute('aria-expanded')).toBe('false')
+    expect(screen.queryByRole('dialog')).toBe(null)
+
+    fireEvent.click(card)
+
+    const sheet = await screen.findByRole('dialog')
+    expect(sheet.textContent).toMatch(/who is holding this NIM/i)
+    // The three facts that are nobody's favourite, unsoftened.
+    expect(sheet.textContent).toMatch(/operator controls.*custody . not a smart contract/is)
+    expect(sheet.textContent).toMatch(/one per wallet/i)
+    expect(sheet.textContent).toMatch(/does not prove one person/i)
+    expect(sheet.textContent).toMatch(/24 hours/i)
+    expect(sheet.textContent).toMatch(/refunded to the wallet that funded it/i)
+
+    fireEvent.click(screen.getByTestId('disclosure-close'))
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBe(null))
+  })
+
+  it('does not claim to be holding anything before the sponsor has funded it', async () => {
+    installFetch({ drop: { status: 200, body: dropBody({ state: 'awaiting_funding' }) } })
+    mount()
+
+    await screen.findByTestId('awaiting-funding')
+    expect(screen.queryByTestId('custody-disclosure')).toBe(null)
   })
 })
 
@@ -185,7 +264,7 @@ describe('Drop — the sponsor has not funded it yet', () => {
     expect(panel.textContent).toMatch(/appears here as soon as the funding is confirmed/i)
 
     // A dead primary button reads as a broken page: there must not be one.
-    expect(screen.queryByRole('button', { name: /claim/i })).toBe(null)
+    expect(screen.queryByRole('button', { name: /^open/i })).toBe(null)
     expect(screen.getByTestId('status-pill').textContent).toBe('Not funded yet')
     // ...but there IS something that works.
     expect(screen.getByRole('button', { name: /copy link/i })).toBeTruthy()
@@ -215,7 +294,7 @@ describe('Drop — the sponsor has not funded it yet', () => {
 
     await screen.findByTestId('awaiting-funding')
     // No reload and no interaction — the poll does it.
-    const button = await screen.findByRole('button', { name: /claim 2 NIM/i })
+    const button = await screen.findByRole('button', { name: /open . 2 NIM/i })
     expect((button as HTMLButtonElement).disabled).toBe(false)
     expect(screen.queryByTestId('awaiting-funding')).toBe(null)
   })
@@ -228,7 +307,7 @@ describe('Drop — the sponsor has not funded it yet', () => {
     expect(panel.textContent).toMatch(/funding transaction is on the network and confirming/i)
     expect(panel.textContent).toMatch(/goes live the moment that transaction is final/i)
     expect(screen.getByTestId('status-pill').textContent).toBe('Confirming')
-    expect(screen.queryByRole('button', { name: /claim/i })).toBe(null)
+    expect(screen.queryByRole('button', { name: /^open/i })).toBe(null)
     expect(document.body.textContent ?? '').not.toMatch(/Opening/i)
   })
 })
@@ -287,7 +366,60 @@ describe('Drop — claiming', () => {
     // §4.3 final CTAs.
     const back = screen.getByRole('link', { name: /drop one back/i })
     expect(back.getAttribute('href')).toBe('/create?amount=2')
-    expect(screen.getByRole('button', { name: /share nimdrops/i })).toBeTruthy()
+    expect(screen.getByTestId('share-app')).toBeTruthy()
+
+    // "Drop" is claimant vocabulary; "Campaign" is the sponsor's.
+    expect(document.body.textContent ?? '').not.toMatch(/campaign/i)
+  })
+
+  /**
+   * The share button used to hand a friend `/d/{publicId}` — the very drop the
+   * claimant had just taken a share out of — under a label that read like a
+   * recommendation of the app. Recommending the product and passing on this
+   * drop are different acts, and the two adjacent buttons must not blur them.
+   */
+  it('shares the app, not the drop that now has one fewer share in it', async () => {
+    seedResumableClaim()
+    installFetch({
+      drop: { status: 200, body: dropBody() },
+      status: [{ status: 200, body: { state: 'paid', amountEach: '2', txHash: TX_HASH } }],
+    })
+    // jsdom has no Web Share API, so there is nothing to spy on: define it.
+    const share = vi.fn(async (_data: ShareData) => {})
+    Object.defineProperty(navigator, 'share', { value: share, configurable: true })
+    mount()
+
+    const button = await screen.findByTestId('share-app')
+    expect(button.textContent).toBe('Share the app')
+    fireEvent.click(button)
+
+    expect(share).toHaveBeenCalledTimes(1)
+    const payload = share.mock.calls[0]![0]
+    expect(payload.url).toBe(window.location.origin)
+    expect(payload.url).not.toContain(PUBLIC_ID)
+    expect(payload.url).not.toContain('/d/')
+    // WhatsApp routinely drops `title`, so the description travels in `text`.
+    expect(payload.text).toMatch(/fixed share of NIM for everyone who opens it/i)
+  })
+
+  it('falls back to copying the app link where the share sheet does not exist', async () => {
+    seedResumableClaim()
+    installFetch({
+      drop: { status: 200, body: dropBody() },
+      status: [{ status: 200, body: { state: 'paid', amountEach: '2', txHash: TX_HASH } }],
+    })
+    const writeText = vi.fn(async () => {})
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    mount()
+
+    const button = await screen.findByTestId('share-app')
+    await act(async () => {
+      fireEvent.click(button)
+    })
+
+    expect(writeText).toHaveBeenCalledWith(window.location.origin)
+    // Silence after a tap reads as a broken button.
+    await waitFor(() => expect(screen.getByTestId('share-app').textContent).toBe('Link copied'))
   })
 
   it('recovers from a wallet rejection with a retry that returns to the claim button', async () => {
@@ -297,7 +429,7 @@ describe('Drop — claiming', () => {
     })
     mount(bridgeOf(rejectingBridge()))
 
-    const button = await screen.findByRole('button', { name: /claim 2 NIM/i })
+    const button = await screen.findByRole('button', { name: /open . 2 NIM/i })
     await act(async () => {
       fireEvent.click(button)
     })
@@ -308,7 +440,7 @@ describe('Drop — claiming', () => {
       fireEvent.click(retry)
     })
 
-    await waitFor(() => expect(screen.getByRole('button', { name: /claim 2 NIM/i })).toBeTruthy())
+    await waitFor(() => expect(screen.getByRole('button', { name: /open . 2 NIM/i })).toBeTruthy())
   })
 })
 
@@ -334,12 +466,12 @@ describe('Drop — states that are not a claim', () => {
     installFetch({ drop: { status: 200, body: dropBody() }, challenge: { status: 503, body: { error: { code: 'degraded', message: 'temporarily unavailable' } } } })
     mount()
 
-    const button = await screen.findByRole('button', { name: /claim 2 NIM/i })
+    const button = await screen.findByRole('button', { name: /open . 2 NIM/i })
     await act(async () => {
       fireEvent.click(button)
     })
 
-    const still = await screen.findByRole('button', { name: /claim 2 NIM/i })
+    const still = await screen.findByRole('button', { name: /open . 2 NIM/i })
     expect((still as HTMLButtonElement).disabled).toBe(true)
     expect(screen.getByTestId('degraded-banner').textContent).toMatch(/try again shortly|having trouble/i)
   })

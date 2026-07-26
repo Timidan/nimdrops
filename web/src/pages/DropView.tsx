@@ -5,11 +5,12 @@ import { nimiqPayDeeplink } from '../sdk/adapter'
 import type { ClaimUiState } from '../state/claim'
 import Envelope, { EnvelopeAmount } from '../ui/Envelope'
 import Screen from '../ui/Screen'
+import Sheet from '../ui/Sheet'
 import StatusPill from '../ui/StatusPill'
 import Receipt from './Receipt'
 
 /**
- * Everything the campaign page looks like, with none of what it knows.
+ * Everything the drop page looks like, with none of what it knows.
  *
  * `Drop` owns the claim machine; this owns the envelope. Splitting them is what
  * lets `/preview` render all thirteen states at once from fixtures, and it is
@@ -120,15 +121,30 @@ function Face({
 
   return (
     <div className="flex flex-1 flex-col pb-12">
-      {/* Who handed this to you. Claimant-supplied text, and labelled as such. */}
-      <div className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1">
-        <span className="line-clamp-2 max-w-full text-sm font-medium text-ink/65 [overflow-wrap:anywhere]">
-          {sponsor}
-        </span>
-        <span className="shrink-0 rounded-full border border-ink/15 px-2 py-0.5 text-[0.6875rem] font-medium text-ink/45">
-          unverified
-        </span>
-      </div>
+      {/**
+       * The order a stranger needs, and nothing else above the fold: who sent
+       * this, their own words, how much, what it is in one clause, one action.
+       *
+       * The sponsor's message used to sit sixth, below the share count and the
+       * countdown, which put the mechanics of the gift ahead of the greeting.
+       */}
+      {sponsor ? (
+        <div className="flex flex-wrap items-baseline justify-center gap-x-2 gap-y-1">
+          {/* Claimant-facing, sponsor-supplied text, and labelled as such. */}
+          <p className="line-clamp-3 max-w-full text-center text-sm leading-relaxed text-ink/65 [overflow-wrap:anywhere]">
+            <span className="font-semibold text-ink/85">{sponsor}</span> sent you a NimDrop
+          </p>
+          <span className="shrink-0 rounded-full border border-ink/15 px-2 py-0.5 text-[0.6875rem] font-medium text-ink/45">
+            name unverified
+          </span>
+        </div>
+      ) : null}
+
+      {drop?.message && !paid ? (
+        <p className="mt-5 border-l-2 border-gold/45 pl-4 text-sm leading-relaxed text-ink/70 [overflow-wrap:anywhere]">
+          {drop.message}
+        </p>
+      ) : null}
 
       <EnvelopeAmount amount={amount} paid={paid} />
 
@@ -138,8 +154,8 @@ function Face({
           {amount} NIM is on its way.
         </p>
       ) : paid ? null : (
-        <p className="mt-3 text-center text-xs text-ink/50">
-          Fixed and equal for everyone who claims.
+        <p className="mt-3 text-center text-xs leading-relaxed text-ink/50">
+          A fixed share of NIM — the same amount for everyone who opens this link.
         </p>
       )}
 
@@ -159,16 +175,10 @@ function Face({
         </div>
       ) : null}
 
-      {drop?.message && !paid ? (
-        <p className="mt-6 border-l-2 border-gold/45 pl-4 text-sm leading-relaxed text-ink/70 [overflow-wrap:anywhere]">
-          {drop.message}
-        </p>
-      ) : null}
-
       {paid ? (
         <div className="nd-rise mt-8">
           <Receipt publicId={publicId} amountEach={amount} txHash={txHash} sponsorLabel={sponsor} />
-          <ShareButton publicId={publicId} className="nd-secondary mt-3 w-full" />
+          <ShareButton className="nd-secondary mt-3 w-full" />
           <p className="mt-6 text-center text-xs leading-relaxed text-ink/45">
             One share per wallet. NimDrops held this NIM until you claimed it; the transaction above
             is the whole story.
@@ -216,16 +226,28 @@ function Face({
             <Funding confirming={fundingConfirming} />
           ) : (
             <div className="mt-7">
-              <div className="mb-4 flex justify-center">
-                <StatusPill state={state} />
-              </div>
+              {/* No pill on `ready`: "Live" would be the third statement of a
+                  fact the button and the share count have already made. The
+                  pill stays for the states nobody can infer. */}
+              {state === 'ready' ? null : (
+                <div className="mb-4 flex justify-center">
+                  <StatusPill state={state} />
+                </div>
+              )}
+              {/**
+               * One word and the number, the way every incumbent does it
+               * (Binance `Open`, WeChat 开, Ugly Cash `Open`). The amount stays
+               * on the button because it is the number the reader checks
+               * against the one they are pressing; the instruction does not,
+               * because the line underneath already carries it, better.
+               */}
               <button
                 type="button"
                 disabled={state !== 'ready'}
                 onClick={onClaim}
                 className="nd-primary w-full"
               >
-                Claim {amount} NIM — tap and approve
+                Open — {amount} NIM
               </button>
               <p className="mt-3 text-center text-xs leading-relaxed text-ink/50">
                 {state === 'signing'
@@ -236,16 +258,92 @@ function Face({
           )}
 
           {/* Not shown while unfunded: NimDrops is holding nothing yet, and a
-              footer that says otherwise would be the one invented fact on an
-              otherwise honest screen. */}
-          {unfunded ? null : (
-            <p className="mt-auto pt-8 text-center text-xs leading-relaxed text-ink/45">
-              One share per wallet. NimDrops holds the NIM until it is claimed, then sends it to the
-              wallet that signed.
-            </p>
-          )}
+              disclosure that says otherwise would be the one invented fact on
+              an otherwise honest screen. */}
+          {unfunded ? null : <CustodyDisclosure />}
         </>
       )}
+    </div>
+  )
+}
+
+// ---- the custody disclosure ----------------------------------------------------------
+
+/**
+ * The claimant is the person being asked to trust a custodian, and until now
+ * they got two grey lines of footer while the sponsor got the whole disclosure
+ * before funding. Ugly Cash's move is the one worth copying: take the least
+ * reassuring fact about the product, make it the headline of a tappable card,
+ * and put the rest one tap away.
+ *
+ * The facts are not softened here and are not meant to be. Most of this text
+ * already exists in `Create.tsx`'s `Disclosure`, in `README.md` and in
+ * `PRIVACY.md`; it is lifted rather than rewritten so the two audiences are
+ * told the same thing.
+ */
+function CustodyDisclosure() {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="mt-auto pt-8">
+      <button
+        type="button"
+        data-testid="custody-disclosure"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        onClick={() => setOpen(true)}
+        className="block w-full rounded-2xl border border-ink/10 bg-ink/4 p-4 text-left"
+      >
+        <span className="block text-sm font-semibold text-ink/80">
+          NimDrops is holding this NIM, not a smart contract
+        </span>
+        <span className="mt-1 block text-xs leading-relaxed text-ink/55">
+          Who holds it, why one share per wallet is not one person, and where it goes if nobody
+          claims.
+        </span>
+      </button>
+
+      <Sheet open={open} title="Who is holding this NIM?" onClose={() => setOpen(false)}>
+        <div className="text-sm leading-relaxed text-ink/70">
+          <p>
+            Until you claim it, this NIM sits in a wallet the{' '}
+            <strong className="font-semibold text-ink">NimDrops operator controls</strong>. That is
+            custody — not a smart contract, and not your wallet.
+          </p>
+          <p className="mt-3">
+            When you claim, it is sent to the wallet that signed, and to no other address. Nothing
+            you type into this app can change where it goes.
+          </p>
+          <p className="mt-3">
+            Shares are fixed and first come, first served —{' '}
+            <strong className="font-semibold text-ink">one per wallet</strong>. A signature proves
+            control of one wallet. It does not prove one person, so anyone holding several wallets
+            can take several shares.
+          </p>
+          <p className="mt-3">
+            A drop stops accepting claims{' '}
+            <strong className="font-semibold text-ink">24 hours</strong> after it goes live. Every
+            unclaimed share is then refunded to the wallet that funded it.
+          </p>
+          <p className="mt-3">
+            Payouts wait for the network to confirm them, and can go to a person for review during
+            an incident. Nothing here says &ldquo;paid&rdquo; before the transaction is final.
+          </p>
+          <p className="mt-3">
+            Funding, payouts and refunds are ordinary Nimiq transactions: public and permanent on
+            the blockchain, and readable by anyone.
+          </p>
+        </div>
+        {/* The scrim and Escape already dismiss; this is the thumb-reachable
+            one, at the bottom of a sheet that is longer than a thumb. */}
+        <button
+          type="button"
+          data-testid="disclosure-close"
+          onClick={() => setOpen(false)}
+          className="nd-secondary mt-6 w-full"
+        >
+          Close
+        </button>
+      </Sheet>
     </div>
   )
 }
@@ -262,7 +360,7 @@ function Opening() {
 }
 
 /**
- * The campaign exists, the money does not — yet.
+ * The drop exists, the money does not — yet.
  *
  * There is no claim button here on purpose. A primary button that can never be
  * pressed is read as a broken page, and on `awaiting_funding` there is no
@@ -411,8 +509,8 @@ function NoWallet({ publicId }: { publicId: string }) {
         Open in Nimiq Pay
       </a>
       <p className="mt-3 text-center text-xs leading-relaxed text-ink/50">
-        Claiming needs your own wallet to sign. This link keeps the drop — it opens this same
-        campaign inside Nimiq Pay.
+        Claiming needs your own wallet to sign. This link keeps your place — it opens this same drop
+        inside Nimiq Pay.
       </p>
 
       <div className="mt-6 rounded-3xl border border-ink/10 bg-white p-5">
@@ -452,25 +550,50 @@ function CopyLinkButton({ className }: { className: string }) {
   )
 }
 
-function ShareButton({ publicId, className }: { publicId: string; className: string }) {
-  const url =
-    typeof window === 'undefined'
-      ? ''
-      : `${window.location.origin}/d/${encodeURIComponent(publicId)}`
+/**
+ * Recommending the product, not passing on this drop.
+ *
+ * It used to share `/d/{publicId}` under the label "Share NimDrops", so a
+ * claimant who had just been paid and wanted to tell a friend about the app
+ * instead sent them to the very drop they had just taken a share out of — one
+ * share emptier than it was a minute ago, and possibly empty.
+ *
+ * The origin is the honest target: `/` is the create screen, so the friend
+ * lands on the thing the recommender is recommending. Sitting under "Drop one
+ * back", the label has to name a different object than the button above it,
+ * which is why it is not "Share this drop".
+ *
+ * `text` matters as much as the URL. WhatsApp routinely drops `title` and shows
+ * a bare link, so the product's one-line description travels in the message
+ * body or not at all.
+ */
+function ShareButton({ className }: { className: string }) {
+  const [copied, setCopied] = useState(false)
+  const url = typeof window === 'undefined' ? '' : window.location.origin
   return (
     <button
       type="button"
+      data-testid="share-app"
       className={className}
       onClick={() => {
         if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
           // A dismissed share sheet rejects with AbortError; that is a choice.
-          void navigator.share({ title: 'A NimDrop for you', url }).catch(() => {})
+          void navigator
+            .share({
+              title: 'NimDrops',
+              text: 'One link. A fixed share of NIM for everyone who opens it.',
+              url,
+            })
+            .catch(() => {})
           return
         }
-        void navigator.clipboard?.writeText(url).catch(() => {})
+        void navigator.clipboard
+          ?.writeText(url)
+          .then(() => setCopied(true))
+          .catch(() => setCopied(false))
       }}
     >
-      Share NimDrops
+      {copied ? 'Link copied' : 'Share the app'}
     </button>
   )
 }
