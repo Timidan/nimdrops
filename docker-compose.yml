@@ -18,8 +18,18 @@ x-app: &app
       condition: service_healthy
   environment:
     # Every Global Constraints variable, passed through from the operator's .env.
+    #
+    # CUSTODY_PRIVATE_KEY_HEX IS NOT HERE. It is set on the `worker` service and
+    # nowhere else: the worker holds advisory lock 42 and is the only process
+    # that signs or broadcasts, so it is the only process that needs the key.
+    # The API needs the custody ADDRESS — funding instructions, `/health`, the
+    # solvency read — and used to be handed the key purely so `NimiqChain` could
+    # derive that address from it, which put the hot wallet in the environment of
+    # the one container that faces the internet in exchange for a string.
+    # `readOnlyNimiqChainFromEnv` takes CUSTODY_ADDRESS instead, and every
+    # signing path on the resulting client throws (design §10.3).
     DATABASE_URL: postgres://nimdrops:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/nimdrops
-    CUSTODY_PRIVATE_KEY_HEX: ${CUSTODY_PRIVATE_KEY_HEX:?set CUSTODY_PRIVATE_KEY_HEX in .env}
+    CUSTODY_ADDRESS: ${CUSTODY_ADDRESS:?set CUSTODY_ADDRESS in .env}
     STATUS_TOKEN_SECRET: ${STATUS_TOKEN_SECRET:?set STATUS_TOKEN_SECRET in .env}
     ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
     NIMIQ_NETWORK: ${NIMIQ_NETWORK:?set NIMIQ_NETWORK in .env}
@@ -60,9 +70,28 @@ services:
       start_period: 60s
 
   # The single writer to the chain. Exactly one replica, always.
+  #
+  # The ONLY service with the custody key, and therefore also the service to run
+  # the operator CLI through — `recover.ts float set|resume|replace|deposits`
+  # all build a signing client and will refuse to start under `server`:
+  #   docker compose run --rm --entrypoint sh worker -c \
+  #     "cd /app/server && pnpm tsx src/recover.ts status"
   worker:
     <<: *app
     command: ["pnpm", "exec", "tsx", "src/worker.ts"]
+    # A full block, not an addition: a YAML merge key is replaced wholesale by a
+    # sibling of the same name, never deep-merged. CUSTODY_ADDRESS is
+    # deliberately ABSENT — the worker derives the address from the key it
+    # holds, and a second, separately-configured source for the same value is a
+    # way for the two to disagree, not a safety net.
+    environment:
+      DATABASE_URL: postgres://nimdrops:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/nimdrops
+      CUSTODY_PRIVATE_KEY_HEX: ${CUSTODY_PRIVATE_KEY_HEX:?set CUSTODY_PRIVATE_KEY_HEX in .env}
+      STATUS_TOKEN_SECRET: ${STATUS_TOKEN_SECRET:?set STATUS_TOKEN_SECRET in .env}
+      ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+      NIMIQ_NETWORK: ${NIMIQ_NETWORK:?set NIMIQ_NETWORK in .env}
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?set PUBLIC_ORIGIN in .env}
+      SIG_SCHEME: ${SIG_SCHEME:-raw}
     deploy:
       replicas: 1
 

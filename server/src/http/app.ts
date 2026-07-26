@@ -33,6 +33,7 @@ import {
   readControls,
 } from '../services/solvency'
 import { ConflictError, bindIdem, idemKeyHash, lookupIdem } from './idempotency'
+import { logError } from './redact'
 import { registerSsr } from './ssr'
 
 /**
@@ -395,18 +396,19 @@ export function makeApp(deps: AppDeps): Hono {
   app.onError((err, c) => {
     const mapped = mapError(err)
     if (mapped.status >= 500) {
-      // Redacted on purpose: method + route, error identity and stack. Never the
-      // body, the headers, or the bearer token — design §11.
-      console.error(
-        JSON.stringify({
-          event: 'request_failed',
-          method: c.req.method,
-          route: c.req.routePath,
-          error: err instanceof Error ? err.name : 'Error',
-          message: err instanceof Error ? err.message : String(err),
-          stack: err instanceof Error ? err.stack : undefined,
-        }),
-      )
+      // Redacted twice over. By SELECTION: method + route, error identity and
+      // stack, never the body, the headers, or the bearer token (design §11).
+      // And by FILTER: `logError` puts the message and the stack through
+      // `http/redact.ts`, because their contents are the failing library's
+      // choice, not ours — a driver that echoes a signed transaction or a
+      // connection string into its own error text would otherwise put it here.
+      logError('request_failed', {
+        method: c.req.method,
+        route: c.req.routePath,
+        error: err instanceof Error ? err.name : 'Error',
+        message: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack : undefined,
+      })
     }
     if (mapped.code === 'paused') void alerts.notify('paused', { surface: 'api' })
     if (mapped.code === 'degraded') void alerts.notify('stale_reconciliation', { surface: 'api' })

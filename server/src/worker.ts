@@ -4,6 +4,7 @@ import type { ChainClient } from './chain/types'
 import { closePool, getPool } from './db/pool'
 import { errorMessage } from './config'
 import { exitAfterFlush, exitAfterTeardown } from './exit'
+import { logError, logInfo, logWarn } from './http/redact'
 import { type Alerts, createAlerts, throttled } from './services/alerts'
 import { gcDrafts, settleTerminal, sweepExpiry } from './services/expiry'
 import { ensureNetworkBinding, reconcile } from './services/solvency'
@@ -39,9 +40,8 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-function log(event: string, detail: Record<string, unknown> = {}): void {
-  console.info(JSON.stringify({ event, at: new Date().toISOString(), ...detail }))
-}
+/** Redacting writer (§10.3). Same line shape it always had, now filtered. */
+const log = logInfo
 
 export async function runWorker(chain: ChainClient, alerts: Alerts): Promise<void> {
   const pool = getPool()
@@ -107,7 +107,7 @@ export async function runWorker(chain: ChainClient, alerts: Alerts): Promise<voi
         } catch (err) {
           // Leaving the balance stale fails closed on its own: `lockControls`
           // refuses new signatures until a reconcile succeeds.
-          console.warn(JSON.stringify({ event: 'reconcile_failed', error: errorMessage(err) }))
+          logWarn('reconcile_failed', { error: errorMessage(err) })
         }
       }
 
@@ -121,7 +121,7 @@ export async function runWorker(chain: ChainClient, alerts: Alerts): Promise<voi
       try {
         await sweepExpiry(pool, alerts)
       } catch (err) {
-        console.warn(JSON.stringify({ event: 'expiry_failed', error: errorMessage(err) }))
+        logWarn('expiry_failed', { error: errorMessage(err) })
       }
 
       try {
@@ -129,7 +129,7 @@ export async function runWorker(chain: ChainClient, alerts: Alerts): Promise<voi
       } catch (err) {
         // A tick never gives up: the database is the queue, so the next tick
         // retries from committed state.
-        console.warn(JSON.stringify({ event: 'tick_failed', error: errorMessage(err) }))
+        logWarn('tick_failed', { error: errorMessage(err) })
       }
 
       // …and settle AFTER, so a drop whose last liability confirmed in this
@@ -137,7 +137,7 @@ export async function runWorker(chain: ChainClient, alerts: Alerts): Promise<voi
       try {
         await settleTerminal(pool)
       } catch (err) {
-        console.warn(JSON.stringify({ event: 'settle_failed', error: errorMessage(err) }))
+        logWarn('settle_failed', { error: errorMessage(err) })
       }
 
       if (now - lastDraftGcAt >= DRAFT_GC_INTERVAL_MS) {
@@ -145,7 +145,7 @@ export async function runWorker(chain: ChainClient, alerts: Alerts): Promise<voi
         try {
           await gcDrafts(pool)
         } catch (err) {
-          console.warn(JSON.stringify({ event: 'draft_gc_failed', error: errorMessage(err) }))
+          logWarn('draft_gc_failed', { error: errorMessage(err) })
         }
       }
 
@@ -189,7 +189,7 @@ async function main(): Promise<void> {
   try {
     await runWorker(chain, alerts)
   } catch (err) {
-    console.error(JSON.stringify({ event: 'worker_fatal', error: errorMessage(err) }))
+    logError('worker_fatal', { error: errorMessage(err) })
     code = 1
   }
 
@@ -200,7 +200,7 @@ async function main(): Promise<void> {
       await chain.close()
       await closePool()
     },
-    (message) => console.warn(JSON.stringify({ event: 'worker_teardown_fault', message })),
+    (message) => logWarn('worker_teardown_fault', { message }),
   )
 }
 
@@ -213,7 +213,7 @@ if (invokedDirectly) {
   // Reached only when the worker could not be BUILT (bad configuration): once
   // `main` is running, it ends the process itself.
   main().catch((err: unknown) => {
-    console.error(JSON.stringify({ event: 'worker_fatal', error: errorMessage(err) }))
+    logError('worker_fatal', { error: errorMessage(err) })
     exitAfterFlush(1)
   })
 }

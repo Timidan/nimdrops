@@ -2,6 +2,7 @@ import type { Pool, PoolClient } from 'pg'
 import type { ChainClient } from '../chain/types'
 import { type NetworkName, validityWindowBlocks } from '../config'
 import type { Queryable } from '../db/pool'
+import { logWarn } from '../http/redact'
 import { type Alerts, consoleAlerts } from './alerts'
 
 /**
@@ -690,14 +691,11 @@ async function writeReconciliation(
     )
     await client.query('COMMIT')
     if (rowCount === 0) {
-      console.warn(
-        JSON.stringify({
-          event: 'reconcile_observation_superseded',
-          observationSeq: o.observationSeq.toString(),
-          height: o.height,
-          short: o.short,
-        }),
-      )
+      logWarn('reconcile_observation_superseded', {
+        observationSeq: o.observationSeq.toString(),
+        height: o.height,
+        short: o.short,
+      })
     }
     return rowCount !== 0
   } catch (err) {
@@ -779,7 +777,7 @@ export async function ensureNetworkBinding(pool: Pool, chain: ChainClient): Prom
       [running],
     )
     if (stamped[0]) {
-      console.warn(JSON.stringify({ event: 'network_bound', network: running }))
+      logWarn('network_bound', { network: running })
       return stamped[0].network
     }
     return ensureNetworkBinding(pool, chain)
@@ -804,7 +802,7 @@ export async function ensureNetworkBinding(pool: Pool, chain: ChainClient): Prom
  */
 export async function pause(pool: Pool, reason: string): Promise<void> {
   await pool.query('UPDATE custody_controls SET paused = true WHERE singleton')
-  console.warn(JSON.stringify({ event: 'custody_paused', reason }))
+  logWarn('custody_paused', { reason })
 }
 
 /**
@@ -823,5 +821,5 @@ export async function pause(pool: Pool, reason: string): Promise<void> {
  */
 export async function unpause(pool: Pool): Promise<void> {
   await pool.query('UPDATE custody_controls SET paused = false WHERE singleton')
-  console.warn(JSON.stringify({ event: 'custody_unpaused' }))
+  logWarn('custody_unpaused')
 }

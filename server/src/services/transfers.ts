@@ -2,6 +2,7 @@ import type { Pool, PoolClient } from 'pg'
 import { MEMO_MAX_BYTES, type ChainClient } from '../chain/types'
 import { errorMessage, validityWindowBlocks } from '../config'
 import type { Queryable } from '../db/pool'
+import { logInfo, logWarn } from '../http/redact'
 import type { AlertKind, Alerts } from './alerts'
 import {
   PausedError,
@@ -641,17 +642,14 @@ export async function progressAttempt(
   if (outcome.confirmedHeight !== undefined) {
     // The one line that says money finished moving. Emitted after COMMIT, so it
     // can never claim a payment the database did not keep.
-    console.info(
-      JSON.stringify({
-        event: 'transfer_confirmed',
-        transferId: attempt.transferId,
-        attemptId: attempt.attemptId,
-        txHash: attempt.txHash,
-        sequence: attempt.sequence,
-        claimId: attempt.claimId,
-        includedHeight: outcome.confirmedHeight,
-      }),
-    )
+    logInfo('transfer_confirmed', {
+      transferId: attempt.transferId,
+      attemptId: attempt.attemptId,
+      txHash: attempt.txHash,
+      sequence: attempt.sequence,
+      claimId: attempt.claimId,
+      includedHeight: outcome.confirmedHeight,
+    })
   }
   if (outcome.alert) await alerts.notify(outcome.alert.kind, outcome.alert.detail)
 
@@ -908,14 +906,11 @@ export async function reconcileOnStartup(
     try {
       await progressAttempt(pool, chain, alerts, attempt, head)
     } catch (err) {
-      console.warn(
-        JSON.stringify({
-          event: 'reconcile_attempt_failed',
-          transferId: attempt.transferId,
-          attemptId: attempt.attemptId,
-          error: errorMessage(err),
-        }),
-      )
+      logWarn('reconcile_attempt_failed', {
+        transferId: attempt.transferId,
+        attemptId: attempt.attemptId,
+        error: errorMessage(err),
+      })
     }
   }
 }
@@ -1040,13 +1035,7 @@ async function signNextQueued(pool: Pool, chain: ChainClient, alerts: Alerts): P
           [intent.id, errorMessage(err), RETRY_BACKOFF_MS],
         )
         await client.query('COMMIT')
-        console.warn(
-          JSON.stringify({
-            event: 'transfer_deferred',
-            transferId: intent.id,
-            reason: errorMessage(err),
-          }),
-        )
+        logWarn('transfer_deferred', { transferId: intent.id, reason: errorMessage(err) })
         // Money is owed and the invariant refuses to sign for it. Silence here
         // would look exactly like an idle worker, so page the operator; the
         // caller's throttling keeps a stuck queue from alerting every 2s.

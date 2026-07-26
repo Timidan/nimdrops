@@ -1,5 +1,6 @@
 import type { Pool, PoolClient } from 'pg'
 import { errorMessage } from '../config'
+import { logInfo, logWarn } from '../http/redact'
 import type { Alerts } from './alerts'
 import { PausedError, StaleReconciliationError, lockControls } from './solvency'
 
@@ -86,9 +87,7 @@ export async function sweepExpiry(pool: Pool, alerts: Alerts): Promise<number> {
     } catch (err) {
       // The next tick retries from committed state; one poisoned drop must not
       // stop the others from closing.
-      console.warn(
-        JSON.stringify({ event: 'expiry_sweep_failed', dropId: candidate.id, error: errorMessage(err) }),
-      )
+      logWarn('expiry_sweep_failed', { dropId: candidate.id, error: errorMessage(err) })
     } finally {
       client.release()
     }
@@ -183,14 +182,11 @@ async function closeExpiredDrop(
     }
 
     await client.query('COMMIT')
-    console.info(
-      JSON.stringify({
-        event: 'drop_expired',
-        dropId,
-        unclaimedSlots: Math.max(0, unclaimed),
-        refundLuna: unallocatedLuna.toString(),
-      }),
-    )
+    logInfo('drop_expired', {
+      dropId,
+      unclaimedSlots: Math.max(0, unclaimed),
+      refundLuna: unallocatedLuna.toString(),
+    })
     return 'closed'
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {})

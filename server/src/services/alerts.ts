@@ -1,4 +1,5 @@
 import { errorMessage } from '../config'
+import { redact, safeLog } from '../http/redact'
 
 /**
  * Operator alerts (design §10.3, PLAN.md "Operator" target perspective).
@@ -11,8 +12,8 @@ import { errorMessage } from '../config'
  *
  * Hard rule: `notify` NEVER throws and never blocks the money path for long.
  * An alerting outage must not stop or slow a payout — the database is the
- * financial record, the webhook is only a courtesy. Every failure degrades to
- * `console.warn` so the event still lands in the host's log.
+ * financial record, the webhook is only a courtesy. Every failure degrades to a
+ * redacted `safeLog` line so the event still lands in the host's log.
  */
 
 /**
@@ -47,12 +48,22 @@ export interface AlertsOptions {
 }
 
 /**
- * Values are logged, so redact per design §10.3 before they get here: no
- * signatures, no raw transactions, no full claimant addresses. Callers pass
- * internal IDs and hashes, which are already public on-chain identifiers.
+ * Every alert line, redacted (§10.3).
+ *
+ * This used to be a comment asking callers to sanitise `detail` themselves.
+ * It is now `http/redact.ts`, applied here: an alert carries whatever the
+ * failing money path happened to have in hand, which is exactly the material
+ * §10.3 lists — and `notify` is called from `catch` blocks where the only
+ * available context is a driver's error text.
+ *
+ * The webhook gets the same treatment further down. It is a THIRD-PARTY
+ * endpoint; posting a claimant's full address to it is not better than logging
+ * it, it is worse.
  */
-function line(alert: AlertKind, detail: Record<string, unknown>, note?: string): string {
-  return JSON.stringify({ event: 'alert', alert, ...(note ? { note } : {}), detail })
+function emit(alert: AlertKind, detail: Record<string, unknown>, note?: string): void {
+  // Heartbeats are routine; everything else is something an operator must see.
+  const level = alert === 'heartbeat' ? 'info' : 'warn'
+  safeLog(level, 'alert', { alert, ...(note ? { note } : {}), detail })
 }
 
 export function createAlerts(o: AlertsOptions = {}): Alerts {
@@ -62,17 +73,16 @@ export function createAlerts(o: AlertsOptions = {}): Alerts {
   return {
     async notify(alert, detail) {
       const url = o.webhookUrl ?? process.env.ALERT_WEBHOOK_URL
-      const body = { alert, source, at: new Date().toISOString(), detail }
+      const body = { alert, source, at: new Date().toISOString(), detail: redact(detail) }
 
       // Always log: the webhook is best-effort, the log is not.
-      if (alert === 'heartbeat') console.info(line(alert, detail))
-      else console.warn(line(alert, detail))
+      emit(alert, detail)
 
       if (!url) return
 
       const doFetch = o.fetchImpl ?? globalThis.fetch
       if (typeof doFetch !== 'function') {
-        console.warn(line(alert, detail, 'no fetch implementation available'))
+        emit(alert, detail, 'no fetch implementation available')
         return
       }
 
@@ -83,10 +93,10 @@ export function createAlerts(o: AlertsOptions = {}): Alerts {
           body: JSON.stringify(body),
           signal: AbortSignal.timeout(timeoutMs),
         })
-        if (!res.ok) console.warn(line(alert, detail, `webhook responded ${res.status}`))
+        if (!res.ok) emit(alert, detail, `webhook responded ${res.status}`)
       } catch (err) {
         // Includes the 5s timeout abort. Never rethrow: see the module note.
-        console.warn(line(alert, detail, `webhook failed: ${errorMessage(err)}`))
+        emit(alert, detail, `webhook failed: ${errorMessage(err)}`)
       }
     },
   }
@@ -121,7 +131,7 @@ export function throttled(inner: Alerts, windowMs = 5 * 60_000): Alerts {
     async notify(alert, detail) {
       // (1) The unconditional record. Distinct event name so it is never
       // confused with what actually went out over the webhook.
-      console.warn(JSON.stringify({ event: 'alert_raised', alert, detail }))
+      safeLog('warn', 'alert_raised', { alert, detail })
 
       // (2) One bucket per incident. Alerts that name no subject (heartbeat,
       // paused, insolvent) share the empty key and stay one-per-window.

@@ -6,6 +6,7 @@ import type { Hono } from 'hono'
 import QRCode from 'qrcode'
 import type { Pool } from 'pg'
 import { DropNotFoundError, getPublic, type DropPublic } from '../services/drops'
+import { logError } from './redact'
 
 /**
  * The external-link bridge (design §4.1): `/d/:publicId` rendered on the server
@@ -282,13 +283,10 @@ export function registerSsr(app: Hono, opts: SsrOptions = {}): void {
         // NOT hide the outage and drives the degraded banner. Failing the shell
         // would replace a recoverable banner with a blank error page.
         if (!(err instanceof DropNotFoundError)) {
-          console.error(
-            JSON.stringify({
-              event: 'ssr_lookup_failed',
-              error: err instanceof Error ? err.name : 'Error',
-              message: err instanceof Error ? err.message : String(err),
-            }),
-          )
+          logError('ssr_lookup_failed', {
+            error: err instanceof Error ? err.name : 'Error',
+            message: err instanceof Error ? err.message : String(err),
+          })
         }
         drop = null
       }

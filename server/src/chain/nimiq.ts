@@ -131,9 +131,47 @@ export const DEFAULT_SEED_NODES: Record<NimiqNetwork, string[]> = {
  */
 export const DEFAULT_FINALITY_DEPTH = FINALITY_DEPTH_FLOOR_BLOCKS
 
+/**
+ * Raised by every signing method on a read-only client.
+ *
+ * A distinct class, not a bare `Error`: "this process was never given a key" is
+ * an architectural fact an operator should be able to recognise instantly in a
+ * log, and it must never be mistaken for a transient chain failure that some
+ * retry loop should have another go at.
+ */
+export class ReadOnlyChainError extends Error {
+  constructor(what = 'sign') {
+    super(
+      `refusing to ${what}: this NimiqChain was constructed read-only from CUSTODY_ADDRESS. ` +
+        'Only the worker process holds the custody key.',
+    )
+    this.name = 'ReadOnlyChainError'
+  }
+}
+
 export interface NimiqChainOptions {
   network: NimiqNetwork
-  custodyPrivateKeyHex: string
+  /**
+   * Signing mode. Mutually exclusive with {@link NimiqChainOptions.custodyAddress}.
+   */
+  custodyPrivateKeyHex?: string
+  /**
+   * READ-ONLY mode: the custody address, with no key anywhere in the process.
+   *
+   * The API process needs `custodyAddress()` for funding instructions, plus
+   * head height and transaction reads; it signs nothing — `worker.ts` holds
+   * advisory lock 42 and is the only writer to the chain. It was nonetheless
+   * being handed `CUSTODY_PRIVATE_KEY_HEX` purely so this constructor could
+   * DERIVE the address from it, which put the hot key in the memory of the one
+   * process that faces the internet, for no capability it uses.
+   *
+   * §10.3 asks for the signing code to stay narrow and the runtime access
+   * restricted. This is the mechanical version of that: give the HTTP process
+   * the address it needs and nothing that can move money. Mutually exclusive
+   * with {@link NimiqChainOptions.custodyPrivateKeyHex} — supplying both is a
+   * configuration error, not a preference, and throws.
+   */
+  custodyAddress?: string
   /**
    * @internal TEST-ONLY seam (finding 5). Bypasses `config.finalityDepthBlocks()`
    * and therefore its 64-block floor, so a test can call a transaction final
@@ -201,7 +239,8 @@ function toUserFriendly(addr: string): string {
 export class NimiqChain implements ChainClient {
   private readonly net: NimiqNetwork
   private readonly networkId: number
-  private readonly keyPair: KeyPair
+  /** `null` in read-only mode. Every signing path checks this and only this. */
+  private readonly keyPair: KeyPair | null
   private readonly custody: string
   private readonly finalityDepth: number
   private readonly fee: bigint
@@ -217,14 +256,37 @@ export class NimiqChain implements ChainClient {
     this.networkId = NETWORK_ID[o.network]
     if (this.networkId === undefined) throw new Error(`unknown network ${o.network}`)
 
-    const hex = o.custodyPrivateKeyHex.trim().replace(/^0x/, '')
-    if (!/^[0-9a-fA-F]{64}$/.test(hex)) {
-      throw new Error('custodyPrivateKeyHex must be 32 bytes of hex (64 chars)')
+    // Exactly one of the two. Neither is a configuration nobody can act on;
+    // both is worse — it would let a deployment believe it had disarmed the
+    // HTTP process while the key sat right there in the same options object.
+    const hasKey = o.custodyPrivateKeyHex !== undefined && o.custodyPrivateKeyHex !== ''
+    const hasAddress = o.custodyAddress !== undefined && o.custodyAddress !== ''
+    if (hasKey === hasAddress) {
+      throw new Error(
+        'NimiqChain needs exactly one of custodyPrivateKeyHex (signing) or custodyAddress (read-only)',
+      )
     }
-    // The WASM module is loaded synchronously at import time, so key derivation
-    // works before (and without) any network connection.
-    this.keyPair = KeyPair.derive(PrivateKey.fromHex(hex))
-    this.custody = this.keyPair.toAddress().toUserFriendlyAddress()
+
+    if (hasKey) {
+      const hex = (o.custodyPrivateKeyHex as string).trim().replace(/^0x/, '')
+      if (!/^[0-9a-fA-F]{64}$/.test(hex)) {
+        throw new Error('custodyPrivateKeyHex must be 32 bytes of hex (64 chars)')
+      }
+      // The WASM module is loaded synchronously at import time, so key derivation
+      // works before (and without) any network connection.
+      this.keyPair = KeyPair.derive(PrivateKey.fromHex(hex))
+      this.custody = this.keyPair.toAddress().toUserFriendlyAddress()
+    } else {
+      this.keyPair = null
+      // Parsed, not trusted: a typo'd `CUSTODY_ADDRESS` would otherwise become
+      // funding instructions pointing at nothing, and every deposit made
+      // against them is money nobody controls. `Address.fromAny` throws on
+      // anything that is not a real address, at BOOT, which is where a wrong
+      // custody address has to be caught. Normalised to the same spaced
+      // user-friendly form the signing path produces, so the two modes are
+      // indistinguishable to `custodyAddress()` callers.
+      this.custody = Address.fromAny((o.custodyAddress as string).trim()).toUserFriendlyAddress()
+    }
 
     // Floored config, or the documented test-only override. There is no third
     // path: a deployment cannot configure a depth below the protocol floor.
@@ -291,6 +353,16 @@ export class NimiqChain implements ChainClient {
         // best effort — the process is going away anyway
       }
     }
+  }
+
+  /**
+   * True when this client holds no key and can only read.
+   *
+   * Exposed so a process can ASSERT its own posture (`index.ts` logs it at
+   * boot) rather than infer it from configuration it cannot see.
+   */
+  isReadOnly(): boolean {
+    return this.keyPair === null
   }
 
   /** Exposed for evidence/diagnostics; not part of the frozen interface. */
@@ -409,12 +481,17 @@ export class NimiqChain implements ChainClient {
     dataUtf8?: string
     validityStartHeight: number
   }): Promise<{ rawTxHex: string; txHash: string; feeLuna: bigint }> {
+    // FIRST, before any argument validation: a read-only client must fail the
+    // same way for every call, so no caller can learn anything by probing it.
+    const keyPair = this.keyPair
+    if (keyPair === null) throw new ReadOnlyChainError('build a signed transaction')
+
     if (o.valueLuna <= 0n) throw new Error('valueLuna must be positive')
     if (!Number.isInteger(o.validityStartHeight) || o.validityStartHeight < 0) {
       throw new Error('validityStartHeight must be a non-negative integer')
     }
 
-    const sender = this.keyPair.toAddress()
+    const sender = keyPair.toAddress()
     const recipient = Address.fromAny(o.to)
 
     let tx
@@ -445,7 +522,7 @@ export class NimiqChain implements ChainClient {
     }
 
     // API-DIVERGENCE 4: in-place mutation, second positional arg required.
-    tx.sign(this.keyPair, undefined)
+    tx.sign(keyPair, undefined)
     // Throws with the exact validity error if we built something unusable —
     // better here than after we have already persisted bytes.
     tx.verify(this.networkId)
@@ -460,6 +537,11 @@ export class NimiqChain implements ChainClient {
    * makes the kill/restart path in `spike/s2-kill-recovery.ts` safe.
    */
   async broadcast(rawTxHex: string): Promise<void> {
+    // Guarded as well as `buildSignedBasic`, and on purpose. Broadcasting is
+    // not signing, but "hand the read-only process some bytes somebody else
+    // signed" is precisely the path a key-less API would still be able to move
+    // money down. A client with no key does not write to the chain at all.
+    if (this.keyPair === null) throw new ReadOnlyChainError('broadcast')
     const client = await this.connect()
     // API-DIVERGENCE 12: resolves to PlainTransactionDetails; we discard it so
     // callers cannot start treating "acknowledged" as "included".
@@ -480,8 +562,31 @@ export function nimiqChainFromEnv(overrides: Partial<NimiqChainOptions> = {}): N
   const network = overrides.network ?? requireNetwork()
   const custodyPrivateKeyHex = overrides.custodyPrivateKeyHex ?? process.env.CUSTODY_PRIVATE_KEY_HEX
   if (!custodyPrivateKeyHex) throw new Error('CUSTODY_PRIVATE_KEY_HEX is not set')
-  const { finalityDepthOverride: _ignored, ...rest } = overrides
+  const { finalityDepthOverride: _ignored, custodyAddress: _never, ...rest } = overrides
   return new NimiqChain({ ...rest, network, custodyPrivateKeyHex })
+}
+
+/**
+ * The same client, built from `CUSTODY_ADDRESS` and no key. For `index.ts`.
+ *
+ * A separate function rather than a flag on `nimiqChainFromEnv`, so that
+ * "which entrypoints can sign" is answerable by grepping for one name. The
+ * signing factory reads `CUSTODY_PRIVATE_KEY_HEX`; this one cannot, and drops
+ * any `custodyPrivateKeyHex` an override tries to smuggle in — the same
+ * treatment `finalityDepthOverride` gets, and for the same reason.
+ */
+export function readOnlyNimiqChainFromEnv(
+  overrides: Partial<NimiqChainOptions> = {},
+): NimiqChain {
+  const network = overrides.network ?? requireNetwork()
+  const custodyAddress = overrides.custodyAddress ?? process.env.CUSTODY_ADDRESS
+  if (!custodyAddress) throw new Error('CUSTODY_ADDRESS is not set')
+  const {
+    finalityDepthOverride: _ignored,
+    custodyPrivateKeyHex: _never,
+    ...rest
+  } = overrides
+  return new NimiqChain({ ...rest, network, custodyAddress })
 }
 
 /** Re-exported for evidence: batch geometry behind DEFAULT_FINALITY_DEPTH. */
