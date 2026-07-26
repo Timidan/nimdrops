@@ -4,7 +4,7 @@ import { type NimiqChain, nimiqChainFromEnv } from './chain/nimiq'
 import type { ChainClient, ChainTx } from './chain/types'
 import { type Queryable, closePool, getPool } from './db/pool'
 import { type NetworkName, errorMessage } from './config'
-import { exitAfterFlush } from './exit'
+import { exitAfterTeardown } from './exit'
 import { type Alerts, consoleAlerts } from './services/alerts'
 import { MEMO_PREFIX } from './services/drops'
 import {
@@ -56,7 +56,20 @@ import {
  * could redirect a payment.
  */
 
-export class RecoverError extends Error {}
+/**
+ * Base class for every deliberate refusal this file can raise.
+ *
+ * `name` is set from the concrete subclass rather than left as `"Error"`: the
+ * machine-readable outcome line carries it, and "this was a
+ * `ReplaceRefusedError`" is a materially different fact for an operator (and
+ * for {@link failed}, which classifies on it) than "this was an error".
+ */
+export class RecoverError extends Error {
+  constructor(message?: string) {
+    super(message)
+    this.name = new.target.name
+  }
+}
 
 /** The prior attempt might still land, so building a new one could double-pay. */
 export class ReplaceRefusedError extends RecoverError {}
@@ -1659,7 +1672,27 @@ commands:
       example: pnpm tsx src/recover.ts unpause
 
   --help
-      Print this block. Also printed, to stderr, on an unrecognised command.`
+      Print this block. Also printed, to stderr, on an unrecognised command.
+
+exit codes:
+  0   the command did its work. For a money command that means the change is
+      COMMITTED — do not re-run it.
+  1   the command ran and REFUSED, or failed cleanly. It signed and broadcast
+      nothing; re-running will refuse the same way until the reason changes.
+  2   usage error. Nothing was contacted at all.
+  3   the run stopped BEFORE the work started — no database, no chain client, or
+      consensus was not established in time. Nothing was read and nothing was
+      written; it is safe to re-run.
+  4   the outcome is UNKNOWN: the process was killed by a fault while the work
+      was in flight. Run "status" and check the effect before re-running.
+
+Whatever happens, the LAST line on stdout is one JSON object
+{"event":"recover_result", ...} carrying an explicit "ok" boolean, the "effect"
+this run had ("applied" / "read_only" / "none" / "unknown") and one line of
+"advice". Automation should read that line and never infer success from the exit
+code alone:
+
+  ... | grep '"event":"recover_result"' | tail -1 | jq -e .ok`
 
 const COMMANDS = [
   'status',
@@ -1697,100 +1730,598 @@ export function flagValue(argv: string[], flag: string): string | undefined {
   return undefined
 }
 
-export async function main(argv: string[]): Promise<number> {
+// ---- what a run REPORTS ------------------------------------------------------------------
+
+/**
+ * Exit codes, named because their whole purpose is to be read by somebody else.
+ *
+ * The distinction that matters is 3 versus everything else. `unpause` is
+ * idempotent, but `replace` signs a replacement transaction and `float set`
+ * attests a deposit, and an operator or script that retries one of those
+ * because it could not tell "nothing happened" from "it worked" is the exact
+ * double-spend the rest of this system is built to refuse. So "the run stopped
+ * before it did anything" gets a code of its own, and so does "we do not know".
+ */
+export const EXIT_OK = 0
+export const EXIT_REFUSED = 1
+export const EXIT_USAGE = 2
+export const EXIT_BEFORE_WORK = 3
+export const EXIT_UNKNOWN = 4
+
+/** How far a run got. Decides which of the codes above it may report. */
+export type RecoverPhase =
+  /** Argument parsing. Nothing has been opened. */
+  | 'usage'
+  /** Building the pool and the chain client, and establishing consensus. */
+  | 'startup'
+  /** The command's own function is running. */
+  | 'work'
+  /** The work returned. Everything from here on is teardown. */
+  | 'done'
+
+/** What this run DID to the system — the question a retry decision turns on. */
+export type RecoverEffect =
+  /** Something changed, and it is committed. */
+  | 'applied'
+  /** The command only read. */
+  | 'read_only'
+  /** Nothing changed. Safe to re-run. */
+  | 'none'
+  /** We cannot say. Look before re-running. */
+  | 'unknown'
+
+/**
+ * The single machine-readable line every run ends with.
+ *
+ * The exit code alone is not enough for a money command, for two reasons this
+ * file has already been bitten by: a status can be clobbered by a library fault
+ * that has nothing to do with the work (see `src/exit.ts`), and "non-zero" does
+ * not say whether the money moved. So the ground truth is a line on stdout that
+ * states the answer outright, and the exit code merely agrees with it.
+ *
+ * `event` matches the `{event, at, ...}` shape the rest of the system logs in,
+ * so a collector already parsing those picks this up unchanged.
+ */
+export interface RecoverOutcome {
+  event: 'recover_result'
+  at: string
+  ok: boolean
+  /** `status`, `float set`, `unpause`, … — the subcommand, not the argv. */
+  command: string
+  phase: RecoverPhase
+  effect: RecoverEffect
+  exitCode: number
+  /** One sentence telling an operator whether to re-run. */
+  advice: string
+  /**
+   * Set when the run was ended by something NOBODY could catch — the
+   * `@nimiq/core` rethrow. Its absence means the error below was raised and
+   * caught on a stack this file owns, which is a materially calmer fact.
+   */
+  fault?: 'uncaught exception' | 'unhandled rejection' | 'internal error'
+  /** The command's own report, for a mutating command that succeeded. */
+  result?: unknown
+  error?: { name: string; message: string }
+}
+
+/**
+ * Commands that can change something. Everything else only reads, and a failed
+ * read is never a retry hazard.
+ */
+const MUTATING = new Set<string>(['resume', 'replace', 'float set', 'pause', 'unpause'])
+
+const ADVICE = {
+  applied:
+    'the change reported above is committed — do NOT re-run this command; run "status" if you ' +
+    'want to see it.',
+  readOnly: 'read-only: nothing was changed.',
+  beforeWork:
+    'this run stopped BEFORE it did any work: nothing was read and nothing was written, so it is ' +
+    'safe to re-run once the reason above is fixed.',
+  refused:
+    'the command ran and refused: it signed nothing and broadcast nothing. Re-running will refuse ' +
+    'the same way until the reason above changes.',
+  unknown:
+    'the OUTCOME IS UNKNOWN — the process was killed by a fault while the work was in flight. Run ' +
+    '"recover.ts status" and check the effect before re-running anything that moves money.',
+  usage: 'nothing was contacted: the arguments were rejected before any connection was opened.',
+} as const
+
+function errorDetail(err: unknown): { name: string; message: string } {
+  return {
+    name: err instanceof Error ? err.name : typeof err,
+    message: errorMessage(err),
+  }
+}
+
+function outcome(o: Omit<RecoverOutcome, 'event' | 'at'>): RecoverOutcome {
+  return { event: 'recover_result', at: new Date().toISOString(), ...o }
+}
+
+/** The work finished. */
+export function succeeded(command: string, result: unknown): RecoverOutcome {
+  const applied = MUTATING.has(command)
+  return outcome({
+    ok: true,
+    command,
+    phase: 'done',
+    effect: applied ? 'applied' : 'read_only',
+    exitCode: EXIT_OK,
+    advice: applied ? ADVICE.applied : ADVICE.readOnly,
+    ...(applied ? { result } : {}),
+  })
+}
+
+/**
+ * A run that ended on an error we CAUGHT — so control came back to us and we
+ * know where it stopped.
+ *
+ * A `RecoverError` is a deliberate refusal: every one of them is raised before
+ * anything is signed, and the two that commit anything at all
+ * ({@link replaceTransfer}'s cleared absence series) commit only the fact that
+ * the chain contradicted us. Anything else thrown out of a MUTATING command is
+ * unclassified, and an unclassified fault on a money path is `unknown` — the
+ * conservative answer, because the only cost of being wrong about it is that an
+ * operator reads one more `status`.
+ */
+export function failed(command: string, phase: RecoverPhase, err: unknown): RecoverOutcome {
+  if (phase === 'startup') {
+    return outcome({
+      ok: false,
+      command,
+      phase,
+      effect: 'none',
+      exitCode: EXIT_BEFORE_WORK,
+      advice: ADVICE.beforeWork,
+      error: errorDetail(err),
+    })
+  }
+  const unclassified = !(err instanceof RecoverError) && MUTATING.has(command)
+  return outcome({
+    ok: false,
+    command,
+    phase,
+    effect: unclassified ? 'unknown' : 'none',
+    exitCode: unclassified ? EXIT_UNKNOWN : EXIT_REFUSED,
+    advice: unclassified ? ADVICE.unknown : ADVICE.refused,
+    error: errorDetail(err),
+  })
+}
+
+/**
+ * A run that was ended by a fault NOBODY could catch.
+ *
+ * This is the `@nimiq/core` hazard `src/exit.ts` documents, arriving on the
+ * other side of the work: the nodejs client talks to its consensus worker over
+ * message listeners that are async, and a rejection from one of those is
+ * re-raised as an uncaught exception (`called Result::unwrap_throw() on an Err
+ * value`) on a tick of its own. No `try`/`catch` around anything this file
+ * awaits can see it, and Node's default handler prints a WASM stack trace and
+ * ends the process at 1 — with no indication of whether the work had happened.
+ *
+ * Observed on the mainnet cutover: `float set` died this way during client
+ * startup, having done nothing, and an identical re-run then succeeded. That is
+ * the RIGHT exit direction and the wrong report: an operator staring at a WASM
+ * backtrace cannot tell it from the same backtrace arriving one second later,
+ * after the deposit had been attested. The phase is the only thing that can
+ * tell them apart, so the phase is what this reports.
+ */
+export function faulted(
+  command: string,
+  phase: RecoverPhase,
+  fault: NonNullable<RecoverOutcome['fault']>,
+  err: unknown,
+): RecoverOutcome {
+  const detail = errorDetail(err)
+  if (phase === 'startup' || phase === 'usage') {
+    return outcome({
+      ok: false,
+      command,
+      phase,
+      effect: 'none',
+      exitCode: EXIT_BEFORE_WORK,
+      advice: ADVICE.beforeWork,
+      fault,
+      error: detail,
+    })
+  }
+  return outcome({
+    ok: false,
+    command,
+    phase,
+    effect: 'unknown',
+    exitCode: EXIT_UNKNOWN,
+    advice: ADVICE.unknown,
+    fault,
+    error: detail,
+  })
+}
+
+function rejectedUsage(command: string): RecoverOutcome {
+  console.error(USAGE)
+  return outcome({
+    ok: false,
+    command,
+    phase: 'usage',
+    effect: 'none',
+    exitCode: EXIT_USAGE,
+    advice: ADVICE.usage,
+  })
+}
+
+// ---- printing ------------------------------------------------------------------------------
+
+/**
+ * `JSON.stringify` replacer for a codebase whose money is `bigint`.
+ *
+ * THIS is what exited 1 after a successful `unpause` on the mainnet cutover.
+ * `Controls` carries five bigint fields, `JSON.stringify` throws
+ * `TypeError: Do not know how to serialize a BigInt` on the first one, and the
+ * throw happened in `print()` — AFTER the row was updated and
+ * `custody_unpaused` was logged. So the kill switch was released, the operator
+ * was shown a stack-free one-line error and a status of 1, and the only honest
+ * reading of that pair is "the unpause failed", which it had not.
+ *
+ * Every other command dodged it by hand-building string DTOs. Fixing those
+ * two call sites would have left the next command one `bigint` away from the
+ * same bug, so the fix is here, where reporting can no longer fail on the shape
+ * of what it was asked to report.
+ */
+function jsonSafe(_key: string, value: unknown): unknown {
+  return typeof value === 'bigint' ? value.toString() : value
+}
+
+/** The human report: the command's own result, indented, on stdout. */
+function print(value: unknown): void {
+  console.log(JSON.stringify(value, jsonSafe, 2))
+}
+
+/**
+ * Announce an outcome: the human sentence on stderr, then the machine line.
+ *
+ * Both live HERE rather than at the point the error was caught, so a run that
+ * has already been concluded by a fault cannot go on narrating. That is not
+ * hypothetical — the guard tears the pool down under a `main` that is still
+ * awaiting a query on it, and the "Cannot use a pool after calling end on the
+ * pool" that comes back must not be printed BELOW a line that already told the
+ * operator what happened.
+ *
+ * The machine line is wrapped in its own `try` for the same reason `safeLog`
+ * is: the line whose job is to report the outcome must never become the reason
+ * the outcome is wrong.
+ */
+function report(o: RecoverOutcome): void {
+  if (o.error) {
+    console.error(o.fault ? `${o.fault} during ${o.phase}: ${o.error.message}` : o.error.message)
+  }
+  try {
+    console.log(JSON.stringify(o, jsonSafe))
+  } catch {
+    console.log(
+      JSON.stringify({
+        event: 'recover_result',
+        at: o.at,
+        ok: o.ok,
+        command: o.command,
+        phase: o.phase,
+        effect: o.effect,
+        exitCode: o.exitCode,
+        advice: o.advice,
+        note: 'result not serializable; see the report above',
+      }),
+    )
+  }
+}
+
+// ---- startup ---------------------------------------------------------------------------------
+
+/** The chain client could not be brought up. By definition, nothing has happened. */
+export class ChainStartupError extends RecoverError {}
+
+/**
+ * How long a command will wait for consensus before giving up.
+ *
+ * `waitForConsensusEstablished()` has no timeout of its own and no failure
+ * mode: a client that cannot reach its seeds sits in `connecting` with zero
+ * peers forever (API-DIVERGENCE 15). An operator command that hangs is worse
+ * than one that fails, because a hang has to be interrupted by hand and then
+ * carries the same question a crash does — did it get far enough to do
+ * anything? A bounded wait that fails in the STARTUP phase answers that
+ * question for them.
+ *
+ * Two minutes: mainnet pico consensus measured 5.5–10.3 s over fourteen runs
+ * from a developer machine, so this is an order of magnitude of headroom for a
+ * loaded VPS rather than a guess at the typical case.
+ */
+const DEFAULT_STARTUP_TIMEOUT_MS = 120_000
+
+/**
+ * The shorter budget a DEGRADABLE command gets.
+ *
+ * `status` and `float show` do not need the chain to be useful — an unreachable
+ * node becomes a `reason` string in the report rather than a failure, and that
+ * string is often the most interesting line on the screen. `status` is also the
+ * first thing an on-call operator runs, so making them sit through the full
+ * budget before seeing anything would be withholding the report by another
+ * name. The commands that MUST have a chain keep the full budget: for them a
+ * short one is just an early refusal.
+ */
+const DEGRADED_STARTUP_TIMEOUT_MS = 30_000
+
+function startupTimeoutMs(): number {
+  const raw = process.env.RECOVER_STARTUP_TIMEOUT_MS
+  if (raw === undefined || raw === '') return DEFAULT_STARTUP_TIMEOUT_MS
+  const ms = Number(raw)
+  if (!Number.isInteger(ms) || ms <= 0) {
+    throw new ChainStartupError(
+      `RECOVER_STARTUP_TIMEOUT_MS must be a positive whole number of milliseconds (got ${JSON.stringify(raw)})`,
+    )
+  }
+  return ms
+}
+
+/**
+ * Bring the consensus client up HERE, in the startup phase, rather than letting
+ * the first `headHeight()` do it inside the work.
+ *
+ * Connecting is the slow, network-dependent, WASM-heavy part of every
+ * chain-touching command, and it is where the mainnet cutover's `float set`
+ * died. Lazily connecting put that failure inside the work, where it is
+ * indistinguishable from the command refusing — or worse, from it half
+ * succeeding. Connecting eagerly puts it in the one phase where "nothing
+ * happened" is a fact rather than an inference.
+ *
+ * `NimiqChain.connect()` is idempotent, so the work's own calls are unaffected.
+ */
+async function connectWithin(chain: NimiqChain, capMs = Number.POSITIVE_INFINITY): Promise<void> {
+  const ms = Math.min(startupTimeoutMs(), capMs)
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    // `Promise.race` subscribes to BOTH, so a `connect()` that rejects after
+    // the timeout has already won is still handled and cannot resurface as an
+    // unhandled rejection.
+    await Promise.race([
+      chain.connect(),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              new ChainStartupError(
+                `consensus was not established on ${chain.network()} within ${ms}ms. Nothing has ` +
+                  'been read or written by this command. Check the node\'s outbound access to the ' +
+                  'seed nodes and re-run; raise RECOVER_STARTUP_TIMEOUT_MS if the node is simply slow.',
+              ),
+            ),
+          ms,
+        )
+      }),
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+// ---- the run ---------------------------------------------------------------------------------
+
+/**
+ * How far the current run has got.
+ *
+ * Module scope, and deliberately: the only consumer is the uncaught-fault guard
+ * {@link runCli} installs, which by construction runs outside every call stack
+ * this file controls and so cannot be passed anything.
+ */
+let phase: RecoverPhase = 'usage'
+
+/**
+ * Whether an outcome has already been published for this process.
+ *
+ * Module scope for the same reason {@link phase} is: {@link runCli}'s guard can
+ * conclude a run from outside `main`'s call stack, and `main` — which may still
+ * be mid-`await` when that happens — has to stop narrating.
+ */
+let concluded = false
+
+/**
+ * The live chain client, held at module scope so {@link teardown} can reach it
+ * after {@link main} has returned its outcome.
+ *
+ * It used to be a local torn down in `main`'s `finally`, which put the whole of
+ * teardown INSIDE the window whose exit code reports the work. That is the
+ * arrangement `src/exit.ts` exists to forbid.
+ */
+let openChain: NimiqChain | null = null
+
+/**
+ * Everything the process holds, released after the outcome is already fixed.
+ *
+ * Faults are NOT swallowed here (the old code's `.catch(() => {})`): they are
+ * left to `exitAfterTeardown`, which logs them and then refuses to let them
+ * change the exit code. A WASM error nobody ever sees is its own bug.
+ */
+async function teardown(): Promise<void> {
+  const chain = openChain
+  openChain = null
+  await chain?.close()
+  await closePool()
+}
+
+/**
+ * Run one command and report what it did. Opens resources; does NOT close them.
+ *
+ * The split is the point. Teardown is the caller's job precisely so the
+ * outcome this returns is decided before a `@nimiq/core` shutdown fault gets a
+ * chance to weigh in — see {@link runCli} and `src/exit.ts`.
+ */
+export async function main(argv: string[]): Promise<RecoverOutcome> {
   const [command, argument, third] = argv
+  const name = commandName(argv)
+
+  phase = 'usage'
 
   if (command && HELP_FLAGS.has(command)) {
     console.log(USAGE)
-    return 0
+    return succeeded('--help', undefined)
   }
   if (!command || !(COMMANDS as readonly string[]).includes(command)) {
-    console.error(USAGE)
-    return 2
+    return rejectedUsage(name)
   }
   if (NEEDS_ARGUMENT.has(command) && !argument) {
-    console.error(USAGE)
-    return 2
+    return rejectedUsage(name)
   }
   if (command === 'float' && argument !== 'show' && argument !== 'set') {
-    console.error(USAGE)
-    return 2
+    return rejectedUsage(name)
   }
   // The amount is positional and must not be a flag: `float set --tx <hash>`
   // with no amount would otherwise read "--tx" as the luna value.
   if (command === 'float' && argument === 'set' && (third === undefined || third.startsWith('-'))) {
-    console.error(USAGE)
-    return 2
+    return rejectedUsage(name)
   }
 
   const wantsChain = NEEDS_CHAIN.has(command) || (command === 'float' && argument === 'set')
   const mayUseChain = OPTIONAL_CHAIN.has(command) || (command === 'float' && argument === 'show')
 
-  let pool: Pool | null = null
+  let pool: Pool
   let chain: NimiqChain | null = null
   /** Why there is no chain client, for the degraded section of a read-only report. */
   let chainUnavailableReason: string | undefined
 
-  const print = (value: unknown): void => {
-    console.log(JSON.stringify(value, null, 2))
+  phase = 'startup'
+  try {
+    pool = getPool()
+    // Prove the database answers before the work starts. `getPool()` is lazy,
+    // so without this an unreachable database surfaces on the command's first
+    // query — inside the work, where "nothing happened" stops being provable
+    // even though it is still true.
+    await pool.query('SELECT 1')
+    if (wantsChain) {
+      openChain = chain = nimiqChainFromEnv()
+      await connectWithin(chain)
+    } else if (mayUseChain) {
+      try {
+        // `openChain` is assigned even on the degraded path so a half-built
+        // client is still torn down.
+        openChain = chain = nimiqChainFromEnv()
+        await connectWithin(chain, DEGRADED_STARTUP_TIMEOUT_MS)
+      } catch (err) {
+        chain = null
+        chainUnavailableReason = `no chain client: ${errorMessage(err)}`
+      }
+    }
+  } catch (err) {
+    return failed(name, 'startup', err)
   }
+
   const needChain = (): NimiqChain => {
     if (!chain) throw new RecoverError(`command ${command} requires a chain client`)
     return chain
   }
 
+  phase = 'work'
+  let result: unknown
   try {
-    pool = getPool()
-    if (wantsChain) {
-      chain = nimiqChainFromEnv()
-    } else if (mayUseChain) {
-      try {
-        chain = nimiqChainFromEnv()
-      } catch (err) {
-        chainUnavailableReason = `no chain client: ${errorMessage(err)}`
-      }
-    }
-
     const alerts = consoleAlerts()
 
     if (command === 'status') {
-      print(await statusReport(pool, chain, chainUnavailableReason))
+      result = await statusReport(pool, chain, chainUnavailableReason)
     } else if (command === 'float') {
-      print(
+      result =
         argument === 'show'
           ? await floatShow(pool, chain, chainUnavailableReason)
-          : await setOperatorFloat(pool, needChain(), third as string, flagValue(argv, '--tx')),
-      )
+          : await setOperatorFloat(pool, needChain(), third as string, flagValue(argv, '--tx'))
     } else if (command === 'resume') {
-      print(await resumeTransfer(pool, needChain(), alerts, argument))
+      result = await resumeTransfer(pool, needChain(), alerts, argument)
     } else if (command === 'replace') {
-      print(await replaceTransfer(pool, needChain(), alerts, argument))
+      result = await replaceTransfer(pool, needChain(), alerts, argument)
     } else if (command === 'deposits') {
-      print(await depositReport(pool, needChain()))
+      result = await depositReport(pool, needChain())
     } else if (command === 'pause') {
-      print(await pauseCustody(pool, argument))
+      result = await pauseCustody(pool, argument)
     } else {
-      print(await unpauseCustody(pool))
+      result = await unpauseCustody(pool)
     }
-    return 0
   } catch (err) {
-    console.error(errorMessage(err))
-    return 1
-  } finally {
-    await chain?.close().catch(() => {})
-    await closePool().catch(() => {})
+    return failed(name, 'work', err)
   }
+
+  // The work is over. Reporting it cannot change that: `print` can no longer
+  // throw on a bigint, and if it somehow did, `report` still states the truth
+  // on its own line.
+  phase = 'done'
+  // Not printed when a fault has already concluded this run: a full, healthy
+  // report arriving after an "outcome unknown" line would contradict it.
+  if (!concluded) print(result)
+  return succeeded(name, result)
+}
+
+/** The subcommand an outcome is about. `float` carries its second word. */
+function commandName(argv: string[]): string {
+  const [command, argument] = argv
+  if (!command) return '(none)'
+  if (command === 'float' && (argument === 'show' || argument === 'set')) {
+    return `float ${argument}`
+  }
+  return command
+}
+
+/**
+ * The CLI: run the command, publish the outcome, then — and only then — let go.
+ *
+ * Three things have to be true at once and none of them were:
+ *
+ *  1. **The exit code reports the WORK.** Teardown now happens under
+ *     `exitAfterTeardown`, after the outcome is fixed, so a `@nimiq/core`
+ *     shutdown fault is logged and discarded instead of overwriting a 0 with a
+ *     1. The old code tore down inside `main` and then called `exitAfterFlush`,
+ *     which fixes no code at all — it installs no handlers, so any uncaught
+ *     exception in the whole teardown-and-flush window reached Node's default
+ *     handler.
+ *  2. **A fault that lands BEFORE the work says so.** The guard below is
+ *     installed before anything is constructed, and it reads {@link phase}, so
+ *     the WASM rethrow that killed the cutover's first `float set` now prints
+ *     "nothing was read and nothing was written" and exits 3 instead of dumping
+ *     a backtrace and exiting 1.
+ *  3. **The answer is machine-readable.** {@link report} runs on every path,
+ *     including the fault paths, so automation reads `ok` rather than guessing
+ *     from a status.
+ *
+ * The guard is removed the moment the outcome is fixed, because from there
+ * `exitAfterTeardown` owns those two events and two owners would race.
+ */
+export function runCli(argv: string[]): void {
+  let release = (): void => {}
+
+  const finish = (o: RecoverOutcome): void => {
+    if (concluded) return
+    concluded = true
+    release()
+    report(o)
+    exitAfterTeardown(o.exitCode, teardown, (message) =>
+      console.error(JSON.stringify({ event: 'recover_teardown_fault', message })),
+    )
+  }
+
+  const guard = (kind: 'uncaught exception' | 'unhandled rejection') => (err: unknown) => {
+    finish(faulted(commandName(argv), phase, kind, err))
+  }
+  const onException = guard('uncaught exception')
+  const onRejection = guard('unhandled rejection')
+  process.on('uncaughtException', onException)
+  process.on('unhandledRejection', onRejection)
+  release = (): void => {
+    process.off('uncaughtException', onException)
+    process.off('unhandledRejection', onRejection)
+  }
+
+  main(argv).then(finish, (err: unknown) => {
+    // `main` catches its own errors, so this is a bug in `main` rather than in
+    // a command — but it is still an outcome and it still has a phase.
+    finish(faulted(commandName(argv), phase, 'internal error', err))
+  })
 }
 
 const invokedDirectly =
   process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href
 
 if (invokedDirectly) {
-  main(process.argv.slice(2)).then(
-    (code) => exitAfterFlush(code),
-    (err: unknown) => {
-      console.error(errorMessage(err))
-      exitAfterFlush(1)
-    },
-  )
+  runCli(process.argv.slice(2))
 }

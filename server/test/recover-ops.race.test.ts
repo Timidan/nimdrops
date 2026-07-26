@@ -1,23 +1,33 @@
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { fileURLToPath } from 'node:url'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { FakeChain } from '../src/chain/fake'
 import type { ChainClient } from '../src/chain/types'
 import { migrate } from '../src/db/migrate'
 import {
+  ChainStartupError,
   ChainUnavailableError,
   DepositAttestationError,
   InvalidLunaError,
   OverAttestationError,
+  type RecoverOutcome,
+  ReplaceRefusedError,
   USAGE,
   attestedFloatDepositsLuna,
+  failed,
+  faulted,
   flagValue,
   floatShow,
   main,
   setOperatorFloat,
   statusReport,
+  succeeded,
 } from '../src/recover'
 import {
   InsolventError,
@@ -284,12 +294,24 @@ describe('recover CLI help', () => {
       printed.push(args.map(String).join(' '))
     }
     try {
-      expect(await main(['--help'])).toBe(0)
+      const outcome = await main(['--help'])
+      expect(outcome.exitCode).toBe(0)
+      expect(outcome.ok).toBe(true)
+      expect(outcome.effect).toBe('read_only')
     } finally {
       console.log = original
     }
     const out = printed.join('\n')
     for (const name of SUBCOMMANDS) expect(out).toContain(name)
+  })
+
+  it('documents every exit code it can return', () => {
+    for (const code of [0, 1, 2, 3, 4]) {
+      expect(USAGE).toMatch(new RegExp(`^ {2}${code} {3}`, 'm'))
+    }
+    // The machine-readable contract has to be discoverable from --help too, or
+    // nobody writing a script will know it is there.
+    expect(USAGE).toContain('"event":"recover_result"')
   })
 
   it('reads --tx as a flag, in either spelling', () => {
@@ -305,13 +327,21 @@ describe('recover CLI help', () => {
       printed.push(args.map(String).join(' '))
     }
     try {
-      expect(await main([])).toBe(2)
-      expect(await main(['float'])).toBe(2)
-      expect(await main(['float', 'nonsense'])).toBe(2)
-      expect(await main(['float', 'set'])).toBe(2)
-      // The amount is positional: `float set --tx <hash>` with no amount must
-      // not read "--tx" as a number of luna.
-      expect(await main(['float', 'set', '--tx', 'abc'])).toBe(2)
+      for (const argv of [
+        [],
+        ['float'],
+        ['float', 'nonsense'],
+        ['float', 'set'],
+        // The amount is positional: `float set --tx <hash>` with no amount must
+        // not read "--tx" as a number of luna.
+        ['float', 'set', '--tx', 'abc'],
+      ]) {
+        const outcome = await main(argv)
+        expect(outcome.exitCode, argv.join(' ')).toBe(2)
+        expect(outcome.ok).toBe(false)
+        expect(outcome.phase).toBe('usage')
+        expect(outcome.effect).toBe('none')
+      }
     } finally {
       console.error = original
     }
@@ -320,23 +350,150 @@ describe('recover CLI help', () => {
 })
 
 /**
- * The CLI must always END.
+ * The outcome classifier, on its own.
  *
- * Observed on the VPS: `pnpm tsx src/recover.ts status` printed a correct,
- * complete report and then hung until `timeout` killed it (exit 124).
- * `@nimiq/core` spawns a consensus worker whose threads and timers keep the
- * event loop alive, and `chain.close()` disconnects the network without tearing
- * those handles down — so setting `process.exitCode` and waiting for the loop
- * to drain waits forever. The fix exits explicitly, after flushing stdout.
+ * These three functions are the whole of the retry contract: they decide what
+ * an operator is told about whether the money moved. They are pure, so they are
+ * tested directly — the process-level behaviour they produce is covered by the
+ * spawned children below.
+ */
+describe('recover outcome classification', () => {
+  it('calls a finished money command APPLIED and a finished report READ-ONLY', () => {
+    const applied = succeeded('float set', { command: 'float set' })
+    expect(applied).toMatchObject({ ok: true, effect: 'applied', exitCode: 0, phase: 'done' })
+    // "what changed" travels with the line, so automation never has to go back
+    // and re-parse the pretty report above it.
+    expect(applied.result).toEqual({ command: 'float set' })
+
+    expect(succeeded('status', { command: 'status' })).toMatchObject({
+      ok: true,
+      effect: 'read_only',
+      exitCode: 0,
+    })
+  })
+
+  it('calls anything that failed in STARTUP a no-op, whatever the error was', () => {
+    for (const err of [
+      new Error('CUSTODY_PRIVATE_KEY_HEX is not set'),
+      new ChainStartupError('consensus was not established'),
+      new TypeError('arg0.addEventListener is not a function'),
+    ]) {
+      const o = failed('replace', 'startup', err)
+      expect(o).toMatchObject({ ok: false, effect: 'none', exitCode: 3, phase: 'startup' })
+      expect(o.advice).toContain('safe to re-run')
+    }
+  })
+
+  it('calls a deliberate refusal a no-op and an unclassified money error UNKNOWN', () => {
+    expect(failed('replace', 'work', new ReplaceRefusedError('nope'))).toMatchObject({
+      effect: 'none',
+      exitCode: 1,
+    })
+    expect(failed('float set', 'work', new DepositAttestationError('not_final', 'nope'))).toMatchObject({
+      effect: 'none',
+      exitCode: 1,
+    })
+    // Not a RecoverError, and the command can move money: we do not know.
+    expect(failed('replace', 'work', new Error('connection terminated'))).toMatchObject({
+      effect: 'unknown',
+      exitCode: 4,
+    })
+    // Same error on a command that only reads is still just a failed read.
+    expect(failed('status', 'work', new Error('connection terminated'))).toMatchObject({
+      effect: 'none',
+      exitCode: 1,
+    })
+  })
+
+  it('splits an uncatchable fault on the phase, which is the only thing that can', () => {
+    const wasm = new Error('called `Result::unwrap_throw()` on an `Err` value')
+
+    const before = faulted('float set', 'startup', 'uncaught exception', wasm)
+    expect(before).toMatchObject({ ok: false, effect: 'none', exitCode: 3 })
+    expect(before.advice).toContain('nothing was read and nothing was written')
+
+    const during = faulted('float set', 'work', 'uncaught exception', wasm)
+    expect(during).toMatchObject({ ok: false, effect: 'unknown', exitCode: 4 })
+    expect(during.advice).toContain('UNKNOWN')
+
+    // The same WASM backtrace, two opposite instructions to the operator. That
+    // difference is the entire point of the phase.
+    expect(before.advice).not.toBe(during.advice)
+  })
+
+  it('names the refusal class, so a script can branch on it', () => {
+    expect(failed('replace', 'work', new ReplaceRefusedError('x')).error?.name).toBe(
+      'ReplaceRefusedError',
+    )
+    expect(failed('float set', 'startup', new ChainStartupError('x')).error?.name).toBe(
+      'ChainStartupError',
+    )
+  })
+})
+
+/**
+ * How the CLI ENDS, proven the only way it can be: real child processes, real
+ * exit codes, real stdout.
  *
- * This test spawns the real CLI over a real database on the path that needs no
- * chain client. That covers the second half of the fix — a `process.exit` that
- * truncates a piped report would be a worse bug than the hang — and any future
- * handle leak on the database side. The WASM half is verified by hand against
- * TestAlbatross, because reaching consensus needs a network CI may not have.
+ * Two separate defects live here, both found on the mainnet cutover, both
+ * making the exit code a lie in a different direction:
+ *
+ *  1. **Success reported failure.** `unpause` updated the row, logged
+ *     `custody_unpaused` — and exited 1, because `print()` called
+ *     `JSON.stringify` on a `Controls` object whose luna fields are `bigint`.
+ *     The work was done and the process said it had failed.
+ *  2. **A teardown fault outranked the work.** `main` tore the chain client and
+ *     the pool down inside its own `finally` and only then called
+ *     `exitAfterFlush`, which fixes no exit code at all — it installs no
+ *     handlers. The `@nimiq/core` rethrow (`called Result::unwrap_throw() on an
+ *     Err value`), which arrives on a tick of its own long after the work, met
+ *     Node's default handler and ended the process at 1.
+ *
+ * And the third property, which is what an operator actually needs: a run that
+ * dies BEFORE its work must say so, because "nothing happened, safe to re-run"
+ * and "it worked, do not re-run" look identical when both are a WASM backtrace
+ * and a non-zero status.
+ *
+ * The WASM fault itself is not reproducible on demand — fourteen consecutive
+ * MainAlbatross connections from a developer machine produced none. So it is
+ * reproduced by its MECHANISM, exactly as `test/exit.test.ts` does: an
+ * exception thrown from a timer callback, outside every promise the CLI awaits,
+ * injected with `--import` so the CLI itself is unmodified and unaware.
  */
 describe.skipIf(!hasDb)('recover CLI process lifetime', () => {
   const CLI_TIMEOUT_MS = 90_000
+  const SERVER_DIR = fileURLToPath(new URL('..', import.meta.url))
+  /** Resolved from THIS package, so the child patches the module it will load. */
+  const PG_MODULE = createRequire(import.meta.url).resolve('pg')
+
+  /**
+   * A preload that makes `pg` misbehave the way `@nimiq/core` does.
+   *
+   * `which` selects the moment: `startup` faults while the CLI is awaiting its
+   * database probe (so `phase === 'startup'` is guaranteed rather than raced),
+   * `teardown` faults while the pool is closing, which is after the outcome has
+   * been fixed. Both throw from a `setTimeout` callback, which is the property
+   * that matters — no `try`/`catch` in the CLI can see it.
+   */
+  const faultPreload = (which: 'startup' | 'teardown') => `
+    import pg from ${JSON.stringify(pathToFileURL(PG_MODULE).href)}
+    const WASM = () => {
+      throw new Error('called \\\`Result::unwrap_throw()\\\` on an \\\`Err\\\` value')
+    }
+    const method = ${which === 'startup' ? "'query'" : "'end'"}
+    const original = pg.Pool.prototype[method]
+    let armed = true
+    pg.Pool.prototype[method] = function patched(...args) {
+      if (!armed) return original.apply(this, args)
+      armed = false
+      setTimeout(WASM, 10)
+      return new Promise((resolve) => {
+        setTimeout(() => resolve(original.apply(this, args)), 250)
+      })
+    }
+  `
+
+  let preloadDir: string
 
   // The child is the REAL CLI, so it reads `DATABASE_URL` as an operator's
   // shell would: no `search_path` override, and therefore the default schema
@@ -347,6 +504,10 @@ describe.skipIf(!hasDb)('recover CLI process lifetime', () => {
   // database or after a new migration was added. Migrating it here makes the
   // test independent of what ran before it.
   beforeAll(async () => {
+    preloadDir = mkdtempSync(join(tmpdir(), 'nimdrops-recover-'))
+    for (const which of ['startup', 'teardown'] as const) {
+      writeFileSync(join(preloadDir, `${which}.mjs`), faultPreload(which))
+    }
     const ambient = new pg.Pool({ connectionString: process.env.DATABASE_URL })
     try {
       await migrate(ambient)
@@ -355,16 +516,42 @@ describe.skipIf(!hasDb)('recover CLI process lifetime', () => {
     }
   }, CLI_TIMEOUT_MS)
 
-  function runCli(args: string[]): Promise<{ code: number | null; stdout: string }> {
+  afterAll(() => {
+    if (preloadDir) rmSync(preloadDir, { recursive: true, force: true })
+  })
+
+  interface CliRun {
+    code: number | null
+    stdout: string
+    stderr: string
+    /** The machine-readable last line, parsed. `null` when it was not printed. */
+    outcome: RecoverOutcome | null
+  }
+
+  function runCli(
+    args: string[],
+    opts: { fault?: 'startup' | 'teardown'; env?: Record<string, string> } = {},
+  ): Promise<CliRun> {
     return new Promise((resolve, reject) => {
-      const child = spawn('npx', ['tsx', 'src/recover.ts', ...args], {
-        cwd: fileURLToPath(new URL('..', import.meta.url)),
-        env: { ...process.env, NIMIQ_NETWORK: 'TestAlbatross' },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      })
+      const preload = opts.fault
+        ? ['--import', pathToFileURL(join(preloadDir, `${opts.fault}.mjs`)).href]
+        : []
+      const child = spawn(
+        process.execPath,
+        ['--import', 'tsx', ...preload, 'src/recover.ts', ...args],
+        {
+          cwd: SERVER_DIR,
+          env: { ...process.env, NIMIQ_NETWORK: 'TestAlbatross', ...opts.env },
+          stdio: ['ignore', 'pipe', 'pipe'],
+        },
+      )
       let stdout = ''
+      let stderr = ''
       child.stdout.on('data', (chunk: Buffer) => {
         stdout += chunk.toString('utf8')
+      })
+      child.stderr.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString('utf8')
       })
       const timer = setTimeout(() => {
         child.kill('SIGKILL')
@@ -373,20 +560,176 @@ describe.skipIf(!hasDb)('recover CLI process lifetime', () => {
       child.on('error', reject)
       child.on('close', (code) => {
         clearTimeout(timer)
-        resolve({ code, stdout })
+        resolve({ code, stdout, stderr, outcome: lastOutcome(stdout) })
       })
     })
+  }
+
+  /**
+   * The contract automation is told to rely on: the LAST `recover_result` line
+   * on stdout. Found by its event name rather than by position, because the
+   * library writes its own noise to both streams.
+   */
+  function lastOutcome(stdout: string): RecoverOutcome | null {
+    const lines = stdout
+      .split('\n')
+      .filter((line) => line.startsWith('{"event":"recover_result"'))
+    const last = lines.at(-1)
+    return last ? (JSON.parse(last) as RecoverOutcome) : null
   }
 
   it(
     'exits on its own, with the whole report flushed to a pipe',
     async () => {
-      const { code, stdout } = await runCli(['status'])
-      expect(code, 'the process must terminate by itself').toBe(0)
-      // Not merely "some output": the LAST byte must have made it out, which is
-      // what `process.exit` discards if the flush is skipped.
-      const report = JSON.parse(stdout.slice(stdout.indexOf('{'))) as { command: string }
+      const run = await runCli(['status'])
+      expect(run.code, 'the process must terminate by itself').toBe(0)
+      // Both halves of stdout have to have survived: the indented human report,
+      // and — genuinely last, so it is what a truncating `process.exit` would
+      // eat — the machine line.
+      const human = run.stdout.slice(0, run.stdout.indexOf('{"event":"recover_result"'))
+      const report = JSON.parse(human.slice(human.indexOf('{'))) as { command: string }
       expect(report.command).toBe('status')
+      expect(run.outcome).toMatchObject({ ok: true, command: 'status', effect: 'read_only' })
+      expect(run.stdout.trimEnd().endsWith('}')).toBe(true)
+    },
+    CLI_TIMEOUT_MS,
+  )
+
+  it(
+    'exits 0 after unpause, whose report is full of bigints',
+    async () => {
+      const run = await runCli(['unpause'])
+      // The cutover's exact failure: the row was updated and the process
+      // reported 1 because it could not serialise its own success.
+      expect(run.stderr).not.toContain('Do not know how to serialize a BigInt')
+      expect(run.code).toBe(0)
+      expect(run.outcome).toMatchObject({ ok: true, command: 'unpause', effect: 'applied' })
+      // Luna survive as decimal STRINGS, which is the only lossless JSON they
+      // have — never as numbers.
+      expect((run.outcome?.result as { operatorFloatLuna: unknown }).operatorFloatLuna).toBe('0')
+      expect((run.outcome?.result as { paused: unknown }).paused).toBe(false)
+    },
+    CLI_TIMEOUT_MS,
+  )
+
+  it(
+    'exits 0 after pause too, and says the switch is now engaged',
+    async () => {
+      const run = await runCli(['pause', 'exit-code regression test'])
+      expect(run.code).toBe(0)
+      expect(run.outcome).toMatchObject({ ok: true, command: 'pause', effect: 'applied' })
+      expect((run.outcome?.result as { paused: unknown }).paused).toBe(true)
+      // Leave the shared schema as we found it.
+      expect((await runCli(['unpause'])).code).toBe(0)
+    },
+    CLI_TIMEOUT_MS,
+  )
+
+  it(
+    'keeps the work’s exit code when the teardown raises the WASM rethrow',
+    async () => {
+      const run = await runCli(['unpause'], { fault: 'teardown' })
+      expect(run.code, 'a fault after the work must not change the status').toBe(0)
+      expect(run.outcome).toMatchObject({ ok: true, command: 'unpause', effect: 'applied' })
+      // Discarded as an influence, never as a fact: a WASM error nobody sees is
+      // its own bug.
+      expect(run.stderr).toContain('recover_teardown_fault')
+      expect(run.stderr).toContain('unwrap_throw')
+    },
+    CLI_TIMEOUT_MS,
+  )
+
+  it(
+    'says NOTHING HAPPENED when the same fault lands before the work',
+    async () => {
+      const run = await runCli(['unpause'], { fault: 'startup' })
+      expect(run.code, 'a run that did nothing must still fail').toBe(3)
+      expect(run.outcome).toMatchObject({
+        ok: false,
+        command: 'unpause',
+        phase: 'startup',
+        effect: 'none',
+        exitCode: 3,
+        fault: 'uncaught exception',
+      })
+      expect(run.outcome?.advice).toContain('nothing was read and nothing was written')
+      // The distinction the operator could not previously make: same library
+      // fault, same WASM message, opposite instruction.
+      expect(run.outcome?.error?.message).toContain('unwrap_throw')
+    },
+    CLI_TIMEOUT_MS,
+  )
+
+  it(
+    'refuses before the work when the chain client cannot be built at all',
+    async () => {
+      const run = await runCli(['resume', '3f0c9a3e-7b1e-4c2a-9c1a-2b7d5e8f0a11'], {
+        env: { CUSTODY_PRIVATE_KEY_HEX: '' },
+      })
+      expect(run.code).toBe(3)
+      expect(run.outcome).toMatchObject({ phase: 'startup', effect: 'none', ok: false })
+      expect(run.stderr).toContain('CUSTODY_PRIVATE_KEY_HEX')
+      // No `fault`: this one was caught on a stack we own, and saying so is the
+      // difference between a configuration mistake and a library crash.
+      expect(run.outcome?.fault).toBeUndefined()
+    },
+    CLI_TIMEOUT_MS,
+  )
+
+  it(
+    'gives up on consensus rather than hanging, and calls that a no-op',
+    async () => {
+      // `waitForConsensusEstablished()` never resolves and never rejects when
+      // the seeds are unreachable — the failure mode API-DIVERGENCE 15
+      // describes. Unroutable seeds plus a short budget exercise the bound.
+      const run = await runCli(['deposits'], {
+        env: {
+          CUSTODY_PRIVATE_KEY_HEX: randomUUID().replace(/-/g, '').padEnd(64, '0').slice(0, 64),
+          NIMIQ_SEED_NODES: '/dns4/seed.invalid/tcp/443/wss',
+          RECOVER_STARTUP_TIMEOUT_MS: '3000',
+        },
+      })
+      expect(run.code).toBe(3)
+      expect(run.outcome).toMatchObject({
+        ok: false,
+        command: 'deposits',
+        phase: 'startup',
+        effect: 'none',
+      })
+      expect(run.outcome?.error?.name).toBe('ChainStartupError')
+      expect(run.outcome?.error?.message).toContain('consensus was not established')
+    },
+    CLI_TIMEOUT_MS,
+  )
+
+  it(
+    'still prints the status report when the node cannot be reached',
+    async () => {
+      // Connecting eagerly must not have turned a DEGRADED report into a failed
+      // one: an on-call operator asking what is going on always gets a screen,
+      // and the reason the chain half is missing is the most useful line on it.
+      const run = await runCli(['status'], {
+        env: {
+          CUSTODY_PRIVATE_KEY_HEX: randomUUID().replace(/-/g, '').padEnd(64, '0').slice(0, 64),
+          NIMIQ_SEED_NODES: '/dns4/seed.invalid/tcp/443/wss',
+          RECOVER_STARTUP_TIMEOUT_MS: '3000',
+        },
+      })
+      expect(run.code).toBe(0)
+      expect(run.outcome).toMatchObject({ ok: true, command: 'status', effect: 'read_only' })
+      expect(run.stdout).toContain('"degraded": true')
+      expect(run.stdout).toContain('consensus was not established')
+    },
+    CLI_TIMEOUT_MS,
+  )
+
+  it(
+    'reports a usage error without opening anything',
+    async () => {
+      const run = await runCli(['nonsense'])
+      expect(run.code).toBe(2)
+      expect(run.outcome).toMatchObject({ ok: false, phase: 'usage', effect: 'none' })
+      expect(run.stderr).toContain('float set <luna>')
     },
     CLI_TIMEOUT_MS,
   )
