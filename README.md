@@ -146,9 +146,11 @@ docker compose run --rm --entrypoint sh server -c "cd /app/server && pnpm tsx sr
 **Required post-deploy step — attest the operator float.**
 
 ```bash
-docker compose run --rm --entrypoint sh server -c \
+docker compose run --rm --entrypoint sh worker -c \
   "cd /app/server && pnpm tsx src/recover.ts float set <luna> --tx <deposit hash>"
 ```
+
+Run operator commands against **`worker`**, not `server`. The API service is deliberately key-less — it builds a read-only chain client from `CUSTODY_ADDRESS` and refuses to sign or broadcast — so `float set`, `resume`, `replace` and `deposits` all fail there. Only the worker holds `CUSTODY_PRIVATE_KEY_HEX`.
 
 A fresh database **fails closed as insolvent** until this runs, and that is intended. Network fees are paid out of money no drop ever deposited, so the ledger has to be told about it — and told in a way an auditor can check. The `--tx` hash is mandatory: it must be final, execution-ok, paid *into* custody, not sent by custody, not any drop's funding transaction, and not already attested; `<luna>` must equal the sum of every deposit backing the float; and the resulting ledger balance may not exceed the on-chain custody balance. An unreachable chain is a refusal, not a guess. Until this is done, every activation is refused with `InsolventError` — which is exactly what the settlement gate observed on a fresh schema.
 
