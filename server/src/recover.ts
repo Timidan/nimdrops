@@ -1,6 +1,6 @@
 import { pathToFileURL } from 'node:url'
 import type { Pool, PoolClient } from 'pg'
-import { nimiqChainFromEnv } from './chain/nimiq'
+import { type NimiqChain, nimiqChainFromEnv } from './chain/nimiq'
 import type { ChainClient, ChainTx } from './chain/types'
 import { closePool, getPool } from './db/pool'
 import { type NetworkName, errorMessage } from './config'
@@ -8,7 +8,11 @@ import { type Alerts, consoleAlerts } from './services/alerts'
 import { MEMO_PREFIX } from './services/drops'
 import {
   type Controls,
+  RECONCILIATION_MAX_AGE_MS,
   ensureNetworkBinding,
+  inFlightOutgoingLuna,
+  ledgerMovementsLuna,
+  outstandingPrincipalLuna,
   pause,
   readControls,
   unpause,
@@ -29,9 +33,12 @@ import {
 /**
  * Operator recovery commands (design §10.3).
  *
+ *   pnpm tsx src/recover.ts status
  *   pnpm tsx src/recover.ts resume <transferId>
  *   pnpm tsx src/recover.ts replace <transferId>
  *   pnpm tsx src/recover.ts deposits
+ *   pnpm tsx src/recover.ts float show
+ *   pnpm tsx src/recover.ts float set <luna>
  *   pnpm tsx src/recover.ts pause <reason>
  *   pnpm tsx src/recover.ts unpause
  *
@@ -611,23 +618,622 @@ export async function depositReport(
   return { custodyAddress: custody, matchedCount, unmatched }
 }
 
+// ---- solvency snapshot (shared by `float show` and `status`) -----------------------------
+
+/**
+ * The chain half of an operator report.
+ *
+ * Reads NEVER fail on a chain problem — an on-call operator asking what is
+ * going on must always get a screen, and the reason the chain half is missing
+ * is itself the most interesting line on it. The reason is printed verbatim
+ * (including a `NetworkMismatchError`, which is exactly what you want to see
+ * spelled out), so a degraded report is never mistaken for a healthy one.
+ *
+ * `float set` takes the opposite stance: see `ChainUnavailableError`.
+ */
+export type ChainView =
+  | {
+      available: true
+      network: NetworkName
+      custodyAddress: string
+      headHeight: number
+      confirmedBalanceLuna: string
+      /**
+       * `ledger − chain`. Positive means the books claim MORE than custody
+       * holds — the direction `reconcile()` pauses on. Negative is normal:
+       * operator top-ups and not-yet-activated funding both sit in custody
+       * without a ledger entry.
+       */
+      ledgerMinusChainLuna: string
+    }
+  | { available: false; degraded: true; reason: string }
+
+/** Every solvency number an operator needs, all from one consistent read. */
+export interface SolvencyView {
+  paused: boolean
+  network: NetworkName | null
+  operatorFloatLuna: string
+  ledgerMovementsLuna: string
+  ledgerBalanceLuna: string
+  outstandingPrincipalLuna: string
+  inFlightOutgoingLuna: string
+  feeReserveLuna: string
+  maxLivePrincipalLuna: string
+  /** `ledger − outstanding − fee reserve`. Negative = every money path fails closed. */
+  solvencyHeadroomLuna: string
+  /** `cap − outstanding`. New principal beyond this is refused by the cap. */
+  livePrincipalHeadroomLuna: string
+  lastReconciledAt: string | null
+  lastReconciledHeight: number | null
+  /** Chain balance as of the last `reconcile()`; `null` before the first one. */
+  lastReconciledChainBalanceLuna: string | null
+  /** True when `lockControls` would refuse on staleness right now. */
+  reconciliationStale: boolean
+}
+
+interface LedgerSnapshot {
+  controls: Controls
+  ledgerLuna: bigint
+  view: SolvencyView
+}
+
+/**
+ * Run `read` inside one REPEATABLE READ, READ ONLY transaction.
+ *
+ * The float, the movements and the outstanding principal are three separate
+ * aggregates over tables the worker is writing to. Read in autocommit they can
+ * come from three different instants, and a report that shows a payout removed
+ * from one side but not yet from the other invents a shortfall that never
+ * existed. One snapshot, one instant. READ ONLY makes that structural rather
+ * than a promise, and no lock is taken: reporting must never block a payout.
+ */
+async function inSnapshot<T>(pool: Pool, read: (db: PoolClient) => Promise<T>): Promise<T> {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY')
+    const value = await read(client)
+    await client.query('COMMIT')
+    return value
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw err
+  } finally {
+    client.release()
+  }
+}
+
+/** Every derived solvency figure, from an already-consistent read. */
+function toSolvencyView(o: {
+  controls: Controls
+  movementsLuna: bigint
+  outstandingLuna: bigint
+  inFlightLuna: bigint
+}): SolvencyView {
+  const { controls } = o
+  const ledgerLuna = controls.operatorFloatLuna + o.movementsLuna
+  return {
+    paused: controls.paused,
+    network: controls.network,
+    operatorFloatLuna: controls.operatorFloatLuna.toString(),
+    ledgerMovementsLuna: o.movementsLuna.toString(),
+    ledgerBalanceLuna: ledgerLuna.toString(),
+    outstandingPrincipalLuna: o.outstandingLuna.toString(),
+    inFlightOutgoingLuna: o.inFlightLuna.toString(),
+    feeReserveLuna: controls.configuredFeeReserveLuna.toString(),
+    maxLivePrincipalLuna: controls.maxLivePrincipalLuna.toString(),
+    solvencyHeadroomLuna: (
+      ledgerLuna -
+      o.outstandingLuna -
+      controls.configuredFeeReserveLuna
+    ).toString(),
+    livePrincipalHeadroomLuna: (controls.maxLivePrincipalLuna - o.outstandingLuna).toString(),
+    lastReconciledAt: controls.lastReconciledAt?.toISOString() ?? null,
+    lastReconciledHeight: controls.lastReconciledHeight,
+    lastReconciledChainBalanceLuna: controls.reconciledConfirmedBalanceLuna?.toString() ?? null,
+    reconciliationStale:
+      controls.lastReconciledAt === null ||
+      Date.now() - controls.lastReconciledAt.getTime() > RECONCILIATION_MAX_AGE_MS,
+  }
+}
+
+async function readSolvency(db: PoolClient): Promise<LedgerSnapshot> {
+  const controls = await readControls(db)
+  const movementsLuna = await ledgerMovementsLuna(db)
+  const outstandingLuna = await outstandingPrincipalLuna(db)
+  const inFlightLuna = await inFlightOutgoingLuna(db)
+  return {
+    controls,
+    ledgerLuna: controls.operatorFloatLuna + movementsLuna,
+    view: toSolvencyView({ controls, movementsLuna, outstandingLuna, inFlightLuna }),
+  }
+}
+
+const NO_CHAIN_CLIENT =
+  'no chain client: this command was run without one (set NIMIQ_NETWORK and ' +
+  'CUSTODY_PRIVATE_KEY_HEX to include the on-chain custody balance)'
+
+/** A chain client that has passed `ensureNetworkBinding`, or the reason it has not. */
+type BoundChain = { chain: ChainClient } | { chain: null; reason: string }
+
+/**
+ * Bind the chain BEFORE the report's database snapshot is taken — the same
+ * first move every other chain-touching command makes (finding 6), and the
+ * reason `network` is populated on the very first run against a fresh database.
+ *
+ * A binding failure degrades the report rather than aborting it: a mismatch
+ * message is the single most useful line an operator can be shown, and
+ * withholding the rest of the screen would help nobody.
+ */
+async function bindChainForReport(
+  pool: Pool,
+  chain: ChainClient | null,
+  unavailableReason?: string,
+): Promise<BoundChain> {
+  if (!chain) return { chain: null, reason: unavailableReason ?? NO_CHAIN_CLIENT }
+  try {
+    await ensureNetworkBinding(pool, chain)
+    return { chain }
+  } catch (err) {
+    return { chain: null, reason: errorMessage(err) }
+  }
+}
+
+/** Chain figures for a read-only report. Degrades, never throws. */
+async function readChainView(bound: BoundChain, ledgerLuna: bigint): Promise<ChainView> {
+  if (bound.chain === null) {
+    return { available: false, degraded: true, reason: bound.reason }
+  }
+  const { chain } = bound
+  try {
+    const custodyAddress = chain.custodyAddress()
+    const headHeight = await chain.headHeight()
+    const confirmedLuna = await chain.confirmedBalanceLuna(custodyAddress)
+    return {
+      available: true,
+      network: chain.network(),
+      custodyAddress,
+      headHeight,
+      confirmedBalanceLuna: confirmedLuna.toString(),
+      ledgerMinusChainLuna: (ledgerLuna - confirmedLuna).toString(),
+    }
+  } catch (err) {
+    return { available: false, degraded: true, reason: errorMessage(err) }
+  }
+}
+
+// ---- float show / float set ---------------------------------------------------------------
+
+/** The operator float argument was not a positive whole number of luna. */
+export class InvalidLunaError extends RecoverError {}
+
+/** The attestation would claim custody holds more than the chain says it does. */
+export class OverAttestationError extends RecoverError {}
+
+/** The float may not be written from a guess about the chain. */
+export class ChainUnavailableError extends RecoverError {}
+
+/**
+ * Parse an operator-supplied luna amount.
+ *
+ * Digits only, and strictly positive. `BigInt('0x10')`, `BigInt(' 12 ')` and
+ * `BigInt('1_000')` all succeed and all mean something the operator did not
+ * type, so the regex — not the constructor — is the gate. `1.5` and `1e5` are
+ * refused rather than rounded: luna is the atomic unit and there is nothing
+ * below it to round to.
+ */
+export function parsePositiveLuna(text: string): bigint {
+  if (!/^[0-9]+$/.test(text)) {
+    throw new InvalidLunaError(
+      `operator float must be a whole positive number of luna (got ${JSON.stringify(text)}). ` +
+        '1 NIM = 100000 luna; no decimals, no separators, no sign.',
+    )
+  }
+  const luna = BigInt(text)
+  if (luna <= 0n) {
+    throw new InvalidLunaError('operator float must be greater than zero luna')
+  }
+  return luna
+}
+
+export interface FloatShowResult {
+  command: 'float show'
+  solvency: SolvencyView
+  chain: ChainView
+}
+
+/**
+ * Read-only: the float attestation next to everything that judges it.
+ *
+ * Takes no lock. The DB numbers come from one REPEATABLE READ snapshot so they
+ * agree with each other; the chain number is fetched after it and is therefore
+ * a moment younger, which is stated by `headHeight` rather than hidden.
+ */
+export async function floatShow(
+  pool: Pool,
+  chain: ChainClient | null,
+  chainUnavailableReason?: string,
+): Promise<FloatShowResult> {
+  const bound = await bindChainForReport(pool, chain, chainUnavailableReason)
+  const snapshot = await inSnapshot(pool, readSolvency)
+  return {
+    command: 'float show',
+    solvency: snapshot.view,
+    chain: await readChainView(bound, snapshot.ledgerLuna),
+  }
+}
+
+export interface FloatSetResult {
+  command: 'float set'
+  network: NetworkName
+  headHeight: number
+  operatorFloatLuna: { before: string; after: string }
+  ledgerBalanceLuna: { before: string; after: string }
+  /** `ledger − outstanding − fee reserve`: negative means money paths stay closed. */
+  solvencyHeadroomLuna: { before: string; after: string }
+  outstandingPrincipalLuna: string
+  feeReserveLuna: string
+  chainConfirmedBalanceLuna: string
+  ledgerMinusChainLuna: { before: string; after: string }
+}
+
+/**
+ * Re-attest the operator float — the one ledger credit the drops cannot supply
+ * (migration 004, G1 review finding 4). A fresh database fails closed as
+ * insolvent until this runs, because the fee reserve is spent out of money no
+ * drop ever deposited.
+ *
+ * The float is an ATTESTATION, and the only thing that makes an attestation
+ * worth anything is that it can be refused. So:
+ *
+ *  - a chain client is mandatory, and an unreachable node is a refusal rather
+ *    than a guess. Writing a float against a balance we could not read is
+ *    exactly the failure the attestation exists to prevent;
+ *  - the resulting LEDGER balance may not exceed the chain's confirmed custody
+ *    balance. Over-attesting invents spendable capacity, and the invariant
+ *    would then authorise payouts against money that is not there — a stranded
+ *    campaign whose claimants cannot be paid;
+ *  - the write happens under the singleton `custody_controls` lock, in the same
+ *    lock order as every money path, so it cannot interleave with an activation
+ *    or a signature that is reading the float it is about to change.
+ *
+ * This bound is deliberately STRICTER than `reconcile()`'s cross-check, which
+ * tolerates `chain >= ledger − in-flight`. In-flight money is money already
+ * committed to leaving; treating it as headroom for a fresh attestation would
+ * let the float ratchet up on payments that have not settled. An operator who
+ * genuinely has more in custody can re-run this once the transfers confirm.
+ *
+ * Deliberately NOT via `lockControls`: attesting the float is precisely what an
+ * operator does while the system is paused, insolvent or stale, so a
+ * fail-closed read here would make the system unable to unstick itself.
+ */
+export async function setOperatorFloat(
+  pool: Pool,
+  chain: ChainClient,
+  lunaArgument: string,
+): Promise<FloatSetResult> {
+  await ensureNetworkBinding(pool, chain)
+  const nextFloatLuna = parsePositiveLuna(lunaArgument)
+
+  // Chain reads happen BEFORE the lock, like `reconcile()`: holding the
+  // singleton row across an RPC would stall every payout for as long as the
+  // node takes to answer. The staleness that buys is one-sided — a balance read
+  // a moment ago can only have been reduced by our own in-flight spending,
+  // which the stricter-than-reconcile bound above already refuses to count.
+  let headHeight: number
+  let chainConfirmedLuna: bigint
+  try {
+    headHeight = await chain.headHeight()
+    chainConfirmedLuna = await chain.confirmedBalanceLuna(chain.custodyAddress())
+  } catch (err) {
+    throw new ChainUnavailableError(
+      `refusing to set the operator float: the chain is unreachable (${errorMessage(err)}). ` +
+        'The float attests to money that is really in custody; it may not be written from a guess.',
+    )
+  }
+
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    // custody_controls first — the mandated lock order for every money path.
+    await client.query('SELECT 1 FROM custody_controls WHERE singleton FOR UPDATE')
+
+    const before = await readControls(client)
+    const movementsLuna = await ledgerMovementsLuna(client)
+    const outstandingLuna = await outstandingPrincipalLuna(client)
+
+    const beforeLedgerLuna = before.operatorFloatLuna + movementsLuna
+    const afterLedgerLuna = nextFloatLuna + movementsLuna
+
+    if (afterLedgerLuna > chainConfirmedLuna) {
+      throw new OverAttestationError(
+        `refusing to attest an operator float of ${nextFloatLuna} luna: it would put the ledger ` +
+          `balance at ${afterLedgerLuna} luna while the chain confirms only ${chainConfirmedLuna} ` +
+          `luna in custody ${chain.custodyAddress()} at height ${headHeight}. The largest honest ` +
+          `float right now is ${
+            chainConfirmedLuna - movementsLuna > 0n ? chainConfirmedLuna - movementsLuna : 0n
+          } luna. Deposit the money first, then attest it.`,
+      )
+    }
+
+    await client.query('UPDATE custody_controls SET operator_float_luna = $1 WHERE singleton', [
+      nextFloatLuna.toString(),
+    ])
+    await client.query('COMMIT')
+
+    const headroom = (ledger: bigint): string =>
+      (ledger - outstandingLuna - before.configuredFeeReserveLuna).toString()
+
+    return {
+      command: 'float set',
+      network: chain.network(),
+      headHeight,
+      operatorFloatLuna: {
+        before: before.operatorFloatLuna.toString(),
+        after: nextFloatLuna.toString(),
+      },
+      ledgerBalanceLuna: {
+        before: beforeLedgerLuna.toString(),
+        after: afterLedgerLuna.toString(),
+      },
+      solvencyHeadroomLuna: {
+        before: headroom(beforeLedgerLuna),
+        after: headroom(afterLedgerLuna),
+      },
+      outstandingPrincipalLuna: outstandingLuna.toString(),
+      feeReserveLuna: before.configuredFeeReserveLuna.toString(),
+      chainConfirmedBalanceLuna: chainConfirmedLuna.toString(),
+      ledgerMinusChainLuna: {
+        before: (beforeLedgerLuna - chainConfirmedLuna).toString(),
+        after: (afterLedgerLuna - chainConfirmedLuna).toString(),
+      },
+    }
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw err
+  } finally {
+    client.release()
+  }
+}
+
+// ---- status ---------------------------------------------------------------------------
+
+/** `state -> row count` for one table. States with no rows are absent. */
+export type StateCounts = Record<string, number>
+
+export interface ManualReviewTransfer {
+  transferId: string
+  purpose: 'payout' | 'refund'
+  dropId: string
+  claimId: string | null
+  amountLuna: string
+  createdAt: string
+  ageSeconds: number
+  lastError: string | null
+}
+
+export interface OpenAttemptSummary {
+  attemptId: string
+  transferId: string
+  sequence: number
+  state: 'signed' | 'broadcast'
+  txHash: string
+  validityStartHeight: number
+  absentChecks: number
+  createdAt: string
+  ageSeconds: number
+}
+
+export interface StatusResult {
+  command: 'status'
+  paused: boolean
+  network: NetworkName | null
+  solvency: SolvencyView
+  chain: ChainView
+  counts: {
+    drops: StateCounts
+    claims: StateCounts
+    outgoingTransfers: StateCounts
+    transactionAttempts: StateCounts
+  }
+  /** Oldest first: an on-call operator triages by age. */
+  manualReviewTransfers: ManualReviewTransfer[]
+  /** Oldest `signed`/`broadcast` attempt, i.e. the longest-unsettled payment. */
+  oldestOpenAttempt: OpenAttemptSummary | null
+}
+
+/**
+ * `count(*)` is int8, and `db/pool.ts` keeps int8 as a string so luna can never
+ * become a float. Cast to int4 in SQL so a COUNT comes back as a number without
+ * weakening that parser for the values that matter.
+ */
+async function stateCounts(db: PoolClient, table: string): Promise<StateCounts> {
+  const { rows } = await db.query<{ state: string; n: number }>(
+    `SELECT state, count(*)::int AS n FROM ${table} GROUP BY state ORDER BY state`,
+  )
+  return Object.fromEntries(rows.map((r) => [r.state, r.n]))
+}
+
+/**
+ * The first thing an on-call operator runs (HACKATHON.md §8).
+ *
+ * One read-only screen: is custody paused, which chain is it bound to, does the
+ * ledger still cover its liabilities, how much work is in each state, what has
+ * been flagged for a human, and what has been stuck the longest. Never throws
+ * on a chain problem — a node that is down is a fact to print, not a reason to
+ * withhold the whole report.
+ *
+ * Recipient addresses are deliberately omitted from the manual-review list
+ * (§8: "logs omit ... full wallet addresses"). The ids are what an operator
+ * feeds to `resume` or `replace`, and those two read the address themselves,
+ * from the immutable intent row.
+ */
+export async function statusReport(
+  pool: Pool,
+  chain: ChainClient | null,
+  chainUnavailableReason?: string,
+): Promise<StatusResult> {
+  const bound = await bindChainForReport(pool, chain, chainUnavailableReason)
+  const snapshot = await inSnapshot(pool, async (db) => {
+    const solvency = await readSolvency(db)
+
+    const counts = {
+      drops: await stateCounts(db, 'drops'),
+      claims: await stateCounts(db, 'claims'),
+      outgoingTransfers: await stateCounts(db, 'outgoing_transfers'),
+      transactionAttempts: await stateCounts(db, 'transaction_attempts'),
+    }
+
+    const { rows: flagged } = await db.query<{
+      id: string
+      purpose: 'payout' | 'refund'
+      drop_id: string
+      claim_id: string | null
+      amount_luna: string
+      last_error: string | null
+      created_at: Date
+      age_seconds: number
+    }>(
+      `SELECT id, purpose, drop_id, claim_id, amount_luna, last_error, created_at,
+              EXTRACT(EPOCH FROM (now() - created_at))::int AS age_seconds
+       FROM outgoing_transfers
+       WHERE state = 'manual_review'
+       ORDER BY created_at ASC`,
+    )
+
+    const { rows: open } = await db.query<{
+      id: string
+      transfer_id: string
+      sequence: number
+      state: 'signed' | 'broadcast'
+      tx_hash: string
+      validity_start_height: string
+      absent_checks: number
+      created_at: Date
+      age_seconds: number
+    }>(
+      `SELECT id, transfer_id, sequence, state, tx_hash, validity_start_height, absent_checks,
+              created_at, EXTRACT(EPOCH FROM (now() - created_at))::int AS age_seconds
+       FROM transaction_attempts
+       WHERE state IN ('signed', 'broadcast')
+       ORDER BY created_at ASC
+       LIMIT 1`,
+    )
+
+    return { solvency, counts, flagged, open: open[0] ?? null }
+  })
+
+  return {
+    command: 'status',
+    paused: snapshot.solvency.view.paused,
+    network: snapshot.solvency.view.network,
+    solvency: snapshot.solvency.view,
+    chain: await readChainView(bound, snapshot.solvency.ledgerLuna),
+    counts: snapshot.counts,
+    manualReviewTransfers: snapshot.flagged.map((r) => ({
+      transferId: r.id,
+      purpose: r.purpose,
+      dropId: r.drop_id,
+      claimId: r.claim_id,
+      amountLuna: r.amount_luna,
+      createdAt: r.created_at.toISOString(),
+      ageSeconds: r.age_seconds,
+      lastError: r.last_error,
+    })),
+    oldestOpenAttempt: snapshot.open && {
+      attemptId: snapshot.open.id,
+      transferId: snapshot.open.transfer_id,
+      sequence: snapshot.open.sequence,
+      state: snapshot.open.state,
+      txHash: snapshot.open.tx_hash,
+      validityStartHeight: Number(snapshot.open.validity_start_height),
+      absentChecks: snapshot.open.absent_checks,
+      createdAt: snapshot.open.created_at.toISOString(),
+      ageSeconds: snapshot.open.age_seconds,
+    },
+  }
+}
+
 // ---- CLI -------------------------------------------------------------------------------
 
-const USAGE = `usage:
-  pnpm tsx src/recover.ts resume <transferId>    reconcile or re-queue an existing intent
-  pnpm tsx src/recover.ts replace <transferId>   replace a PROVEN DEAD attempt (same recipient+amount)
-  pnpm tsx src/recover.ts deposits               custody deposits matching no drop's funding predicate
-  pnpm tsx src/recover.ts pause <reason>         engage the global kill switch (fails every money path closed)
-  pnpm tsx src/recover.ts unpause                release the kill switch`
+export const USAGE = `NimDrops operator recovery CLI (design §10.3).
 
-const COMMANDS = ['resume', 'replace', 'deposits', 'pause', 'unpause'] as const
+usage:
+  pnpm tsx src/recover.ts <command> [argument]
+
+commands:
+  status
+      One-screen incident snapshot: pause switch, bound network, solvency
+      numbers, per-state row counts, manual_review transfers and the oldest
+      unsettled attempt. Read-only; run this one first.
+      example: pnpm tsx src/recover.ts status
+
+  resume <transferId>
+      Reconcile an existing intent against the chain, or re-queue it when it has
+      no open attempt. Signs nothing new; cannot change recipient or amount.
+      example: pnpm tsx src/recover.ts resume 3f0c9a3e-7b1e-4c2a-9c1a-2b7d5e8f0a11
+
+  replace <transferId>
+      Sign ONE replacement for a PROVEN DEAD attempt, same recipient and amount.
+      Refuses unless sustained absence and a passed validity window both hold.
+      example: pnpm tsx src/recover.ts replace 3f0c9a3e-7b1e-4c2a-9c1a-2b7d5e8f0a11
+
+  deposits
+      Custody deposits that are no drop's accepted funding transaction: late,
+      partial, excess, duplicate, unknown-memo and no-memo (design §7).
+      example: pnpm tsx src/recover.ts deposits
+
+  float show
+      Print the operator float attestation beside the ledger balance, the
+      outstanding principal, the fee reserve, the caps and the on-chain custody
+      balance. Read-only.
+      example: pnpm tsx src/recover.ts float show
+
+  float set <luna>
+      Re-attest the operator float, in whole positive luna. Refuses any value
+      that would push the ledger balance above the on-chain custody balance, and
+      refuses outright when the chain cannot be read.
+      example: pnpm tsx src/recover.ts float set 100000
+
+  pause <reason>
+      Engage the global kill switch: every new money path fails closed. Needs no
+      chain node — pausing must work when the node is the thing that broke.
+      example: pnpm tsx src/recover.ts pause "node desync during payout batch"
+
+  unpause
+      Release the kill switch. Does not reconcile: a stale balance keeps failing
+      closed until the worker's next successful reconcile.
+      example: pnpm tsx src/recover.ts unpause
+
+  --help
+      Print this block. Also printed, to stderr, on an unrecognised command.`
+
+const COMMANDS = [
+  'status',
+  'resume',
+  'replace',
+  'deposits',
+  'float',
+  'pause',
+  'unpause',
+] as const
+const HELP_FLAGS = new Set<string>(['--help', '-h', 'help'])
 /** Commands whose second word is required. `pause` takes a reason, not an id. */
 const NEEDS_ARGUMENT = new Set<string>(['resume', 'replace', 'pause'])
-/** Commands that talk to the chain. Pause must work when the node is down. */
+/** Commands that cannot run without a chain client. Pause must work with the node down. */
 const NEEDS_CHAIN = new Set<string>(['resume', 'replace', 'deposits'])
+/**
+ * Read-only commands that USE a chain client when one can be built and say so
+ * when one cannot. An operator diagnosing an outage must still get a report.
+ */
+const OPTIONAL_CHAIN = new Set<string>(['status'])
 
 export async function main(argv: string[]): Promise<number> {
-  const [command, argument] = argv
+  const [command, argument, third] = argv
+
+  if (command && HELP_FLAGS.has(command)) {
+    console.log(USAGE)
+    return 0
+  }
   if (!command || !(COMMANDS as readonly string[]).includes(command)) {
     console.error(USAGE)
     return 2
@@ -636,20 +1242,54 @@ export async function main(argv: string[]): Promise<number> {
     console.error(USAGE)
     return 2
   }
+  if (command === 'float' && argument !== 'show' && argument !== 'set') {
+    console.error(USAGE)
+    return 2
+  }
+  if (command === 'float' && argument === 'set' && third === undefined) {
+    console.error(USAGE)
+    return 2
+  }
 
-  const pool = getPool()
-  const chain = NEEDS_CHAIN.has(command) ? nimiqChainFromEnv() : null
-  const alerts = consoleAlerts()
+  const wantsChain = NEEDS_CHAIN.has(command) || (command === 'float' && argument === 'set')
+  const mayUseChain = OPTIONAL_CHAIN.has(command) || (command === 'float' && argument === 'show')
+
+  let pool: Pool | null = null
+  let chain: NimiqChain | null = null
+  /** Why there is no chain client, for the degraded section of a read-only report. */
+  let chainUnavailableReason: string | undefined
+
   const print = (value: unknown): void => {
     console.log(JSON.stringify(value, null, 2))
   }
-  const needChain = (): ChainClient => {
+  const needChain = (): NimiqChain => {
     if (!chain) throw new RecoverError(`command ${command} requires a chain client`)
     return chain
   }
 
   try {
-    if (command === 'resume') {
+    pool = getPool()
+    if (wantsChain) {
+      chain = nimiqChainFromEnv()
+    } else if (mayUseChain) {
+      try {
+        chain = nimiqChainFromEnv()
+      } catch (err) {
+        chainUnavailableReason = `no chain client: ${errorMessage(err)}`
+      }
+    }
+
+    const alerts = consoleAlerts()
+
+    if (command === 'status') {
+      print(await statusReport(pool, chain, chainUnavailableReason))
+    } else if (command === 'float') {
+      print(
+        argument === 'show'
+          ? await floatShow(pool, chain, chainUnavailableReason)
+          : await setOperatorFloat(pool, needChain(), third as string),
+      )
+    } else if (command === 'resume') {
       print(await resumeTransfer(pool, needChain(), alerts, argument))
     } else if (command === 'replace') {
       print(await replaceTransfer(pool, needChain(), alerts, argument))
