@@ -1122,7 +1122,7 @@ const PROGRESS_COPY: Record<string, { title: string; body: string }> = {
   },
   creating: {
     title: 'Preparing your drop',
-    body: 'Reserving your campaign and the exact amount to fund.',
+    body: 'Reserving your drop and the exact amount to fund.',
   },
   approving: {
     title: 'Approve in Nimiq Pay',
@@ -1336,8 +1336,19 @@ function Live({
                   onClick={() => {
                     // A dismissed share sheet rejects with AbortError; that is a
                     // choice, not a failure.
+                    //
+                    // `text` matters more here than anywhere else in the app.
+                    // This is the primary distribution path, and WhatsApp
+                    // routinely drops `title` and shows a bare link — so
+                    // without it the product's one-line description never
+                    // reaches the group chat, and the first thing a stranger
+                    // sees is an unexplained URL asking them to sign something.
                     void navigator
-                      .share({ title: 'A NimDrop for you', url: draft.shareUrl })
+                      .share({
+                        title: 'A NimDrop for you',
+                        text: 'One link. A fixed share of NIM for everyone who opens it.',
+                        url: draft.shareUrl,
+                      })
                       .catch(() => {})
                   }}
                 >

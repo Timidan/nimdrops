@@ -22,7 +22,7 @@ Read this before funding anything.
 
 ## Current status
 
-This is a competition build for the Nimiq Mini Apps Competition, Cycle I. Being exact about what is proven matters more here than sounding finished.
+NimDrops is live on Nimiq mainnet at [nimdrops.timidan.xyz](https://nimdrops.timidan.xyz), running a capped pilot. Being exact about what is proven matters more here than sounding finished.
 
 **Proven.** The end-to-end settlement gate passed on the intended judging deployment (docker compose: Postgres + API + one worker) against TestAlbatross, run `s3_20260726040800` on 2026-07-26. Full evidence: [`docs/evidence/g1-vps-s3_20260726040800.md`](./docs/evidence/g1-vps-s3_20260726040800.md). In one 361.6-second run, through the shipped service functions rather than a re-implementation:
 
@@ -306,7 +306,7 @@ MIT. See [LICENSE](./LICENSE).
 
 ## Contributing and roadmap
 
-The roadmap is in [design §14](./docs/superpowers/specs/2026-07-25-nimdrops-design.md#14-sustainable-roadmap) and it is deliberately demand-led: nothing on it gets built before Cycle I reliability is proven and a named partner actually asks for it. In order — campaign operations (creator history, configurable expiry, signed allowlists, external security review), then distribution adapters for a named partner, then merchant campaigns with real purchase verification. Direct tips and group jars may reuse the wallet-auth, funding-verifier and transfer-ledger pieces but get their own domain models and threat reviews; they are not new values of a `kind` column.
+The roadmap is in [design §14](./docs/superpowers/specs/2026-07-25-nimdrops-design.md#14-sustainable-roadmap) and it is deliberately demand-led: nothing on it gets built before mainnet reliability is proven and a named partner actually asks for it. In order — campaign operations (creator history, configurable expiry, signed allowlists, external security review), then distribution adapters for a named partner, then merchant campaigns with real purchase verification. Direct tips and group jars may reuse the wallet-auth, funding-verifier and transfer-ledger pieces but get their own domain models and threat reviews; they are not new values of a `kind` column.
 
 Explicitly not planned until a concrete use case forecloses the simpler path: bot platforms, OAuth identity vendors, indexers, other chains, other assets.
 
