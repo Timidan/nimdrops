@@ -170,6 +170,20 @@ async function createRunSchema(): Promise<pg.Pool> {
   })
   await migrate(pool)
   log(`run schema ${RUN_ID} migrated`)
+
+  // Play the operator: attest the fee float this run's custody wallet is backed by.
+  // A freshly migrated schema starts at operator_float_luna = 0, and the solvency
+  // invariant (ledger >= outstanding + fee reserve) then fails closed on the very
+  // first activation — correct production behaviour, and the same step a real
+  // deployment performs once after provisioning. Sized to cover the seeded fee
+  // reserve plus headroom for this run's payout/refund fees.
+  const { rows } = await pool.query<{ configured_fee_reserve_luna: string }>(
+    `UPDATE custody_controls
+        SET operator_float_luna = configured_fee_reserve_luna * 10
+      WHERE singleton
+      RETURNING configured_fee_reserve_luna`,
+  )
+  log(`operator float attested: ${BigInt(rows[0]!.configured_fee_reserve_luna) * 10n} luna`)
   return pool
 }
 
