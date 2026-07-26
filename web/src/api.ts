@@ -170,6 +170,29 @@ function idempotencyKey(input: CreateDropInput): string {
   }
 }
 
+/**
+ * Forget every remembered draft attempt in this tab.
+ *
+ * Called at exactly one moment: the sponsor has funded a drop and is
+ * deliberately starting another. Every key still in the tab at that point has
+ * been spent (its draft is funded) or abandoned, and replaying a spent draft
+ * would hand the wallet a funding request for a drop that is already live —
+ * a second real transaction the server would then refuse. A new drop gets a
+ * new key.
+ *
+ * Anywhere else, the keys must survive: that is what makes a retried create
+ * replay one draft instead of minting two.
+ */
+export function forgetDraftKeys(): void {
+  try {
+    for (const key of Object.keys(sessionStorage)) {
+      if (key.startsWith(IDEM_PREFIX)) sessionStorage.removeItem(key)
+    }
+  } catch {
+    /* nothing to undo */
+  }
+}
+
 // ---- endpoints -------------------------------------------------------------------
 
 export async function createDrop(input: CreateDropInput): Promise<Draft> {

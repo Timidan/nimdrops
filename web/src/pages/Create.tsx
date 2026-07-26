@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom'
 import {
   ApiError,
   createDrop,
+  forgetDraftKeys,
   getDrop,
   submitFunding,
   type Draft,
@@ -11,6 +12,7 @@ import {
 } from '../api'
 import { capProblem, formatNim, lunaFromNim, MAX_CLAIMS, MIN_CLAIMS } from '../money'
 import { nimiqPayDeeplink, resolveBridge, type BridgeResult } from '../sdk/adapter'
+import { clearFunding, readFunding, writeFunding } from '../state/funding'
 import AmountInput from '../ui/AmountInput'
 import Envelope from '../ui/Envelope'
 import NdScreen from '../ui/Screen'
@@ -24,6 +26,20 @@ import Sheet from '../ui/Sheet'
  * chain shows it", the honest words are *detecting* and *confirming*. Telling a
  * sponsor to send the money again because our detection is slow would cost them
  * a second real transaction, so no branch of this file offers that.
+ *
+ * **The link is the reward for funding, and nothing else earns it.** A draft
+ * has a `publicId` from the moment it is created — it has to, because the
+ * funding memo is `ND1:<publicId>` and that memo is how the server proves which
+ * drop a payment funded — but a `publicId` is not a shareable thing. An
+ * unfunded packet leads to a card with no money behind it, which is worse than
+ * no link at all. So no share URL, no QR, no copy and no share button exists on
+ * this screen until the server says `live`; before that the sponsor gets the
+ * funding progress and one sentence saying where the link will appear.
+ *
+ * **A funded drop must never be lost.** Because the link is withheld until
+ * `live`, a sponsor who closes the app while funding confirms has no other copy
+ * of it. `state/funding.ts` therefore remembers the funded draft, and this
+ * screen resumes from it on mount.
  */
 
 /** Design §4.2 step 5: poll the public state, do not guess. */
@@ -51,6 +67,8 @@ function prefillAmount(raw: string | null): string {
 
 type Phase =
   | 'form'
+  /** Reading back a drop this browser already funded, before anything is drawn. */
+  | 'resuming'
   /** `POST /api/drops` in flight. */
   | 'creating'
   /** Waiting for the sponsor to approve in Nimiq Pay. */
@@ -74,6 +92,12 @@ function phaseForDrop(state: DropState): Phase {
   return 'detecting'
 }
 
+/**
+ * A drop whose life is over. There is no link left to hand anyone, so a
+ * remembered record pointing at one is forgotten rather than resumed.
+ */
+const FINISHED: readonly DropState[] = ['settled', 'refunded', 'cancelled']
+
 /** Phases whose truth lives on the server, so they keep asking it. */
 const POLLED: readonly Phase[] = ['detecting', 'confirming', 'unconfirmed']
 
@@ -95,7 +119,11 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
   const [message, setMessage] = useState('')
 
   const [reviewOpen, setReviewOpen] = useState(false)
-  const [phase, setPhase] = useState<Phase>('form')
+  // Read once, synchronously, before the first paint: a sponsor who funded a
+  // drop from this browser must never see the empty form flash past on the way
+  // to their link.
+  const [restored] = useState(readFunding)
+  const [phase, setPhase] = useState<Phase>(restored ? 'resuming' : 'form')
   const [draft, setDraft] = useState<Draft | null>(null)
   const [drop, setDrop] = useState<DropPublic | null>(null)
   const [failure, setFailure] = useState('')
@@ -109,6 +137,14 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
   // A draft that has already been created is reused on retry: the sponsor is
   // approving THE SAME funding request, not a new one.
   const draftRef = useRef<Draft | null>(null)
+  /**
+   * The hash the wallet reported, once it has. It is what turns polling from a
+   * read into a submission — `POST /api/drops/:publicId/funding` is the only
+   * call that can move a drop from `funding_pending` to `live`, and it is
+   * idempotent by construction, so re-sending the same hash is safe and is
+   * exactly what the operator's own funding utility does.
+   */
+  const txHashRef = useRef<string | null>(null)
 
   const approve = useCallback(
     async (current: Draft) => {
@@ -134,6 +170,13 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
         setPhase('rejected')
         return
       }
+
+      // Money has provably left the wallet. From here the sponsor must be able
+      // to close the app and come back to this drop, so the record is written
+      // BEFORE the funding call rather than after it: a crash in between must
+      // not be the difference between a recoverable drop and a lost one.
+      txHashRef.current = txHash
+      writeFunding({ draft: current, txHash, savedAt: Date.now() })
 
       try {
         const funded = await submitFunding(current.publicId, txHash)
@@ -191,20 +234,90 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
     await approve(created)
   }, [amountEach, approve, claimCount, message, sponsorLabel])
 
-  // The only source of funding truth is `GET /api/drops/:publicId`.
+  /**
+   * Come back to a drop this browser funded.
+   *
+   * Runs once, on mount, and only when a record exists. The record proves a
+   * transaction was signed; the server is the only authority on what became of
+   * it, so the record supplies the draft (and its share URL) and the server
+   * supplies the state.
+   */
+  useEffect(() => {
+    if (!restored) return
+    let cancelled = false
+
+    const resume = async () => {
+      const adopt = (next: Phase) => {
+        draftRef.current = restored.draft
+        txHashRef.current = restored.txHash
+        setDraft(restored.draft)
+        setPhase(next)
+      }
+
+      let latest: DropPublic
+      try {
+        latest = await getDrop(restored.draft.publicId)
+      } catch (err) {
+        if (cancelled) return
+        if (err instanceof ApiError && err.status === 404) {
+          // The server has never heard of it. Nothing to resume and nothing to
+          // recover; the create form is the useful answer.
+          clearFunding()
+          setPhase('form')
+          return
+        }
+        // Offline, or a bad minute at the API. The drop is still ours, so pick
+        // the poll back up rather than throwing the record away.
+        adopt('detecting')
+        return
+      }
+      if (cancelled) return
+
+      if (FINISHED.includes(latest.state)) {
+        clearFunding()
+        setPhase('form')
+        return
+      }
+      setDrop(latest)
+      adopt(phaseForDrop(latest.state))
+    }
+
+    void resume()
+    return () => {
+      cancelled = true
+    }
+  }, [restored])
+
+  /**
+   * Funding truth, asked for on a timer.
+   *
+   * Once a transaction hash exists this is a re-submission, not a read: a
+   * `funding_pending` drop only ever reaches `live` inside the funding
+   * endpoint, which re-checks the transaction against every §7 predicate and
+   * activates it the moment it is final. Re-sending the same hash is the
+   * endpoint's documented idempotent case — it moves no money — and without it
+   * a sponsor sits on "Confirming" forever and their link never arrives.
+   *
+   * A 4xx means this hash will never be accepted for this drop, so the poll
+   * stops re-submitting it and falls back to reading. A 5xx or a dropped
+   * connection means nothing of the sort, and keeps trying.
+   */
   const publicId = draft?.publicId
   const polled = POLLED.includes(phase)
   useEffect(() => {
     if (!polled || !publicId) return
     let cancelled = false
+    let submit = true
     let timer: ReturnType<typeof setTimeout>
     const poll = async () => {
+      const hash = txHashRef.current
       try {
-        const latest = await getDrop(publicId)
+        const latest = submit && hash ? await submitFunding(publicId, hash) : await getDrop(publicId)
         if (cancelled) return
         setDrop(latest)
         setPhase(phaseForDrop(latest.state))
-      } catch {
+      } catch (err) {
+        if (err instanceof ApiError && err.status >= 400 && err.status < 500) submit = false
         // A failed poll is a failed poll. Keep asking.
       }
       if (!cancelled) timer = setTimeout(poll, POLL_MS)
@@ -216,8 +329,40 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
     }
   }, [polled, publicId])
 
+  /**
+   * Put the funded drop down and start a fresh one.
+   *
+   * The remembered record goes, and so does every remembered draft attempt in
+   * this tab: replaying a spent draft would ask the wallet to fund a drop that
+   * is already live.
+   */
+  const startAnother = useCallback(() => {
+    clearFunding()
+    forgetDraftKeys()
+    draftRef.current = null
+    txHashRef.current = null
+    setDraft(null)
+    setDrop(null)
+    setFailure('')
+    setAmountEach('')
+    setClaimCount(DEFAULT_CLAIM_COUNT)
+    setSponsorLabel('')
+    setMessage('')
+    setPhase('form')
+  }, [])
+
   if (phase === 'live' && draft) {
-    return <Live draft={draft} drop={drop} sealMark={sponsorLabel.trim().slice(0, 1).toUpperCase()} />
+    // After a reload the form fields are empty, but the server still knows who
+    // sent it, so the wax keeps its initial.
+    const sealFrom = (drop?.sponsorLabel || sponsorLabel).trim()
+    return (
+      <Live
+        draft={draft}
+        drop={drop}
+        sealMark={sealFrom.slice(0, 1).toUpperCase()}
+        onStartAnother={startAnother}
+      />
+    )
   }
 
   if (phase === 'no-wallet') return <NoWallet />
@@ -237,7 +382,7 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
     return (
       <Recover
         title="Waiting for wallet confirmation"
-        body="Your wallet has the transaction, but it has not given us a receipt we can verify yet. Keep this screen open — the moment the network shows it, this drop goes live."
+        body="Your wallet has the transaction, but it has not given us a receipt we can verify yet. We keep checking — the moment the network shows it, this drop goes live and your share link appears here."
         action="Check again"
         onAction={() => void approve(draft)}
         quiet
@@ -256,7 +401,13 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
     )
   }
 
-  if (phase === 'creating' || phase === 'approving' || phase === 'detecting' || phase === 'confirming') {
+  if (
+    phase === 'resuming' ||
+    phase === 'creating' ||
+    phase === 'approving' ||
+    phase === 'detecting' ||
+    phase === 'confirming'
+  ) {
     return <Progress phase={phase} draft={draft} />
   }
 
@@ -494,9 +645,13 @@ function TextField({
 }
 
 const PROGRESS_COPY: Record<string, { title: string; body: string }> = {
+  resuming: {
+    title: 'Finding your drop',
+    body: 'You funded a drop from this device. We are checking whether it is live yet.',
+  },
   creating: {
     title: 'Preparing your drop',
-    body: 'Reserving the campaign link and the exact funding amount.',
+    body: 'Reserving your campaign and the exact amount to fund.',
   },
   approving: {
     title: 'Approve in Nimiq Pay',
@@ -504,13 +659,28 @@ const PROGRESS_COPY: Record<string, { title: string; body: string }> = {
   },
   detecting: {
     title: 'Detecting your transaction',
-    body: 'We are watching the Nimiq network for it. This can take a moment — keep this screen open, there is nothing else for you to do.',
+    body: 'We are watching the Nimiq network for it. This can take several minutes, and there is nothing else for you to do.',
   },
   confirming: {
     title: 'Confirming on the network',
-    body: 'The transaction is in. Your drop goes live the moment it is final.',
+    body: 'The network has your transaction. Your drop goes live as soon as it is final.',
   },
 }
+
+/**
+ * What replaces the share block while a drop is unfunded.
+ *
+ * Two jobs. The first line says plainly that there is nothing to hand anyone
+ * yet and where the link will be, so waiting is a wait *for* something rather
+ * than an absence the sponsor has to interpret. The second answers the question
+ * the first one raises — "so I have to sit here?" — and it is only sayable
+ * because `state/funding.ts` makes it true.
+ */
+const PENDING_SHARE_NOTE =
+  'Nothing to share yet. Your link and its QR code appear here the moment funding confirms.'
+
+const PENDING_LEAVE_NOTE =
+  'You can close NimDrops. Reopen it on this device and you land back on this drop.'
 
 function Progress({ phase, draft }: { phase: Phase; draft: Draft | null }) {
   const copy = PROGRESS_COPY[phase] ?? PROGRESS_COPY.creating
@@ -528,19 +698,28 @@ function Progress({ phase, draft }: { phase: Phase; draft: Draft | null }) {
         <p className="mt-3 text-sm leading-relaxed text-ink/60">{copy.body}</p>
 
         {reached >= 0 ? (
-          <ol className="mt-8 flex gap-2" aria-label="Funding progress">
-            {steps.map((step, index) => (
-              <li
-                key={step.key}
-                aria-current={index === reached ? 'step' : undefined}
-                className={`flex-1 rounded-full py-1.5 text-center text-xs font-medium ${
-                  index <= reached ? 'bg-ink text-paper' : 'bg-ink/8 text-ink/45'
-                }`}
-              >
-                {step.label}
-              </li>
-            ))}
-          </ol>
+          <>
+            <ol className="mt-8 flex gap-2" aria-label="Funding progress">
+              {steps.map((step, index) => (
+                <li
+                  key={step.key}
+                  aria-current={index === reached ? 'step' : undefined}
+                  className={`flex-1 rounded-full py-1.5 text-center text-xs font-medium ${
+                    index <= reached ? 'bg-ink text-paper' : 'bg-ink/8 text-ink/45'
+                  }`}
+                >
+                  {step.label}
+                </li>
+              ))}
+            </ol>
+            <p
+              data-testid="pending-share-note"
+              className="mt-6 text-xs leading-relaxed text-ink/50"
+            >
+              {PENDING_SHARE_NOTE}
+            </p>
+            <p className="mt-2 text-xs leading-relaxed text-ink/50">{PENDING_LEAVE_NOTE}</p>
+          </>
         ) : null}
 
         {draft ? (
@@ -596,14 +775,27 @@ function NoWallet() {
   )
 }
 
+/**
+ * The reward for funding.
+ *
+ * Every share affordance in the product lives here and nowhere else, which is
+ * the whole point: reaching this screen is the only way a share URL, a QR code,
+ * a copy button or the native share sheet comes into existence. The block rises
+ * in on `nd-rise` so the arrival reads as something the sponsor earned rather
+ * than a field that quietly filled itself in — and `nd-rise` is a plain
+ * animation, so `prefers-reduced-motion` lands it fully formed on the first
+ * frame instead of skipping it.
+ */
 function Live({
   draft,
   drop,
   sealMark,
+  onStartAnother,
 }: {
   draft: Draft
   drop: DropPublic | null
   sealMark: string
+  onStartAnother: () => void
 }) {
   const [copied, setCopied] = useState(false)
   const canShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function'
@@ -624,51 +816,64 @@ function Live({
               : 'Share the link. Each wallet that opens it can claim one fixed share.'}
           </p>
 
-          <div className="mt-8 rounded-3xl border border-ink/10 bg-white p-5">
-            <img
-              src={`/d/${draft.publicId}/qr.svg`}
-              alt="QR code for this drop's link"
-              width={220}
-              height={220}
-              className="mx-auto h-auto w-full max-w-[200px]"
-            />
-            <p className="mt-4 text-center text-xs break-all text-ink/60">{draft.shareUrl}</p>
-          </div>
+          <div data-testid="share-block" className="nd-rise">
+            <div className="mt-8 rounded-3xl border border-ink/10 bg-white p-5">
+              <img
+                src={`/d/${draft.publicId}/qr.svg`}
+                alt="QR code for this drop's link"
+                width={220}
+                height={220}
+                className="mx-auto h-auto w-full max-w-[200px]"
+              />
+              <p className="mt-4 text-center text-xs break-all text-ink/60">{draft.shareUrl}</p>
+            </div>
 
-          <div className="mt-6 space-y-3">
-            {canShare ? (
+            <div className="mt-6 space-y-3">
+              {canShare ? (
+                <button
+                  type="button"
+                  className="nd-primary w-full"
+                  onClick={() => {
+                    // A dismissed share sheet rejects with AbortError; that is a
+                    // choice, not a failure.
+                    void navigator
+                      .share({ title: 'A NimDrop for you', url: draft.shareUrl })
+                      .catch(() => {})
+                  }}
+                >
+                  Share
+                </button>
+              ) : null}
               <button
                 type="button"
-                className="nd-primary w-full"
+                className={canShare ? 'nd-secondary w-full' : 'nd-primary w-full'}
                 onClick={() => {
-                  // A dismissed share sheet rejects with AbortError; that is a
-                  // choice, not a failure.
-                  void navigator
-                    .share({ title: 'A NimDrop for you', url: draft.shareUrl })
-                    .catch(() => {})
+                  void navigator.clipboard
+                    ?.writeText(draft.shareUrl)
+                    .then(() => setCopied(true))
+                    .catch(() => setCopied(false))
                 }}
               >
-                Share
+                {copied ? 'Link copied' : 'Copy link'}
               </button>
-            ) : null}
-            <button
-              type="button"
-              className={canShare ? 'nd-secondary w-full' : 'nd-primary w-full'}
-              onClick={() => {
-                void navigator.clipboard
-                  ?.writeText(draft.shareUrl)
-                  .then(() => setCopied(true))
-                  .catch(() => setCopied(false))
-              }}
-            >
-              {copied ? 'Link copied' : 'Copy link'}
-            </button>
+            </div>
           </div>
 
           <p className="mt-8 text-xs leading-relaxed text-ink/50">
             Unclaimed shares are refunded to the wallet that funded this drop, 24 hours after it
             went live.
           </p>
+          <p className="mt-2 text-xs leading-relaxed text-ink/50">
+            Reopen NimDrops on this device to come back to this link.
+          </p>
+
+          <button
+            type="button"
+            onClick={onStartAnother}
+            className="mt-5 min-h-12 w-full text-sm font-semibold text-ink/55"
+          >
+            Send another drop
+          </button>
         </div>
       </Envelope>
     </NdScreen>

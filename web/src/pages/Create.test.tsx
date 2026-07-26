@@ -9,12 +9,18 @@
  *    a timer we made up.
  *  - "Drop one back" arrives with `?amount=`, and that param is trusted no
  *    further than typed input is.
+ *  - NO share affordance exists before the server says `live` — an unfunded
+ *    packet is not shareable, and a link that leads to nothing is worse than
+ *    no link;
+ *  - a drop that WAS funded survives the app being closed, because the link is
+ *    withheld until `live` and this browser holds the only copy of it.
  */
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BridgeError, type BridgeResult, type WalletBridge } from '../sdk/adapter'
 import { MockBridge } from '../sdk/mock'
+import { FUNDING_STORAGE_KEY, FUNDING_TTL_MS, type FundedDraft } from '../state/funding'
 import Create, { type CreateProps } from './Create'
 
 /** 22 base64url chars — the shape `ids.ts` mints and `app.ts` validates. */
@@ -51,27 +57,76 @@ interface Reply {
 
 interface FetchScript {
   create?: Reply
-  funding?: Reply
+  /**
+   * Consumed one per `POST /funding`; the last entry repeats forever. The
+   * screen re-submits the same hash on every poll, because that endpoint is
+   * the only thing that can move a drop from `funding_pending` to `live`.
+   */
+  funding?: Reply | Reply[]
   /** Consumed one per `GET`; the last entry repeats forever. */
   drops?: Reply[]
 }
 
+/** Take the next reply, holding the last one once the queue runs dry. */
+function next(queue: Reply[]): Reply | undefined {
+  return queue.length > 1 ? queue.shift() : queue[0]
+}
+
 function installFetch(script: FetchScript) {
   const calls: { url: string; method: string; init: RequestInit | undefined }[] = []
-  const queue = [...(script.drops ?? [])]
+  const drops = [...(script.drops ?? [])]
+  const funding = Array.isArray(script.funding)
+    ? [...script.funding]
+    : script.funding
+      ? [script.funding]
+      : []
   const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
     const url = String(input)
     const method = (init?.method ?? 'GET').toUpperCase()
     calls.push({ url, method, init })
     let reply: Reply | undefined
-    if (method === 'POST' && url.endsWith('/funding')) reply = script.funding
+    if (method === 'POST' && url.endsWith('/funding')) reply = next(funding)
     else if (method === 'POST') reply = script.create
-    else reply = queue.length > 1 ? queue.shift() : queue[0]
+    else reply = next(drops)
     if (!reply) throw new Error(`unscripted fetch: ${method} ${url}`)
     return { ok: reply.status < 400, status: reply.status, json: async () => reply.body }
   })
   vi.stubGlobal('fetch', fetchMock)
   return { fetchMock, calls }
+}
+
+/** The record `state/funding.ts` writes once the wallet has answered. */
+function storeFunded(over: Partial<FundedDraft> = {}) {
+  const record: FundedDraft = {
+    draft: DRAFT,
+    txHash: 'a'.repeat(64),
+    savedAt: Date.now(),
+    ...over,
+  }
+  localStorage.setItem(FUNDING_STORAGE_KEY, JSON.stringify(record))
+  return record
+}
+
+/** Every way this screen could hand someone a link. None may exist unfunded. */
+function shareAffordances() {
+  return {
+    url: screen.queryByText(SHARE_URL),
+    qr: screen.queryByRole('img', { name: /qr/i }),
+    copy: screen.queryByRole('button', { name: /copy link/i }),
+    share: screen.queryByRole('button', { name: /^share$/i }),
+    block: screen.queryByTestId('share-block'),
+  }
+}
+
+function expectNoShareAffordance() {
+  const found = shareAffordances()
+  expect(found.url).toBeNull()
+  expect(found.qr).toBeNull()
+  expect(found.copy).toBeNull()
+  expect(found.share).toBeNull()
+  expect(found.block).toBeNull()
+  // Not just absent from the accessibility tree — absent from the document.
+  expect(document.body.innerHTML).not.toContain(PUBLIC_ID)
 }
 
 function bridgeOf(bridge: WalletBridge): () => Promise<BridgeResult> {
@@ -130,6 +185,7 @@ afterEach(() => {
   vi.useRealTimers()
   vi.restoreAllMocks()
   sessionStorage.clear()
+  localStorage.clear()
 })
 
 describe('Create — amount entry', () => {
@@ -286,8 +342,8 @@ describe('Create — funding', () => {
     const bridge = new MockBridge()
     installFetch({
       create: { status: 201, body: DRAFT },
-      funding: { status: 200, body: dropBody('awaiting_funding') },
-      drops: [
+      funding: [
+        { status: 200, body: dropBody('awaiting_funding') },
         { status: 200, body: dropBody('funding_pending') },
         { status: 200, body: dropBody('live') },
       ],
@@ -317,6 +373,8 @@ describe('Create — funding', () => {
 
 describe('Create — share screen', () => {
   async function reachLive() {
+    // A sponsor arriving fresh, with no funded drop remembered from before.
+    localStorage.clear()
     const bridge = new MockBridge()
     installFetch({
       create: { status: 201, body: DRAFT },
@@ -356,5 +414,285 @@ describe('Create — share screen', () => {
     cleanup()
     await reachLive()
     expect(screen.queryByRole('button', { name: /^share$/i })).toBeNull()
+  })
+})
+
+/**
+ * The owner's rule: an unfunded packet is not shareable at all. A link that
+ * leads to a card with no money behind it is worse than no link, so none of the
+ * four ways this screen could hand one over — the URL, the QR, copy, or the
+ * native share sheet — may exist before the server says `live`.
+ */
+describe('Create — the link is the reward for funding', () => {
+  function startFunding(funding: Reply[]) {
+    const bridge = new MockBridge()
+    const script = installFetch({ create: { status: 201, body: DRAFT }, funding })
+    renderCreate({ discoverBridge: bridgeOf(bridge) })
+    fillForm()
+    const sheet = openReview()
+    fireEvent.click(within(sheet).getByRole('button', { name: /fund drop/i }))
+    return script
+  }
+
+  it('shows no share affordance while the drop is awaiting funding', async () => {
+    vi.useFakeTimers()
+    startFunding([{ status: 200, body: dropBody('awaiting_funding') }])
+    await tick(1000)
+
+    expect(screen.getByRole('heading', { name: /detecting your transaction/i })).toBeTruthy()
+    expectNoShareAffordance()
+  })
+
+  it('shows no share affordance while funding is confirming', async () => {
+    vi.useFakeTimers()
+    startFunding([{ status: 200, body: dropBody('funding_pending') }])
+    await tick(1000)
+
+    expect(screen.getByRole('heading', { name: /confirming on the network/i })).toBeTruthy()
+    expectNoShareAffordance()
+  })
+
+  it('says where the link will appear instead of leaving a hole', async () => {
+    vi.useFakeTimers()
+    startFunding([{ status: 200, body: dropBody('awaiting_funding') }])
+    await tick(1000)
+
+    const note = screen.getByTestId('pending-share-note').textContent ?? ''
+    expect(note).toMatch(/nothing to share yet/i)
+    expect(note).toMatch(/funding confirms/i)
+    // And the promise that makes waiting bearable, which the recovery tests
+    // below are what keep true.
+    expect(document.body.textContent ?? '').toMatch(/you can close NimDrops/i)
+    // Waiting is never turned into "pay again".
+    expect(document.body.textContent ?? '').not.toMatch(/fund again|send again|re-?fund/i)
+  })
+
+  it('reveals the share block on the transition to live, and only then', async () => {
+    vi.useFakeTimers()
+    const writeText = vi.fn(async () => {})
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+
+    startFunding([
+      { status: 200, body: dropBody('funding_pending') },
+      { status: 200, body: dropBody('live') },
+    ])
+
+    await tick(1000)
+    expectNoShareAffordance()
+
+    await tick(3000)
+    const revealed = shareAffordances()
+    expect(revealed.block).toBeTruthy()
+    expect(revealed.url).toBeTruthy()
+    expect(revealed.qr?.getAttribute('src')).toBe(`/d/${PUBLIC_ID}/qr.svg`)
+    expect(revealed.copy).toBeTruthy()
+    // The arrival is animated rather than a field quietly filling in; the class
+    // is a plain animation, so reduced motion lands it fully formed.
+    expect(revealed.block?.className).toContain('nd-rise')
+  })
+
+  it('keeps re-submitting the same transaction until the drop goes live', async () => {
+    vi.useFakeTimers()
+    const bridge = new MockBridge()
+    const send = vi.spyOn(bridge, 'sendWithData')
+    const script = installFetch({
+      create: { status: 201, body: DRAFT },
+      funding: [
+        { status: 200, body: dropBody('funding_pending') },
+        { status: 200, body: dropBody('funding_pending') },
+        { status: 200, body: dropBody('live') },
+      ],
+    })
+    renderCreate({ discoverBridge: bridgeOf(bridge) })
+    fillForm()
+    const sheet = openReview()
+    fireEvent.click(within(sheet).getByRole('button', { name: /fund drop/i }))
+
+    await tick(1000)
+    await tick(3000)
+    await tick(3000)
+
+    const submits = script.calls.filter((c) => c.method === 'POST' && c.url.endsWith('/funding'))
+    expect(submits.length).toBeGreaterThan(1)
+    // The SAME hash every time: re-submitting is the endpoint's idempotent
+    // case, and it is the only thing that lifts a drop out of funding_pending.
+    const hashes = new Set(submits.map((c) => JSON.parse(String(c.init?.body)).txHash))
+    expect(hashes.size).toBe(1)
+    // One wallet call, one transaction. Polling never asks for a second.
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('heading', { name: /your drop is live/i })).toBeTruthy()
+  })
+
+  it('stops re-submitting a hash the endpoint refuses, and keeps reading', async () => {
+    vi.useFakeTimers()
+    const script = installFetch({
+      create: { status: 201, body: DRAFT },
+      funding: [
+        { status: 200, body: dropBody('funding_pending') },
+        { status: 422, body: { error: { code: 'wrong_memo', message: 'no' } } },
+      ],
+      drops: [{ status: 200, body: dropBody('funding_pending') }],
+    })
+    renderCreate({ discoverBridge: bridgeOf(new MockBridge()) })
+    fillForm()
+    const sheet = openReview()
+    fireEvent.click(within(sheet).getByRole('button', { name: /fund drop/i }))
+
+    await tick(1000)
+    await tick(3000)
+    const afterRefusal = script.calls.length
+    await tick(3000)
+
+    const later = script.calls.slice(afterRefusal)
+    expect(later.length).toBeGreaterThan(0)
+    expect(later.every((c) => c.method === 'GET')).toBe(true)
+    // Still waiting, still honest, still no link and no second payment.
+    expectNoShareAffordance()
+    expect(document.body.textContent ?? '').not.toMatch(/fund again|send again/i)
+  })
+})
+
+/**
+ * Because the link is withheld until `live`, this browser holds the only copy
+ * of it while funding confirms. Closing the app must not lose the drop.
+ */
+describe('Create — coming back to a funded drop', () => {
+  it('remembers the drop as soon as the wallet reports a transaction', async () => {
+    installFetch({
+      create: { status: 201, body: DRAFT },
+      funding: { status: 200, body: dropBody('funding_pending') },
+    })
+    renderCreate({ discoverBridge: bridgeOf(new MockBridge()) })
+    fillForm()
+    const sheet = openReview()
+    fireEvent.click(within(sheet).getByRole('button', { name: /fund drop/i }))
+
+    await waitFor(() => expect(localStorage.getItem(FUNDING_STORAGE_KEY)).toBeTruthy())
+    const stored = JSON.parse(String(localStorage.getItem(FUNDING_STORAGE_KEY)))
+    expect(stored.draft.shareUrl).toBe(SHARE_URL)
+    expect(stored.txHash).toMatch(/^[0-9a-f]{64}$/)
+  })
+
+  it('remembers nothing before the wallet has answered', async () => {
+    installFetch({ create: { status: 201, body: DRAFT } })
+    renderCreate({ discoverBridge: bridgeOf(rejectingBridge()) })
+    fillForm()
+    const sheet = openReview()
+    fireEvent.click(within(sheet).getByRole('button', { name: /fund drop/i }))
+
+    await screen.findByRole('button', { name: /try again/i })
+    // Nothing left the wallet, so there is nothing to come back to — and a
+    // record here would greet the next visit with "detecting your transaction"
+    // for a transaction that was never signed.
+    expect(localStorage.getItem(FUNDING_STORAGE_KEY)).toBeNull()
+  })
+
+  it('hands back the link on a fresh mount when the drop went live meanwhile', async () => {
+    storeFunded()
+    installFetch({ drops: [{ status: 200, body: dropBody('live') }] })
+    renderCreate({ discoverBridge: bridgeOf(new MockBridge()) })
+
+    await waitFor(() => screen.getByRole('heading', { name: /your drop is live/i }))
+    expect(screen.getByText(SHARE_URL)).toBeTruthy()
+    expect(screen.getByRole('img', { name: /qr/i })).toBeTruthy()
+    // The wax keeps the sponsor's initial, read back from the server rather
+    // than from a form that is now empty.
+    expect(document.querySelector('.nd-wax-mark')?.textContent).toBe('T')
+  })
+
+  it('resumes the funding poll when the drop is still confirming', async () => {
+    vi.useFakeTimers()
+    storeFunded()
+    installFetch({
+      drops: [{ status: 200, body: dropBody('funding_pending') }],
+      funding: [{ status: 200, body: dropBody('live') }],
+    })
+    renderCreate({ discoverBridge: bridgeOf(new MockBridge()) })
+
+    await tick(1)
+    expect(screen.getByRole('heading', { name: /confirming on the network/i })).toBeTruthy()
+    expectNoShareAffordance()
+
+    await tick(3000)
+    expect(screen.getByRole('heading', { name: /your drop is live/i })).toBeTruthy()
+    expect(screen.getByText(SHARE_URL)).toBeTruthy()
+  })
+
+  it('never flashes the empty form on the way back to a funded drop', () => {
+    storeFunded()
+    installFetch({ drops: [{ status: 200, body: dropBody('live') }] })
+    renderCreate({ discoverBridge: bridgeOf(new MockBridge()) })
+
+    // The very first paint, before any fetch has resolved.
+    expect(screen.queryByRole('button', { name: /review drop/i })).toBeNull()
+    expect(screen.getByRole('heading', { name: /finding your drop/i })).toBeTruthy()
+  })
+
+  it('keeps the drop when the API cannot be reached, and keeps polling', async () => {
+    vi.useFakeTimers()
+    storeFunded()
+    const script = installFetch({ funding: [{ status: 200, body: dropBody('live') }] })
+    script.fetchMock.mockRejectedValueOnce(new TypeError('offline'))
+    renderCreate({ discoverBridge: bridgeOf(new MockBridge()) })
+
+    await tick(1)
+    expect(localStorage.getItem(FUNDING_STORAGE_KEY)).toBeTruthy()
+    expect(screen.getByRole('heading', { name: /detecting your transaction/i })).toBeTruthy()
+
+    await tick(3000)
+    expect(screen.getByRole('heading', { name: /your drop is live/i })).toBeTruthy()
+  })
+
+  it('forgets a remembered drop the server has never heard of', async () => {
+    storeFunded()
+    installFetch({ drops: [{ status: 404, body: { error: { code: 'not_found', message: 'no' } } }] })
+    renderCreate({ discoverBridge: bridgeOf(new MockBridge()) })
+
+    await waitFor(() => screen.getByRole('button', { name: /review drop/i }))
+    expect(localStorage.getItem(FUNDING_STORAGE_KEY)).toBeNull()
+  })
+
+  it('forgets a remembered drop whose life is over', async () => {
+    storeFunded()
+    installFetch({ drops: [{ status: 200, body: dropBody('refunded', 0) }] })
+    renderCreate({ discoverBridge: bridgeOf(new MockBridge()) })
+
+    await waitFor(() => screen.getByRole('button', { name: /review drop/i }))
+    expect(localStorage.getItem(FUNDING_STORAGE_KEY)).toBeNull()
+    expectNoShareAffordance()
+  })
+
+  it('ignores a record older than its 48-hour life', async () => {
+    storeFunded({ savedAt: Date.now() - FUNDING_TTL_MS - 1 })
+    installFetch({ drops: [{ status: 200, body: dropBody('live') }] })
+    renderCreate({ discoverBridge: bridgeOf(new MockBridge()) })
+
+    expect(screen.getByRole('button', { name: /review drop/i })).toBeTruthy()
+    await waitFor(() => expect(localStorage.getItem(FUNDING_STORAGE_KEY)).toBeNull())
+  })
+
+  it('ignores a record someone edited by hand', () => {
+    localStorage.setItem(FUNDING_STORAGE_KEY, '{"draft":{"publicId":42}}')
+    installFetch({ drops: [{ status: 200, body: dropBody('live') }] })
+    renderCreate({ discoverBridge: bridgeOf(new MockBridge()) })
+
+    expect(screen.getByRole('button', { name: /review drop/i })).toBeTruthy()
+  })
+
+  it('lets the sponsor put a funded drop down and start a fresh one', async () => {
+    storeFunded()
+    sessionStorage.setItem('nimdrops.idem.create:["Team NimDrops","","2",5]', 'spent-key')
+    installFetch({ drops: [{ status: 200, body: dropBody('live') }] })
+    renderCreate({ discoverBridge: bridgeOf(new MockBridge()) })
+    await waitFor(() => screen.getByRole('heading', { name: /your drop is live/i }))
+
+    fireEvent.click(screen.getByRole('button', { name: /send another drop/i }))
+
+    expect(screen.getByRole('button', { name: /review drop/i })).toBeTruthy()
+    expect(amountField().value).toBe('')
+    expect(localStorage.getItem(FUNDING_STORAGE_KEY)).toBeNull()
+    // The spent draft attempt goes too: replaying it would ask the wallet to
+    // fund a drop that is already live.
+    expect(sessionStorage.getItem('nimdrops.idem.create:["Team NimDrops","","2",5]')).toBeNull()
   })
 })
