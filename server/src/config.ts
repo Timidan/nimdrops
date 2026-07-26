@@ -97,6 +97,35 @@ export function finalityDepthBlocks(): number {
   return envIntAtLeast('NIMIQ_FINALITY_DEPTH', FINALITY_DEPTH_FLOOR_BLOCKS)
 }
 
+// ---- trusted proxy ------------------------------------------------------------
+
+/** Below this a "secret" is a guess away from letting anyone pick their bucket. */
+export const MIN_PROXY_SECRET_BYTES = 32
+
+/**
+ * The secret Caddy presents in `X-NimDrops-Proxy-Secret` to prove a request
+ * came through our own edge (`http/client-ip.ts`).
+ *
+ * Optional on purpose — a direct run with no proxy has no edge to authenticate,
+ * and the app then buckets by socket peer, which is correct. But a value that
+ * is SET AND WEAK is not a third option: it is the same as unset, except nobody
+ * knows. So a short one throws at boot rather than at the first flood.
+ *
+ * Generate with `openssl rand -hex 32`.
+ */
+export function caddyAppSharedSecret(): string | undefined {
+  const raw = process.env.CADDY_APP_SHARED_SECRET
+  if (raw === undefined || raw === '') return undefined
+  const bytes = Buffer.byteLength(raw, 'utf8')
+  if (bytes < MIN_PROXY_SECRET_BYTES) {
+    throw new Error(
+      `CADDY_APP_SHARED_SECRET must be at least ${MIN_PROXY_SECRET_BYTES} bytes (got ${bytes}); ` +
+        'generate one with `openssl rand -hex 32`, or leave it unset for a run with no proxy',
+    )
+  }
+  return raw
+}
+
 /** Uniform message extraction for the `catch (err: unknown)` sites. */
 export function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)

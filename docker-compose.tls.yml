@@ -23,6 +23,23 @@ services:
       # rather than defaulted: a placeholder name would burn ACME rate limits on
       # a domain nobody controls.
       PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME:?set PUBLIC_HOSTNAME to the public DNS name, e.g. drops.example.com}
+      # The two halves of client-IP resolution (./Caddyfile). Both optional and
+      # both only useful together with the matching value on the `server`
+      # service; every way of getting them wrong ends in ONE shared rate-limit
+      # bucket, never in a client choosing its own.
+      #
+      #  - CLOUDFLARE_PROXY_CIDRS: space-separated v4 AND v6 ranges from
+      #    https://www.cloudflare.com/ips/. STATIC — Caddy does not refresh it,
+      #    so re-read that page at deploy time. Left blank here it reaches Caddy
+      #    as an empty string, which trusts NO peer (verified with `caddy
+      #    adapt`: `trusted_proxies` comes out with no ranges) — the same
+      #    fail-safe as the Caddyfile's TEST-NET-1 fallback, by a different
+      #    route, since Caddy only applies that default when the variable is
+      #    absent rather than empty.
+      #  - CADDY_APP_SHARED_SECRET: must equal the value the `server` service
+      #    gets. `openssl rand -hex 32`.
+      CLOUDFLARE_PROXY_CIDRS: ${CLOUDFLARE_PROXY_CIDRS:-}
+      CADDY_APP_SHARED_SECRET: ${CADDY_APP_SHARED_SECRET:-}
     ports:
       - '80:80'
       - '443:443'

@@ -13,16 +13,65 @@
 # PUBLIC_HOSTNAME (and PUBLIC_ORIGIN=https://<same host>) in .env, then
 # `docker compose up -d caddy`. Ports 80 and 443 must be reachable or the
 # ACME challenge cannot complete.
+
+# ---- who the client is -----------------------------------------------------
+#
+# THIS FILE IS THE ONLY CLOUDFLARE-AWARE PART OF THE SYSTEM. The app deals in
+# one header and knows nothing about any edge (server/src/http/client-ip.ts).
+#
+# With Cloudflare in front, the socket peer is a Cloudflare edge address, so the
+# real client is only knowable from `CF-Connecting-IP` — a header anyone who
+# finds the origin can also send. Caddy is the only component positioned to tell
+# those apart, because it can see the peer: `trusted_proxies` authenticates the
+# edge by CIDR and `client_ip_headers` says which header that authenticated peer
+# is allowed to speak through. `trusted_proxies_strict` then makes it a hard
+# rule rather than a hint — a request from any other peer has its
+# `CF-Connecting-IP` ignored outright.
+#
+# The result is `{client_ip}`, which is passed downstream as ONE header with a
+# shared secret next to it, and every other spelling of "who am I" is stripped
+# below so the app never has a second, weaker source to be confused by.
+{
+	servers {
+		# CLOUDFLARE_PROXY_CIDRS comes from https://www.cloudflare.com/ips/ as a
+		# space-separated list of the v4 AND v6 ranges. It is STATIC: Cloudflare
+		# changes it occasionally, so re-read that page at deploy time. A range
+		# that has been added but is missing here does not spoof anything — those
+		# requests simply fall back to the peer address, i.e. one shared bucket.
+		#
+		# TEST-NET-1 fallback: valid syntax, but no real Cloudflare peer matches
+		# it, so a deployment that forgot to populate the list fails safe.
+		trusted_proxies static {$CLOUDFLARE_PROXY_CIDRS:192.0.2.0/24}
+		trusted_proxies_strict
+		client_ip_headers CF-Connecting-IP
+	}
+}
+
 {$PUBLIC_HOSTNAME} {
 	encode zstd gzip
 
 	# `server` is the compose service name (docker-compose.yml). Running Caddy on
 	# the host instead of in compose? Use `127.0.0.1:8080`.
-	#
-	# Caddy APPENDS the real peer address to X-Forwarded-For, and `clientIp()` in
-	# server/src/http/app.ts reads the LAST entry for exactly that reason: a
-	# client-supplied prefix cannot be used to pick a rate-limit bucket.
 	reverse_proxy server:8080 {
+		# The app's whole notion of "who is this" (rate-limit buckets, nothing
+		# else). `{client_ip}` is what the block above derived: the Cloudflare-
+		# supplied address when the peer WAS Cloudflare, the peer itself
+		# otherwise. The secret is what proves this hop is us — without it the
+		# header is just another thing an attacker can send straight to the
+		# origin, and the app treats it as exactly that.
+		header_up X-NimDrops-Client-IP {client_ip}
+		header_up X-NimDrops-Proxy-Secret {$CADDY_APP_SHARED_SECRET}
+
+		# Strip every competing claim on the way through. The app already ignores
+		# all of these; removing them means a future middleware, log line or
+		# library default cannot quietly resurrect one as a second source of
+		# truth. X-Forwarded-For in particular is APPENDED by Caddy, so leaving
+		# it would hand the app a list whose last entry is a Cloudflare address.
+		header_up -X-Forwarded-For
+		header_up -X-Real-IP
+		header_up -CF-Connecting-IP
+		header_up -CF-Connecting-IPv6
+
 		# A slow chain RPC must not become a 502 mid-claim; the API's own timeouts
 		# and the worker's advisory lock are the real bounds.
 		transport http {

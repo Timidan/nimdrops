@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   FINALITY_DEPTH_FLOOR_BLOCKS,
+  MIN_PROXY_SECRET_BYTES,
   VALIDITY_WINDOW_FLOOR_BLOCKS,
+  caddyAppSharedSecret,
   errorMessage,
   finalityDepthBlocks,
   requireNetwork,
@@ -23,6 +25,7 @@ const saved = {
   network: process.env.NIMIQ_NETWORK,
   window: process.env.NIMIQ_VALIDITY_WINDOW_BLOCKS,
   depth: process.env.NIMIQ_FINALITY_DEPTH,
+  proxySecret: process.env.CADDY_APP_SHARED_SECRET,
 }
 
 function restore(name: string, value: string | undefined): void {
@@ -34,6 +37,7 @@ afterEach(() => {
   restore('NIMIQ_NETWORK', saved.network)
   restore('NIMIQ_VALIDITY_WINDOW_BLOCKS', saved.window)
   restore('NIMIQ_FINALITY_DEPTH', saved.depth)
+  restore('CADDY_APP_SHARED_SECRET', saved.proxySecret)
 })
 
 describe('requireNetwork', () => {
@@ -114,6 +118,45 @@ describe('finalityDepthBlocks', () => {
         /NIMIQ_FINALITY_DEPTH/,
       )
     }
+  })
+})
+
+/**
+ * The secret that lets Caddy — and nothing else — name a client's rate-limit
+ * bucket. Optional, because a direct run has no proxy to authenticate; but
+ * "set and short" must never be a quiet third state, since a guessable secret
+ * is a spoofable bucket.
+ */
+describe('caddyAppSharedSecret', () => {
+  it('is undefined when unset or empty: a run with no proxy is a valid run', () => {
+    delete process.env.CADDY_APP_SHARED_SECRET
+    expect(caddyAppSharedSecret()).toBeUndefined()
+    process.env.CADDY_APP_SHARED_SECRET = ''
+    expect(caddyAppSharedSecret()).toBeUndefined()
+  })
+
+  it('returns a secret at or above the floor unchanged', () => {
+    expect(MIN_PROXY_SECRET_BYTES).toBe(32)
+    for (const raw of ['a'.repeat(MIN_PROXY_SECRET_BYTES), 'b'.repeat(64)]) {
+      process.env.CADDY_APP_SHARED_SECRET = raw
+      expect(caddyAppSharedSecret()).toBe(raw)
+    }
+  })
+
+  it('throws on anything shorter than the floor', () => {
+    for (const raw of ['x', 'hunter2', 'a'.repeat(MIN_PROXY_SECRET_BYTES - 1)]) {
+      process.env.CADDY_APP_SHARED_SECRET = raw
+      expect(() => caddyAppSharedSecret(), `length ${raw.length} must be refused`).toThrow(
+        /CADDY_APP_SHARED_SECRET/,
+      )
+    }
+  })
+
+  it('measures BYTES, not characters', () => {
+    // 31 astral characters are 124 UTF-8 bytes but read as 62 `.length`; the
+    // reverse case is what matters, so check the counter is on the byte side.
+    process.env.CADDY_APP_SHARED_SECRET = '🔒'.repeat(8) // 8 chars, 32 bytes
+    expect(caddyAppSharedSecret()).toBe('🔒'.repeat(8))
   })
 })
 

@@ -35,6 +35,13 @@ x-app: &app
     NIMIQ_NETWORK: ${NIMIQ_NETWORK:?set NIMIQ_NETWORK in .env}
     PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?set PUBLIC_ORIGIN in .env}
     SIG_SCHEME: ${SIG_SCHEME:-raw}
+    # Proves to the API that an X-NimDrops-Client-IP header came from our own
+    # Caddy and not from someone who found the origin. OPTIONAL and unset by
+    # default: with no proxy the API buckets by socket peer, which is right. Set
+    # it here and in the caddy service (docker-compose.tls.yml) TOGETHER — Caddy
+    # sending a secret the API does not know, or the reverse, degrades to one
+    # shared rate-limit bucket for every claimant.
+    CADDY_APP_SHARED_SECRET: ${CADDY_APP_SHARED_SECRET:-}
 
 services:
   postgres:

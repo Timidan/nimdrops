@@ -32,6 +32,7 @@ import {
   StaleReconciliationError,
   readControls,
 } from '../services/solvency'
+import { SHARED_BUCKET, type ClientIpResolver } from './client-ip'
 import { ConflictError, bindIdem, idemKeyHash, lookupIdem } from './idempotency'
 import { logError } from './redact'
 import { registerSsr } from './ssr'
@@ -127,23 +128,6 @@ export class TokenBuckets {
       if (at - bucket.updatedAt >= this.windowMs) this.buckets.delete(key)
     }
   }
-}
-
-/**
- * The client address, taken as the LAST entry of `X-Forwarded-For`.
- *
- * Caddy appends the peer address to whatever the client sent, so the last hop
- * is the only entry an attacker cannot forge. Reading the first entry — the
- * common mistake — would let anyone pick their own rate-limit bucket.
- */
-export function clientIp(c: Context): string {
-  const forwarded = c.req.header('x-forwarded-for')
-  if (forwarded) {
-    const hops = forwarded.split(',').map((h) => h.trim()).filter(Boolean)
-    const last = hops[hops.length - 1]
-    if (last) return last
-  }
-  return c.req.header('x-real-ip')?.trim() || 'unknown'
 }
 
 // ---- error envelope -------------------------------------------------------------
@@ -366,6 +350,17 @@ export interface AppDeps {
   /** Injectable clock for the rate limiters (tests freeze it). */
   now?: () => number
   limits?: Partial<RateLimits>
+  /**
+   * How the per-IP limiter names a client (`http/client-ip.ts`). Built in
+   * `index.ts` from the socket peer and the Caddy shared secret.
+   *
+   * ABSENT MEANS ONE SHARED BUCKET, deliberately: an app wired without a
+   * resolver rate-limits every client together — visible, and safe — instead
+   * of falling back to reading `X-Forwarded-For`, which any client can set.
+   * There is no configuration of this process in which a header decides a
+   * bucket without a secret proving which hop set it.
+   */
+  clientIp?: ClientIpResolver
 }
 
 const CREATE_DROP_SCOPE = 'POST /api/drops'
@@ -374,6 +369,7 @@ export function makeApp(deps: AppDeps): Hono {
   const { pool, chain } = deps
   const now = deps.now ?? Date.now
   const limits: RateLimits = { ...DEFAULT_LIMITS, ...deps.limits }
+  const clientIp: ClientIpResolver = deps.clientIp ?? (() => SHARED_BUCKET)
   // Throttled so a hot claim path cannot turn one insolvency into a webhook flood.
   const alerts = throttled(deps.alerts)
 

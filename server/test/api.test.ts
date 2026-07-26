@@ -7,6 +7,11 @@ import { FakeChain } from '../src/chain/fake'
 import type { ChainClient, ChainTx } from '../src/chain/types'
 import { migrate } from '../src/db/migrate'
 import { makeApp } from '../src/http/app'
+import {
+  CLIENT_IP_HEADER,
+  PROXY_SECRET_HEADER,
+  makeClientIpResolver,
+} from '../src/http/client-ip'
 import { consoleAlerts } from '../src/services/alerts'
 // Side-effect import: installs the int8-as-string parser so BIGINT luna never
 // passes through a lossy JS number. This suite builds its own pool, so it still
@@ -87,9 +92,28 @@ interface CallOptions {
 
 const DEFAULT_IP = '203.0.113.9'
 
+/**
+ * The suite nominates a client IP the same way production does: through the
+ * authenticated hop, not through `X-Forwarded-For`. This app trusts NO
+ * forwarding header — see `src/http/client-ip.ts` — so a test that set one
+ * would silently put every request in the same bucket and stop measuring the
+ * per-IP limiter at all. Here Caddy's role is played by these two headers plus
+ * the resolver `makeApp` is given below; `test/client-ip.test.ts` is where the
+ * resolver's own rules are asserted.
+ */
+const PROXY_SECRET = 'api-test-proxy-secret-'.padEnd(64, '0')
+
+const clientIp = makeClientIpResolver({
+  proxySecret: PROXY_SECRET,
+  // `app.request()` has no socket, so an unnominated request is unattributable
+  // — exactly as it would be in production.
+  peerAddress: () => undefined,
+})
+
 async function call(method: string, path: string, o: CallOptions = {}): Promise<Response> {
   const headers: Record<string, string> = {
-    'x-forwarded-for': o.ip ?? DEFAULT_IP,
+    [PROXY_SECRET_HEADER]: PROXY_SECRET,
+    [CLIENT_IP_HEADER]: o.ip ?? DEFAULT_IP,
     ...(o.headers ?? {}),
   }
   if (o.idemKey !== undefined) headers['idempotency-key'] = o.idemKey
@@ -266,7 +290,7 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
     chain = newChain()
     clock = 1_700_000_000_000
     // A fresh app per test means fresh in-memory token buckets.
-    app = makeApp({ pool, chain, alerts: consoleAlerts(), now })
+    app = makeApp({ pool, chain, alerts: consoleAlerts(), now, clientIp })
   })
 
   afterEach(() => {
@@ -671,7 +695,7 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
       broadcast: (raw: string) => chain.broadcast(raw),
     }
     const draft = await createDrop()
-    app = makeApp({ pool, chain: broken, alerts: consoleAlerts(), now })
+    app = makeApp({ pool, chain: broken, alerts: consoleAlerts(), now, clientIp })
 
     const res = await post(`/api/drops/${draft.publicId}/funding`, {
       body: { txHash: fundingHashFor(draft.publicId) },
@@ -796,6 +820,7 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
       alerts: consoleAlerts(),
       now,
       limits: { claimsPerWalletPerWindow: 50 },
+      clientIp,
     })
     const draft = await liveDrop({ claimCount: 20 })
 
@@ -998,7 +1023,7 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
       broadcast: (raw: string) => chain.broadcast(raw),
     }
     vi.spyOn(console, 'error').mockImplementation(() => {})
-    app = makeApp({ pool, chain: broken, alerts: consoleAlerts(), now })
+    app = makeApp({ pool, chain: broken, alerts: consoleAlerts(), now, clientIp })
 
     const res = await get('/health')
     expect(res.status).toBe(503)

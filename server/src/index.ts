@@ -1,9 +1,11 @@
 import { serve } from '@hono/node-server'
+import { getConnInfo } from '@hono/node-server/conninfo'
 import { readOnlyNimiqChainFromEnv } from './chain/nimiq'
-import { errorMessage, requireNetwork } from './config'
+import { caddyAppSharedSecret, errorMessage, requireNetwork } from './config'
 import { closePool, getPool } from './db/pool'
 import { exitAfterFlush, exitAfterTeardown } from './exit'
 import { makeApp } from './http/app'
+import { makeClientIpResolver } from './http/client-ip'
 import { logError, logInfo, logWarn } from './http/redact'
 import { createAlerts } from './services/alerts'
 import { ensureChainBinding } from './services/solvency'
@@ -70,6 +72,10 @@ function requireEnv(): void {
   if (scheme !== 'raw' && scheme !== 'nimiq-signed-message') {
     throw new Error(`SIG_SCHEME must be raw or nimiq-signed-message (got ${scheme ?? 'unset'})`)
   }
+
+  // Optional, so it is not in REQUIRED_ENV — but if it is set it is checked
+  // HERE, before the socket, not at the first request the limiter has to judge.
+  caddyAppSharedSecret()
 }
 
 function port(): number {
@@ -105,7 +111,19 @@ async function main(): Promise<void> {
   log('chain_binding_verified', { network, custodyAddress })
 
   const alerts = createAlerts({ source: 'nimdrops-api' })
-  const app = makeApp({ pool, chain, alerts })
+
+  // Rate-limit identity (§10.1). The peer is the socket's own address — the one
+  // thing on the request nobody can write — and the secret is what lets Caddy,
+  // and only Caddy, name a client behind it. Unset secret = no trusted proxy =
+  // bucket by peer; see `http/client-ip.ts` for why nothing here mentions
+  // Cloudflare.
+  const proxySecret = caddyAppSharedSecret()
+  const clientIp = makeClientIpResolver({
+    proxySecret,
+    peerAddress: (c) => getConnInfo(c).remote.address,
+  })
+
+  const app = makeApp({ pool, chain, alerts, clientIp })
 
   const server = serve({ fetch: app.fetch, port: port(), hostname: '0.0.0.0' }, (info) => {
     log('api_listening', {
@@ -113,6 +131,9 @@ async function main(): Promise<void> {
       network: chain.network(),
       // Stated at boot so the posture is a fact in the log, not an assumption.
       readOnlyChain: chain.isReadOnly(),
+      // Same reason: behind Caddy this must be true, or every claimant is
+      // sharing the socket peer's single 60/min bucket.
+      trustedProxy: proxySecret !== undefined,
     })
   })
 
