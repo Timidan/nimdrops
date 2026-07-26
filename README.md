@@ -134,8 +134,17 @@ The invariants that actually protect other people's money:
 **Bring it up.** Set the real hostname in `Caddyfile` first — Caddy provisions TLS from that name and nothing else.
 
 ```bash
-docker compose up -d --build
+docker compose build            # ALL services — see the warning below
+docker compose up -d
 ```
+
+> **Build every service, never one by one.** `server` and `worker` are separate
+> images built from the same Dockerfile, so `docker compose build server` leaves
+> the worker running whatever code it was last built with. On the deployment this
+> silently left the worker four hours stale — a signing process running older
+> money code than the API in front of it. Plain `docker compose build` rebuilds
+> both. The same applies to the gate harness: it runs in the **worker** image,
+> because the API is key-less.
 
 That brings up Postgres, the API and the worker, reachable only on the docker
 network. **TLS is a separate overlay** so the base stack works on a host with no
