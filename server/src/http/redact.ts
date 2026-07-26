@@ -168,6 +168,13 @@ const PUBLIC_ID_KEYS = new Set([
   'payouttxhash',
   'refundtxhash',
   'replacedtxhash',
+  // A git SHA is 40 hex characters, which is indistinguishable by shape from a
+  // key — so the value pass masked the build stamp the moment it was added,
+  // and the boot log said `"commit":"[redacted]"`. The stamp exists precisely
+  // so an operator can tell a fresh deploy from a stale one; redacting it
+  // defeats it. Public by construction: it names a commit, not a secret.
+  'commit',
+  'gitcommit',
 ])
 
 /** `raw_tx_hex`, `rawTxHex` and `Raw-Tx-Hex` are the same field. */
