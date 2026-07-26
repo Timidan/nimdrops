@@ -94,6 +94,15 @@ body {
   padding-right: var(--nd-gutter);
   padding-left: var(--nd-gutter);
   border-radius: 0.75rem 0.75rem 0 0;
+  /**
+   * The sheet is opaque, so nothing printed on it reaches past its edge. Belt
+   * and braces behind the bloom's own geometry: any future decoration that
+   * forgets it is sitting on a 320px-wide piece of paper gets clipped here
+   * instead of handing the whole document a sideways scrollbar. `clip` rather
+   * than `hidden` because this must not become a scroll container, and only on
+   * the inline axis because the sheet's height is the page's height.
+   */
+  overflow-x: clip;
   /* Flat paper on purpose: the flap needs a clean sheet to cast a crease onto. */
   background-color: var(--color-paper);
   /* Stated, not inherited — nothing about this surface should depend on what
@@ -308,12 +317,28 @@ body {
   }
 }
 
-/** One pass of warmth behind the amount as the seal comes apart. Once. */
+/**
+ * One pass of warmth behind the amount as the seal comes apart. Once.
+ *
+ * It grows INTO the paper, never out of it, and that is a correctness rule
+ * rather than a taste one. An absolutely positioned decoration still counts
+ * towards the page's scrollable overflow, and a scaled one counts at its
+ * *scaled* size — so a bloom hung past the paper's edges and then grown past
+ * `scale(1)` hands the document ~100px of sideways scroll for the 900ms it is
+ * alive. That is the one moment a claimant is looking hardest, and the page
+ * wobbles under their thumb.
+ *
+ * Hence: edges pinned to the face, and the growth spends itself between
+ * `scale(0.62)` and `scale(1)`. The widest this is ever painted is exactly the
+ * width of the paper it blooms on. The pass reads the same — the gradient is
+ * `closest-side`, so its reach was always set by the 12rem height, which is
+ * untouched.
+ */
 .nd-bloom {
   position: absolute;
   top: calc(var(--nd-flap-h) + 1.5rem);
-  right: -12%;
-  left: -12%;
+  right: 0;
+  left: 0;
   height: 12rem;
   border-radius: 50%;
   background-image: radial-gradient(
@@ -330,14 +355,14 @@ body {
 @keyframes nd-bloom {
   0% {
     opacity: 0;
-    transform: scale(0.75);
+    transform: scale(0.62);
   }
   38% {
     opacity: 0.55;
   }
   100% {
     opacity: 0;
-    transform: scale(1.25);
+    transform: scale(1);
   }
 }
 

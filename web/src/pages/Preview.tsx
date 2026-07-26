@@ -91,25 +91,47 @@ const CASES: Case[] = [
 /** The phones this has to survive: smallest, iPhone SE/mini, the 390 reference, largest. */
 const WIDTHS = [320, 375, 390, 430] as const
 
+/** How long each frame keeps watching after a (re)start of the reveal. */
+const WATCH_MS = 4000
+
 /**
  * A frame that reports on itself. Horizontal overflow at 320px is the mobile
  * bug you cannot see by looking — the container just scrolls — so the frame
  * measures its own content and says so out loud.
+ *
+ * It reports the WORST it has ever seen, sampled every animation frame, not
+ * whatever happens to be true when a one-shot measurement lands. That is the
+ * whole difference between catching the reveal's overflow and missing it: the
+ * gold bloom that used to push the paper ~100px wide lived for 900ms and was
+ * unmounted again long before a `setTimeout(400)` could see it. A surface that
+ * scrolls sideways for half a second scrolled sideways.
  */
-function Frame({ width, children }: { width: number; children: ReactNode }) {
+function Frame({
+  width,
+  resetKey,
+  children,
+}: {
+  width: number
+  resetKey: number
+  children: ReactNode
+}) {
   const box = useRef<HTMLDivElement>(null)
   const [over, setOver] = useState(0)
 
   useEffect(() => {
-    const measure = () => {
+    setOver(0)
+    let raf = 0
+    const until = performance.now() + WATCH_MS
+    const tick = (now: number) => {
       const el = box.current
-      if (el) setOver(Math.max(0, el.scrollWidth - el.clientWidth))
+      // A functional max means React bails out on every frame that is no worse
+      // than the last, so watching every frame costs no renders.
+      if (el) setOver((worst) => Math.max(worst, el.scrollWidth - el.clientWidth))
+      if (now < until) raf = requestAnimationFrame(tick)
     }
-    measure()
-    // Web fonts and the countdown both settle a tick late.
-    const timer = setTimeout(measure, 400)
-    return () => clearTimeout(timer)
-  })
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [width, resetKey])
 
   return (
     <>
@@ -123,6 +145,73 @@ function Frame({ width, children }: { width: number; children: ReactNode }) {
   )
 }
 
+/**
+ * The board's own sideways scroll, watched the same way.
+ *
+ * Each `.frame` is a scroll container, which means it ABSORBS the overflow it
+ * measures — the cell reports 107px while the page underneath reports nothing.
+ * That is the right answer for the app and the wrong answer for the board, so
+ * the document gets its own readout. It is also the honest place to catch the
+ * board's own layout: a 390px cell in a 390px viewport has no room for a
+ * gutter, and a hardcoded one would make this page scroll sideways while the
+ * cells all read "fits".
+ */
+function PageOverflow({ resetKey }: { resetKey: number }) {
+  const [over, setOver] = useState(0)
+
+  useEffect(() => {
+    setOver(0)
+    let raf = 0
+    const until = performance.now() + WATCH_MS
+    const tick = (now: number) => {
+      const doc = document.documentElement
+      const worstNow = Math.max(
+        doc.scrollWidth - doc.clientWidth,
+        document.body.scrollWidth - document.body.clientWidth,
+      )
+      setOver((worst) => Math.max(worst, worstNow))
+      if (now < until) raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [resetKey])
+
+  return (
+    <span
+      data-testid="page-overflow"
+      style={{
+        marginLeft: 'auto',
+        fontWeight: over > 0 ? 700 : 400,
+        color: over > 0 ? '#ff8f6b' : '#6f77ab',
+      }}
+    >
+      {over > 0 ? `PAGE SCROLLS SIDEWAYS by ${over}px` : 'page: no sideways scroll'}
+    </span>
+  )
+}
+
+/**
+ * The board's gutter, in px, and never more than the viewport can spare.
+ *
+ * `documentElement.clientWidth` rather than `100vw` on purpose: it is the only
+ * one of the two that already excludes a classic scrollbar, and a gutter
+ * computed from the wrong number is exactly how a states board ends up
+ * reporting a defect it caused itself.
+ */
+function useGutter(cellWidth: number): number {
+  const [gutter, setGutter] = useState(0)
+
+  useEffect(() => {
+    const measure = () =>
+      setGutter(Math.max(0, Math.min(16, Math.floor((document.documentElement.clientWidth - cellWidth) / 2))))
+    measure()
+    window.addEventListener('resize', measure)
+    return () => window.removeEventListener('resize', measure)
+  }, [cellWidth])
+
+  return gutter
+}
+
 /** `?w=320` so a specific width can be linked, screenshotted, or shared. */
 function initialWidth(): number {
   const asked = Number(new URLSearchParams(window.location.search).get('w'))
@@ -134,14 +223,24 @@ export default function Preview() {
   /** Bumping this remounts every frame, which replays the reveal. */
   const [run, setRun] = useState(0)
   const [opened, setOpened] = useState(false)
+  const gutter = useGutter(width)
 
   // The reveal cell plays itself shortly after mount, so "replay reveal" is a
   // real replay and the moment is watchable without hunting for a button.
+  //
+  // `opened` has to be false in the SAME render that remounts the envelope.
+  // Clearing it from an effect is a render too late: the fresh envelope mounts
+  // already open, decides there is no seal left to break, and the bloom — the
+  // one thing worth replaying — never appears at all.
   useEffect(() => {
-    setOpened(false)
     const timer = setTimeout(() => setOpened(true), 900)
     return () => clearTimeout(timer)
   }, [run])
+
+  const replay = () => {
+    setOpened(false)
+    setRun((n) => n + 1)
+  }
 
   return (
     <div className={PREVIEW_SENTINEL} style={{ background: '#0f1230', minHeight: '100vh' }}>
@@ -155,7 +254,7 @@ export default function Preview() {
         .${PREVIEW_SENTINEL} .bar button[aria-pressed='true'] { background: #e9b213; color: #1f2348;
           border-color: #e9b213; }
         .${PREVIEW_SENTINEL} .rail { display: flex; flex-wrap: wrap; gap: 20px;
-          padding: 20px 16px 48px; align-items: flex-start; }
+          padding: 20px 0 48px; align-items: flex-start; }
         .${PREVIEW_SENTINEL} .cell { flex: 0 0 auto; }
         .${PREVIEW_SENTINEL} .cap { margin-bottom: 6px; }
         .${PREVIEW_SENTINEL} .cap b { font-weight: 600; }
@@ -182,15 +281,16 @@ export default function Preview() {
         <button type="button" aria-pressed={opened} onClick={() => setOpened((v) => !v)}>
           {opened ? 'sealed → opened (on)' : 'force open transition'}
         </button>
-        <button type="button" onClick={() => setRun((n) => n + 1)}>
+        <button type="button" onClick={replay}>
           replay reveal
         </button>
         <span style={{ color: '#9aa0cc' }}>
           dev-only route · reduced motion: toggle it in the OS and reload
         </span>
+        <PageOverflow resetKey={run} />
       </div>
 
-      <div className="rail">
+      <div className="rail" style={{ paddingLeft: gutter, paddingRight: gutter }}>
         {/* The signature moment goes first: one frame that starts sealed and
             opens on its own, so the flap, the breaking wax and the single gold
             bloom can all be watched rather than inferred. */}
@@ -198,7 +298,7 @@ export default function Preview() {
           <p className="cap">
             <b>reveal</b> <span>— ready → reserved, seal breaks once</span>
           </p>
-          <Frame width={width}>
+          <Frame width={width} resetKey={run}>
             <DropView
               key={`reveal:${run}`}
               publicId={PUBLIC_ID}
@@ -220,7 +320,7 @@ export default function Preview() {
               <b>{c.name}</b>
               {c.note ? <span> — {c.note}</span> : null}
             </p>
-            <Frame width={width}>
+            <Frame width={width} resetKey={run}>
               <DropView
                 key={`${c.name}:${run}`}
                 publicId={PUBLIC_ID}

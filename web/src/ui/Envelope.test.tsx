@@ -162,6 +162,68 @@ describe('prefers-reduced-motion', () => {
   })
 })
 
+/**
+ * The reveal once handed the page ~100px of horizontal scroll for the 900ms the
+ * gold bloom was alive (measured: 88px at 320, 103 at 375, 107 at 390, 118 at
+ * 430). The bloom hung 12% past each edge of the paper and then grew to
+ * `scale(1.25)`, and an absolutely positioned, scaled decoration still counts
+ * towards the document's scrollable overflow at its scaled size.
+ *
+ * These assertions read the stylesheet rather than the DOM ON PURPOSE. jsdom
+ * has no layout engine: `scrollWidth`, `clientWidth` and every rect it hands
+ * back are hardcoded zeros, so an overflow assertion here would pass whatever
+ * the CSS said and defend nothing. The invariant is therefore checked where it
+ * actually lives — in the declarations — and the measured version of the same
+ * check lives in `/preview`, where each frame reports the worst overflow it saw
+ * across the whole reveal and the bar reports the document's own sideways
+ * scroll.
+ */
+describe('the reveal cannot make the page scroll sideways', () => {
+  const css = readFileSync(resolve(process.cwd(), 'src/index.css'), 'utf8')
+
+  it('still blooms — the fix is containment, not deletion', () => {
+    const { rerender } = view('ready')
+    rerender(
+      <MemoryRouter>
+        <DropView {...props('reserved', { serverState: 'reserved' })} />
+      </MemoryRouter>,
+    )
+    expect(screen.getByTestId('seal-bloom')).toBeTruthy()
+  })
+
+  it('keeps the bloom inside the paper it blooms on', () => {
+    const rule = css.match(/\.nd-bloom\s*\{([^}]*)\}/)?.[1]
+    expect(rule).toBeTruthy()
+
+    // Nothing hangs off the sides of a 320px sheet.
+    for (const side of ['inset', 'left', 'right', 'inset-inline', 'inset-inline-start']) {
+      const value = rule!.match(new RegExp(`(?:^|[;\\s])${side}:\\s*([^;]+)`))?.[1]
+      if (value !== undefined) expect(value.trim()).not.toMatch(/-\s*\d/)
+    }
+  })
+
+  it('never animates anything wider than its own box', () => {
+    const blocks = css.match(/@keyframes\s+[\w-]+\s*\{(?:[^{}]|\{[^{}]*\})*\}/g) ?? []
+    expect(blocks.length).toBeGreaterThan(0)
+
+    for (const block of blocks) {
+      const factors = [...block.matchAll(/\bscale(?:X|3d)?\(\s*([\d.]+)/g)].map((m) => Number(m[1]))
+      for (const factor of factors) {
+        // `scale(1.25)` on a full-bleed decoration is 25% of the viewport of
+        // sideways scroll. Growth has to be spent getting UP to 1, not past it.
+        expect(factor).toBeLessThanOrEqual(1)
+      }
+    }
+  })
+
+  it('clips the paper on the inline axis, so a future decoration cannot escape', () => {
+    const face = css.match(/\n\.nd-face\s*\{((?:[^{}]|\{[^{}]*\})*)\}/)?.[1]
+    expect(face).toBeTruthy()
+    // `clip`, not `hidden`: the sheet must not become a scroll container.
+    expect(face).toMatch(/overflow-x:\s*clip/)
+  })
+})
+
 describe('the printed amount', () => {
   it('is on the face before anything is claimed, and keeps the no-wallet CTA', () => {
     view('no-wallet')
