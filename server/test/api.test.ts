@@ -775,6 +775,72 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
   })
 
   /**
+   * round-3 review R5. F8 made SEQUENTIAL retries free and left concurrent ones
+   * charged: the retry recheck that spares a duplicate runs inside the
+   * allocation transaction, but the charge happened before it, so ten copies of
+   * one request sent at once all found no existing claim, all spent a token,
+   * one reserved and nine returned the winner's claim. Ten tokens for one
+   * reservation — a claimant double-tapping a button, or any client with
+   * retry-on-timeout, could lock a drop out on their own. Whether a retry is
+   * sequential or concurrent is not something the idempotency contract lets a
+   * client control, so it must not change what the retry costs.
+   */
+  it('ten CONCURRENT identical retries spend one token, not ten', async () => {
+    // The per-WALLET bucket (5/min) is charged per request by design and is a
+    // limit the retrying wallet imposes on itself; raising it here leaves the
+    // per-DROP bucket — the one a retry can aim at everybody else — as the only
+    // thing this test measures.
+    app = makeApp({
+      pool,
+      chain,
+      alerts: consoleAlerts(),
+      now,
+      limits: { claimsPerWalletPerWindow: 50 },
+    })
+    const draft = await liveDrop({ claimCount: 20 })
+
+    const wallet = newWallet()
+    const issued = await challenge(draft.publicId, '203.0.113.30')
+    const body = {
+      challengeId: issued.challengeId,
+      publicKey: wallet.publicKeyHex,
+      signature: wallet.sign(issued.message),
+    }
+    const idemKey = randomUUID()
+
+    // True concurrency: one Promise.all, no awaits in between. Every request is
+    // byte-identical, which is exactly the retry the contract invites.
+    const responses = await Promise.all(
+      Array.from({ length: 10 }, () =>
+        post(`/api/drops/${draft.publicId}/claims`, {
+          ip: '203.0.113.30',
+          idemKey,
+          body,
+        }),
+      ),
+    )
+
+    const claimIds = new Set<string>()
+    for (const [i, res] of responses.entries()) {
+      expect(res.status, `concurrent retry ${i + 1} status ${res.status}`).toBe(202)
+      claimIds.add(((await res.json()) as { claimId: string }).claimId)
+    }
+    expect(claimIds.size, 'ten copies of one request must produce ONE claim').toBe(1)
+
+    // One token spent by the one reservation those ten requests produced, so
+    // nine more genuinely new claimants still fit before the bucket is empty.
+    for (let i = 0; i < 9; i++) {
+      const res = await claim(draft.publicId, newWallet(), { ip: `192.0.2.${i + 1}` })
+      expect(res.status, `new claimant ${i + 1} status ${res.status}`).toBe(202)
+    }
+    await expectEnvelope(
+      await claim(draft.publicId, newWallet(), { ip: '192.0.2.98' }),
+      429,
+      'rate_limited',
+    )
+  })
+
+  /**
    * The other half of F8: a replayed challenge cannot allocate, so it must not
    * be charged either. Anyone can lift a challenge id out of a shared link and
    * sign the same message with their own key — that request is refused on the

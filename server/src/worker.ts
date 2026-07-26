@@ -70,12 +70,26 @@ export async function runWorker(chain: ChainClient, alerts: Alerts): Promise<voi
     const network = await ensureNetworkBinding(pool, chain)
     log('network_binding_verified', { network })
 
-    // Order matters: refresh the custody balance FIRST, otherwise every
-    // `lockControls` call fails closed as stale and the worker can do nothing.
-    await reconcile(pool, chain, alerts)
-    // Then resolve every attempt whose outcome is unknown, BEFORE signing any
-    // new work (design §8.3).
+    // Order matters, and round-3 R4 REVERSED it. Attempts first:
+    //
+    //  - resolving open attempts takes no custody lock and needs no fresh
+    //    reconciliation, so nothing about it depends on the cross-check having
+    //    run; but
+    //  - the cross-check's verdict very much depends on the attempts. A
+    //    restart after crash window (b) — the network has the transaction, the
+    //    database still says `signed` — leaves an attempt whose money the chain
+    //    has already debited. Reconciling that attempt first turns it into the
+    //    `broadcast` row the cross-check can account for. Reconciling solvency
+    //    first meant comparing a debited chain balance against books that had
+    //    not yet learned about the debit, which pauses custody on a restart
+    //    that is behaving exactly as designed — and confirming the attempt
+    //    afterwards does not unpause anything.
+    //
+    // No new work can be signed before both are done: signing happens in the
+    // tick loop below, and `lockControls` fails closed on staleness until the
+    // reconciliation on the next line succeeds.
     await reconcileOnStartup(pool, chain, alerts)
+    await reconcile(pool, chain, alerts)
     log('startup_reconciled')
 
     let lastSolvencyAt = Date.now()

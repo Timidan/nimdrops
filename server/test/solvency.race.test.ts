@@ -125,15 +125,24 @@ async function insertAttempt(
     transferId: string
     state: 'signed' | 'broadcast' | 'confirmed' | 'proven_dead'
     feeLuna?: bigint
-    /** How long ago the attempt was created; the in-flight offset is age-bounded (N1). */
+    /** Wall-clock age. Since round-3 R4 the in-flight bound no longer reads it. */
     createdAgoSeconds?: number
+    /** The height the bytes were signed against; the in-flight bound reads THIS. */
+    validityStartHeight?: number
+    /**
+     * Whether a broadcast was ever attempted (migration 010). A `signed`
+     * attempt with this set is the ambiguous case: the bytes may be on the
+     * network and the chain may already have debited them.
+     */
+    broadcastAttempted?: boolean
   },
 ): Promise<string> {
   const { rows } = await db.query<{ id: string }>(
     `INSERT INTO transaction_attempts (
        transfer_id, sequence, state, raw_signed_tx, tx_hash, fee_luna, validity_start_height,
-       created_at
-     ) VALUES ($1, 1, $2, $3, $4, $5, 1, now() - make_interval(secs => $6::float8))
+       created_at, broadcast_attempted_at
+     ) VALUES ($1, 1, $2, $3, $4, $5, $7, now() - make_interval(secs => $6::float8),
+       CASE WHEN $8::bool THEN now() ELSE NULL END)
      RETURNING id`,
     [
       o.transferId,
@@ -142,6 +151,8 @@ async function insertAttempt(
       randomUUID(),
       (o.feeLuna ?? 0n).toString(),
       o.createdAgoSeconds ?? 0,
+      (o.validityStartHeight ?? 1).toString(),
+      o.broadcastAttempted ?? o.state !== 'signed',
     ],
   )
   return rows[0].id
@@ -173,7 +184,12 @@ async function setControls(o: {
        operator_float_luna = $6,
        last_reconciled_height = CASE WHEN $5::float8 IS NULL THEN NULL ELSE 1000 END,
        last_reconciled_at = CASE WHEN $5::float8 IS NULL THEN NULL
-                                 ELSE now() - make_interval(secs => $5::float8 / 1000) END
+                                 ELSE now() - make_interval(secs => $5::float8 / 1000) END,
+       -- Round-3 R3: the shortfall verdict and the observation generation are
+       -- part of the controls row every test starts from.
+       reconcile_observed_seq = 0,
+       shortfall_detected_at = NULL,
+       shortfall_observed_height = NULL
      WHERE singleton`,
     [
       o.paused ?? false,
@@ -768,6 +784,227 @@ describe.skipIf(!hasDb)('solvency and custody controls (real Postgres)', () => {
     expect(spy.seen).toHaveLength(0)
   })
 
+  // ---- R4: ambiguous broadcasts, and a height-based in-flight bound ---------------
+
+  /**
+   * A 4_395-luna payout plus a 5-luna fee against 5_000 of float, with the
+   * chain holding the 600 that leaves. Whether that reads as a shortfall is
+   * entirely a question of whether the attempt is allowed to explain it.
+   */
+  async function payoutAgainstDebitedChain(o: {
+    state: 'signed' | 'broadcast'
+    broadcastAttempted?: boolean
+    validityStartHeight?: number
+    createdAgoSeconds?: number
+  }): Promise<FakeChain> {
+    await setControls({ operatorFloatLuna: 5_000n })
+    const drop = await insertDrop(pool, { claimCount: 5, amountEachLuna: 100n, activated: false })
+    const claim = await insertClaim(pool, drop.id, 0)
+    const transfer = await insertTransfer(pool, {
+      purpose: 'payout',
+      dropId: drop.id,
+      claimId: claim.id,
+      amountLuna: 4_395n,
+      state: 'in_progress',
+    })
+    await insertAttempt(pool, { transferId: transfer.id, feeLuna: 5n, ...o })
+
+    const chain = new FakeChain({ custody: CUSTODY, finalityDepth: 5 })
+    chain.deposit({
+      hash: `custody-${randomUUID()}`,
+      sender: 'NQ07 OPERATOR',
+      recipient: CUSTODY,
+      valueLuna: 600n,
+      includedHeight: 1,
+    })
+    chain.setHead(1_000)
+    return chain
+  }
+
+  it('an AMBIGUOUS broadcast explains the money the chain took, and does not pause custody', async () => {
+    // Crash window (b), which the G1 harness produces on purpose: the network
+    // accepted the transaction and the process died before `markBroadcast`. The
+    // row still says `signed`, but `broadcast_attempted_at` is set, so the
+    // chain really can have debited it — and on restart the cross-check must
+    // not read its own payment as a hole in custody.
+    const chain = await payoutAgainstDebitedChain({
+      state: 'signed',
+      broadcastAttempted: true,
+      validityStartHeight: 990,
+    })
+
+    const spy = spyAlerts()
+    await reconcile(pool, chain, spy.alerts, { windowBlocks: 100 })
+
+    const controls = await readControls(pool)
+    expect(controls.paused, 'an ambiguous broadcast is a payment, not a shortfall').toBe(false)
+    expect(controls.shortfallDetectedAt).toBeNull()
+    expect(spy.seen).toHaveLength(0)
+  })
+
+  it('…while an attempt whose bytes never left still does not', async () => {
+    // The control. Same numbers, same state on the row, one difference: nothing
+    // ever tried to broadcast it, so it cannot be where the money went.
+    const chain = await payoutAgainstDebitedChain({
+      state: 'signed',
+      broadcastAttempted: false,
+      validityStartHeight: 990,
+    })
+
+    const spy = spyAlerts()
+    await reconcile(pool, chain, spy.alerts, { windowBlocks: 100 })
+
+    const controls = await readControls(pool)
+    expect(controls.paused).toBe(true)
+    expect(controls.shortfallDetectedAt).not.toBeNull()
+    expect(spy.seen.filter((a) => a.detail.neverBroadcast === 1)).toHaveLength(1)
+  })
+
+  it('bounds the in-flight offset by the validity HEIGHT, not by wall-clock age', async () => {
+    // Signed three hours ago against a height the head has not passed. On a
+    // chain that stalled, or under any clock skew, the old age bound dropped
+    // this from the offset while the transaction was still perfectly
+    // includable — and the payment it then could not explain false-paused
+    // custody.
+    const chain = await payoutAgainstDebitedChain({
+      state: 'broadcast',
+      createdAgoSeconds: 3 * 3600,
+      validityStartHeight: 990,
+    })
+
+    await reconcile(pool, chain, spyAlerts().alerts, { windowBlocks: 100 })
+
+    const controls = await readControls(pool)
+    expect(controls.paused, 'a still-includable transaction explains the debit').toBe(false)
+  })
+
+  it('…and drops it the moment the head passes that height', async () => {
+    // The other side of the same bound: past `validity_start_height + window`
+    // nobody can include these bytes, so they can never explain missing money
+    // however recently they were signed.
+    const chain = await payoutAgainstDebitedChain({
+      state: 'broadcast',
+      createdAgoSeconds: 0,
+      validityStartHeight: 100,
+    })
+
+    await reconcile(pool, chain, spyAlerts().alerts, { windowBlocks: 100 })
+
+    const controls = await readControls(pool)
+    expect(controls.paused, 'an unincludable transaction is not an alibi').toBe(true)
+  })
+
+  // ---- R3: a reconciliation verdict is owned by the newest observation -------------
+
+  function deferred(): { promise: Promise<void>; resolve: () => void } {
+    let resolve = (): void => {}
+    const promise = new Promise<void>((r) => {
+      resolve = r
+    })
+    return { promise, resolve }
+  }
+
+  it('a stalled clean pass cannot erase a shortfall stamped from a later observation', async () => {
+    await setControls({ operatorFloatLuna: 5_000n })
+    const chain = new FakeChain({ custody: CUSTODY, finalityDepth: 5 })
+    chain.deposit({
+      hash: 'custody-healthy',
+      sender: 'NQ07 OPERATOR',
+      recipient: CUSTODY,
+      valueLuna: 5_000n,
+      includedHeight: 1,
+    })
+    chain.setHead(20)
+
+    // 1. Pass A observes a healthy chain, then stalls before its write. The
+    //    worker runs one of these every 60s and every activation runs another,
+    //    so two in flight at once is ordinary, not exotic.
+    const observed = deferred()
+    const release = deferred()
+    const passA = reconcile(pool, chain, spyAlerts().alerts, {
+      onObserved: async () => {
+        observed.resolve()
+        await release.promise
+      },
+    })
+    await observed.promise
+
+    // 2. Money leaves custody out of band — the condition the cross-check exists
+    //    for.
+    chain.deposit({
+      hash: 'out-of-band-debit',
+      sender: CUSTODY,
+      recipient: 'NQ07 ELSEWHERE',
+      valueLuna: 4_000n,
+      includedHeight: 2,
+    })
+
+    // 3. Pass B sees it, stamps the verdict and pauses.
+    const passB = await reconcile(pool, chain, spyAlerts().alerts)
+    expect(passB.short).toBe(true)
+    expect(passB.accepted).toBe(true)
+    const afterB = await readControls(pool)
+    expect(afterB.shortfallDetectedAt).not.toBeNull()
+
+    // 4. Pass A finally writes. Its `ELSE NULL` used to clear B's verdict, and
+    //    an operator's `unpause` then reopened every money path against a
+    //    wallet already observed short.
+    release.resolve()
+    const resultA = await passA
+    expect(resultA.accepted, 'an older observation must not overwrite a newer one').toBe(false)
+
+    const afterA = await readControls(pool)
+    expect(afterA.shortfallDetectedAt, 'the newer shortfall verdict must stand').not.toBeNull()
+    expect(afterA.shortfallDetectedAt?.getTime()).toBe(afterB.shortfallDetectedAt?.getTime())
+    expect(afterA.paused).toBe(true)
+    // And the verdict still outlives an operator's `unpause` (N3), which is
+    // the whole reason erasing it mattered.
+    await unpause(pool)
+    await expect(moneyPathWouldPass()).rejects.toBeInstanceOf(UnreconciledShortfallError)
+  })
+
+  it('a clean pass from an OLDER chain head cannot clear a standing shortfall', async () => {
+    await setControls({ operatorFloatLuna: 5_000n })
+
+    // The shortfall is observed at head 1000.
+    const short = new FakeChain({ custody: CUSTODY, finalityDepth: 5 })
+    short.deposit({
+      hash: 'custody-partial',
+      sender: 'NQ07 OPERATOR',
+      recipient: CUSTODY,
+      valueLuna: 1_000n,
+      includedHeight: 1,
+    })
+    short.setHead(1_000)
+    expect((await reconcile(pool, short, spyAlerts().alerts)).short).toBe(true)
+    const stamped = (await readControls(pool)).shortfallDetectedAt
+    expect(stamped).not.toBeNull()
+
+    // A second process, whose node is behind, finishes an observation later and
+    // reports a healthy wallet — as of a view of the chain that predates the
+    // money leaving. It may refresh the numbers; it may not overrule a verdict
+    // formed from a later view.
+    const lagging = new FakeChain({ custody: CUSTODY, finalityDepth: 5 })
+    lagging.deposit({
+      hash: 'custody-full',
+      sender: 'NQ07 OPERATOR',
+      recipient: CUSTODY,
+      valueLuna: 5_000n,
+      includedHeight: 1,
+    })
+    lagging.setHead(500)
+    const stale = await reconcile(pool, lagging, spyAlerts().alerts)
+    expect(stale.accepted, 'the numbers are refreshed').toBe(true)
+
+    const after = await readControls(pool)
+    expect(after.shortfallDetectedAt?.getTime()).toBe(stamped?.getTime())
+
+    // Caught up, the same healthy reading does clear it.
+    lagging.setHead(1_100)
+    await reconcile(pool, lagging, spyAlerts().alerts)
+    expect((await readControls(pool)).shortfallDetectedAt).toBeNull()
+  })
+
   // ---- N3: a shortfall outlives `unpause` -----------------------------------------
 
   /** Take the controls and run the invariant, exactly as every money path does. */
@@ -920,6 +1157,13 @@ describe.skipIf(!hasDb)('solvency and custody controls (real Postgres)', () => {
     return { chain, transferId: transfer.id, attemptId }
   }
 
+  /**
+   * The head `aboutToConfirm`'s chain sits at. The in-flight offset is bounded
+   * by the attempt's own validity height against the head (round-3 R4), so the
+   * direct calls below must be made against the same head `reconcile()` uses.
+   */
+  const SNAPSHOT_HEAD = 20
+
   /** The worker's confirmation, committed atomically from another connection. */
   async function confirmPayment(transferId: string, attemptId: string): Promise<void> {
     const client = await pool.connect()
@@ -964,7 +1208,7 @@ describe.skipIf(!hasDb)('solvency and custody controls (real Postgres)', () => {
     const controls = await readControls(pool)
     const ledgerBefore = await ledgerBalanceLuna(pool, controls)
     await confirmPayment(transferId, attemptId)
-    const inFlightAfter = await inFlightOutgoingLuna(pool)
+    const inFlightAfter = await inFlightOutgoingLuna(pool, SNAPSHOT_HEAD)
 
     expect(ledgerBefore).toBe(5_500n)
     expect(inFlightAfter).toBe(0n)
@@ -977,7 +1221,7 @@ describe.skipIf(!hasDb)('solvency and custody controls (real Postgres)', () => {
       await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY')
       const snapControls = await readControls(client)
       const ledger = await ledgerBalanceLuna(client, snapControls)
-      const inFlight = await inFlightOutgoingLuna(client)
+      const inFlight = await inFlightOutgoingLuna(client, SNAPSHOT_HEAD)
       await client.query('COMMIT')
       expect(ledger - inFlight).toBe(5_095n)
     } finally {

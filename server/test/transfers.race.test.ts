@@ -15,12 +15,16 @@ import {
   NetworkBindingUnconfirmedError,
   NetworkMismatchError,
   ensureNetworkBinding,
+  readControls,
+  reconcile,
 } from '../src/services/solvency'
 import {
   CLAIM_MEMO,
   WORKER_LOCK_ID,
   acquireWorkerLock,
   evaluateProvenDead,
+  loadOpenAttempts,
+  progressAttempt,
   reconcileOnStartup,
   releaseWorkerLock,
   runWorkerTick,
@@ -268,13 +272,14 @@ interface AttemptRow {
   last_error: string | null
   absent_checks: number
   first_absent_at: Date | null
+  broadcast_attempted_at: Date | null
 }
 
 async function readAttempts(transferId: string): Promise<AttemptRow[]> {
   const { rows } = await pool.query<AttemptRow>(
     `SELECT id, sequence, state, encode(raw_signed_tx, 'hex') AS raw_hex, tx_hash, fee_luna,
             validity_start_height, observed_height, confirmed_height, last_error,
-            absent_checks, first_absent_at
+            absent_checks, first_absent_at, broadcast_attempted_at
      FROM transaction_attempts WHERE transfer_id = $1 ORDER BY sequence`,
     [transferId],
   )
@@ -1118,6 +1123,151 @@ describe.skipIf(!hasDb)('transfer worker crash windows (real Postgres)', () => {
     expect(attempts[0].state, 'a landed transaction is never proven_dead').not.toBe('proven_dead')
     expect(attempts[0].absent_checks).toBe(0)
     expect(custodyPayments()).toHaveLength(1)
+  })
+
+  // ---- R4: an ambiguous broadcast is not a missing payment ------------------------
+
+  it('a restart in the ambiguous-broadcast window does not pause custody', async () => {
+    const payout = await queuedPayout()
+    // Crash window (b): the network took the transaction and the process died
+    // before `markBroadcast` could commit. The row says `signed`; the chain has
+    // already debited custody.
+    chain.failNextBroadcast('timeout-but-lands')
+    await runWorkerTick(pool, chain, alerts)
+
+    const [attempt] = await readAttempts(payout.transferId)
+    expect(attempt.state).toBe('signed')
+    expect(
+      attempt.broadcast_attempted_at,
+      'the marker is written BEFORE the bytes leave, so a crash cannot lose it',
+    ).not.toBeNull()
+    expect(custodyPayments(), 'the money really has left custody').toHaveLength(1)
+
+    // Restart. Even in the WRONG order — solvency before attempts, which is
+    // what worker.ts used to do — the ambiguous attempt explains the debit, so
+    // the cross-check must not read the worker's own payment as a shortfall.
+    await reconcile(pool, chain, alerts)
+    let controls = await readControls(pool)
+    expect(controls.paused, 'an ambiguous broadcast is not a hole in custody').toBe(false)
+    expect(controls.shortfallDetectedAt).toBeNull()
+
+    // And in the order worker.ts now uses, attempts first, the attempt is
+    // resolved to `broadcast` before the cross-check ever looks.
+    await reconcileOnStartup(pool, chain, alerts)
+    expect((await readAttempts(payout.transferId))[0].state).toBe('broadcast')
+    await reconcile(pool, chain, alerts)
+    controls = await readControls(pool)
+    expect(controls.paused).toBe(false)
+    expect(controls.shortfallDetectedAt).toBeNull()
+
+    // …and the payment finishes normally, with exactly one transaction.
+    chain.setHead((await chain.headHeight()) + FINALITY_DEPTH + 1)
+    await runWorkerTick(pool, chain, alerts)
+    expect((await readAttempts(payout.transferId))[0].state).toBe('confirmed')
+    expect(custodyPayments()).toHaveLength(1)
+  })
+
+  // ---- R1: a sighting in flight is not a sighting recovery may ignore -------------
+
+  function deferred(): { promise: Promise<void>; resolve: () => void } {
+    let resolve = (): void => {}
+    const promise = new Promise<void>((r) => {
+      resolve = r
+    })
+    return { promise, resolve }
+  }
+
+  it('a worker sighting still in flight blocks recovery from consuming the stale series', async () => {
+    const { payout, attempt } = await deadLookingAttempt()
+
+    // A complete, aged absence series — everything `replace` asks of the
+    // recorded evidence is already in place.
+    await reconcileOnStartup(pool, chain, alerts)
+    await reconcileOnStartup(pool, chain, alerts)
+    await ageAbsenceSeries(payout.transferId, '10 minutes')
+    expect((await readAttempts(payout.transferId))[0].absent_checks).toBe(2)
+
+    // The transaction was in an invisible mempool all along and is now on chain.
+    await chain.broadcast(attempt.raw_hex)
+
+    // The worker asks the chain and gets the truth — and then stalls, before it
+    // can write down what it learned. Round-3 R1: the lookup and the write used
+    // to be two unsynchronized steps, and this gap is the whole finding.
+    const looked = deferred()
+    const release = deferred()
+    const stalling = chainWith(chain, {
+      getTransaction: async (hash) => {
+        const tx = await chain.getTransaction(hash)
+        if (hash === attempt.tx_hash) {
+          looked.resolve()
+          await release.promise
+        }
+        return tx
+      },
+    })
+    const worker = reconcileOnStartup(pool, stalling, alerts)
+    await looked.promise
+
+    // Meanwhile the operator runs `replace`, and THEIR node answers not-found —
+    // one transient answer from one node, which the still-unreset series is
+    // about to corroborate into a second payment.
+    const transient = chainWith(chain, { getTransaction: async () => null })
+    const operator = replaceTransfer(pool, transient, alerts, payout.transferId).then(
+      () => 'replaced' as const,
+      (err: unknown) => err,
+    )
+    // Give it every chance to get ahead of the stalled worker: it must be
+    // parked on the attempt row lock, not racing for it.
+    await new Promise((r) => setTimeout(r, 100))
+    expect(await readAttempts(payout.transferId), 'no replacement may exist yet').toHaveLength(1)
+
+    release.resolve()
+    await worker
+    const outcome = await operator
+
+    expect(outcome, 'the operator command must have refused').toBeInstanceOf(ReplaceRefusedError)
+    const attempts = await readAttempts(payout.transferId)
+    expect(attempts, 'no replacement may have been signed').toHaveLength(1)
+    expect(attempts[0].state, 'a landed transaction is never proven_dead').not.toBe('proven_dead')
+    expect(attempts[0].absent_checks, "the worker's sighting voided the series").toBe(0)
+    expect(custodyPayments(), 'nothing may have been paid twice').toHaveLength(1)
+  })
+
+  it('a proven_dead attempt found on chain is a reconciliation emergency, never a silent no-op', async () => {
+    const { payout, attempt: first } = await deadLookingAttempt()
+    await reconcileOnStartup(pool, chain, alerts)
+    await reconcileOnStartup(pool, chain, alerts)
+    await ageAbsenceSeries(payout.transferId, '10 minutes')
+
+    // The worker loads the attempt while it is still open — its snapshot from
+    // here on is stale, which is exactly the situation a tick is in.
+    const [openBefore] = await loadOpenAttempts(pool, payout.transferId)
+
+    // The operator replaces it: attempt 1 is proven_dead, attempt 2 is live.
+    await replaceTransfer(pool, chain, alerts, payout.transferId)
+    expect((await readAttempts(payout.transferId))[0].state).toBe('proven_dead')
+
+    // …and then the "dead" transaction lands after all. Two payments for one
+    // claim now exist on chain.
+    await chain.broadcast(first.raw_hex)
+    chain.setHead((await chain.headHeight()) + FINALITY_DEPTH + 1)
+
+    alerts.sent.length = 0
+    const progress = await progressAttempt(pool, chain, alerts, openBefore)
+
+    expect(progress).toBe('changed')
+    // It must NOT be confirmed: marking the intent paid on a transaction an
+    // operator already replaced would hide the duplicate instead of surfacing it.
+    const attempts = await readAttempts(payout.transferId)
+    expect(attempts[0].state).toBe('proven_dead')
+    expect(attempts[0].tx_hash).toBe(first.tx_hash)
+    expect((await readTransfer(payout.transferId)).state).toBe('manual_review')
+    expect(await readClaimState(payout.claimId)).toBe('manual_review')
+
+    const flagged = alerts.sent.filter((a) => a.detail.reason === 'proven_dead_attempt_landed')
+    expect(flagged, 'an operator must be told both hashes may have paid').toHaveLength(1)
+    expect(flagged[0].alert).toBe('manual_review')
+    expect(flagged[0].detail).toMatchObject({ txHash: first.tx_hash })
   })
 
   // ---- F6: fail closed, not open --------------------------------------------------

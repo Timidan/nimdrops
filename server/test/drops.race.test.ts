@@ -356,6 +356,48 @@ describe.skipIf(!hasDb)('drop drafts and exact funding activation (real Postgres
     expect(await outstandingPrincipalLuna(pool)).toBe(PRINCIPAL)
   })
 
+  it('refuses to fund a drop with a deposit already attested as operator float', async () => {
+    // Round-3 R2. The operator attested a memo-less deposit as float — the
+    // ledger already counts it once. Activating a drop with the same hash would
+    // count it a second time, as principal owed to claimants, out of money that
+    // was only ever in custody once.
+    const d = await draft()
+    const hash = fund(d.publicId, { memo: null })
+    finalize()
+    await pool.query(
+      `INSERT INTO operator_float_deposits (tx_hash, value_luna, included_height, network)
+       VALUES ($1, $2, $3, 'TestAlbatross')`,
+      [hash, PRINCIPAL.toString(), String(FUND_HEIGHT)],
+    )
+
+    await expectRejection(
+      submitFunding(pool, chain, { publicId: d.publicId, txHash: hash }),
+      'attested_as_float',
+    )
+    expect((await readDrop(d.publicId)).state).toBe('awaiting_funding')
+    expect(await outstandingPrincipalLuna(pool)).toBe(0n)
+  })
+
+  it('the database refuses it too, even if the service check is bypassed', async () => {
+    // The same rule as a schema constraint (migration 008): the pre-check above
+    // is a better error message, not the guarantee.
+    const d = await draft()
+    const hash = fund(d.publicId)
+    finalize()
+    await pool.query(
+      `INSERT INTO operator_float_deposits (tx_hash, value_luna, included_height, network)
+       VALUES ($1, $2, $3, 'TestAlbatross')`,
+      [hash, PRINCIPAL.toString(), String(FUND_HEIGHT)],
+    )
+
+    const { rows } = await pool.query<{ id: string }>('SELECT id FROM drops WHERE public_id = $1', [
+      d.publicId,
+    ])
+    await expect(
+      pool.query('UPDATE drops SET funding_tx_hash = $2 WHERE id = $1', [rows[0].id, hash]),
+    ).rejects.toThrow(/attested as operator float/i)
+  })
+
   // ---- finality -------------------------------------------------------------
 
   it('holds a not-yet-final funding in funding_pending, then activates when the head crosses finality', async () => {

@@ -1,6 +1,6 @@
 import type { Pool, PoolClient } from 'pg'
 import type { ChainClient } from '../chain/types'
-import { BLOCK_SEPARATION_MS, type NetworkName, validityWindowBlocks } from '../config'
+import { type NetworkName, validityWindowBlocks } from '../config'
 import type { Queryable } from '../db/pool'
 import { type Alerts, consoleAlerts } from './alerts'
 
@@ -290,28 +290,42 @@ export async function ledgerBalanceLuna(db: Queryable, controls: Controls): Prom
 }
 
 /**
- * How long an attempt may still be counted as legitimately in flight.
+ * Observation an in-flight query is made against.
  *
- * The same window the chain itself enforces (`validity_start_height + 7200`
- * blocks at one block per second), measured in wall time because attempt rows
- * carry a timestamp rather than a head height. Past it the transaction cannot
- * be included by anyone, so it can no longer be the explanation for money
- * missing from custody.
+ * `head` is the chain head the caller has just read; `windowBlocks` is the
+ * validity window (`@internal` test-only override — production reads the
+ * floored config).
  */
-export function inFlightMaxAgeMs(windowBlocks: number = validityWindowBlocks()): number {
-  return windowBlocks * BLOCK_SEPARATION_MS
+export interface InFlightOptions {
+  windowBlocks?: number
 }
 
-/** @internal test-only override; production reads the floored config. */
-export interface InFlightOptions {
-  maxAgeMs?: number
-}
+/**
+ * SQL predicate for "this attempt could still legitimately debit custody".
+ *
+ * Two halves, and both are about PROVABILITY rather than about elapsed time:
+ *
+ *  - the bytes were handed to the network (`broadcast`, or `signed` with a
+ *    recorded broadcast attempt — see below), and
+ *  - the chain can still include them: `head <= validity_start_height +
+ *    window`. This is the chain's own deadline, read from the height the
+ *    attempt was signed against, which is why it is compared against a HEAD
+ *    and not against wall-clock age (round-3 R4). A slow or stalled chain used
+ *    to age a still-includable transaction out of the offset, and the payment
+ *    it then failed to explain false-paused custody.
+ *
+ * `$1` is the head, `$2` the window in blocks.
+ */
+const STILL_IN_FLIGHT = `
+  (a.state = 'broadcast' OR (a.state = 'signed' AND a.broadcast_attempted_at IS NOT NULL))
+  AND a.validity_start_height + $2::bigint >= $1::bigint
+`
 
 /**
  * Money that has been committed to leaving custody but is not yet finalized in
  * the ledger, and that can still plausibly explain a chain balance below the
- * books: an attempt that was actually BROADCAST and is still inside its
- * validity window, plus that attempt's fee.
+ * books: an attempt whose bytes reached the network and that the chain can
+ * still include, plus that attempt's fee.
  *
  * Used ONLY by the chain cross-check. The chain debits a payment the moment it
  * lands, while the ledger waits for our own finality depth, so during that
@@ -319,16 +333,24 @@ export interface InFlightOptions {
  * every in-flight payout would look like a shortfall and pause custody.
  *
  * Two exclusions, both from round-2 review N1. The offset used to cover every
- * `signed`/`broadcast` attempt with no age bound, which turned it into a
+ * `signed`/`broadcast` attempt with no bound at all, which turned it into a
  * permanent alibi: ONE stale attempt sitting open forever subtracted its amount
  * from the cross-check for as long as it existed, so a real custody shortfall
- * of the same size never showed up at all.
+ * of the same size never showed up.
  *
- *  - **`signed` but never broadcast.** The bytes never left this process, so
- *    the chain cannot possibly have debited them. Counting them as an
- *    explanation for missing money is counting a payment that was never made.
- *  - **Older than the validity window.** Past its deadline a transaction is
+ *  - **Never handed to the network.** The bytes never left this process, so the
+ *    chain cannot possibly have debited them. Counting them as an explanation
+ *    for missing money is counting a payment that was never made.
+ *  - **Past the validity window.** Past its deadline a transaction is
  *    unincludable, so custody will never be debited for it either.
+ *
+ * Round-3 R4 fixed how the first exclusion was MEASURED. It keyed on the
+ * attempt's state, and `signed` covers two different facts: bytes that were
+ * never broadcast, and bytes whose broadcast outcome is unknown because the
+ * call threw or the process died between the network accepting them and
+ * `markBroadcast` committing. The second kind really can have debited custody.
+ * `broadcast_attempted_at` (migration 010) records which is which, written
+ * before the call so a crash cannot lose it.
  *
  * Anything excluded here is money the books think is leaving and the chain will
  * never take. That is an operator condition in its own right — see
@@ -336,15 +358,15 @@ export interface InFlightOptions {
  */
 export async function inFlightOutgoingLuna(
   db: Queryable,
+  head: number,
   opts?: InFlightOptions,
 ): Promise<bigint> {
   const { rows } = await db.query<{ in_flight_luna: string }>(
     `SELECT COALESCE(SUM(t.amount_luna + a.fee_luna), 0)::BIGINT AS in_flight_luna
      FROM transaction_attempts a
      JOIN outgoing_transfers t ON t.id = a.transfer_id
-     WHERE a.state = 'broadcast'
-       AND a.created_at > now() - make_interval(secs => $1::float8 / 1000)`,
-    [opts?.maxAgeMs ?? inFlightMaxAgeMs()],
+     WHERE ${STILL_IN_FLIGHT}`,
+    [head.toString(), (opts?.windowBlocks ?? validityWindowBlocks()).toString()],
   )
   return BigInt(rows[0].in_flight_luna)
 }
@@ -354,7 +376,7 @@ export interface StaleInFlight {
   count: number
   /** Their principal plus fees — money the books expect to leave and the chain will not take. */
   lunaTotal: bigint
-  /** Never handed to the network at all: `signed`, no acknowledged broadcast. */
+  /** Never handed to the network at all: `signed`, with no recorded broadcast attempt. */
   neverBroadcastCount: number
 }
 
@@ -366,6 +388,7 @@ export interface StaleInFlight {
  */
 export async function staleInFlightOutgoing(
   db: Queryable,
+  head: number,
   opts?: InFlightOptions,
 ): Promise<StaleInFlight> {
   const { rows } = await db.query<{
@@ -375,15 +398,14 @@ export async function staleInFlightOutgoing(
   }>(
     `SELECT count(*)::int AS n,
             COALESCE(SUM(t.amount_luna + a.fee_luna), 0)::BIGINT AS luna_total,
-            count(*) FILTER (WHERE a.state = 'signed')::int AS never_broadcast
+            count(*) FILTER (
+              WHERE a.state = 'signed' AND a.broadcast_attempted_at IS NULL
+            )::int AS never_broadcast
      FROM transaction_attempts a
      JOIN outgoing_transfers t ON t.id = a.transfer_id
      WHERE a.state IN ('signed', 'broadcast')
-       AND NOT (
-         a.state = 'broadcast'
-         AND a.created_at > now() - make_interval(secs => $1::float8 / 1000)
-       )`,
-    [opts?.maxAgeMs ?? inFlightMaxAgeMs()],
+       AND NOT (${STILL_IN_FLIGHT})`,
+    [head.toString(), (opts?.windowBlocks ?? validityWindowBlocks()).toString()],
   )
   return {
     count: rows[0].n,
@@ -496,7 +518,31 @@ export const CROSS_CHECK_EPSILON_LUNA = 0n
  * that structural, and no lock is taken: reconciliation must never block a
  * payout it is trying to account for.
  */
-export async function reconcile(pool: Pool, chain: ChainClient, alerts?: Alerts): Promise<void> {
+export interface ReconcileOptions extends InFlightOptions {
+  /**
+   * TEST SEAM (R3): awaited once the observation is complete and its generation
+   * has been drawn, immediately BEFORE the write. It is the stall that makes
+   * the interleaving reachable, and nothing in production passes it.
+   * @internal
+   */
+  onObserved?: () => Promise<void>
+}
+
+export interface ReconcileResult {
+  /** The chain held less than the books could explain at this observation. */
+  short: boolean
+  /** Whether this observation was newer than the recorded one and therefore stamped. */
+  accepted: boolean
+  height: number
+  observationSeq: bigint
+}
+
+export async function reconcile(
+  pool: Pool,
+  chain: ChainClient,
+  alerts?: Alerts,
+  opts?: ReconcileOptions,
+): Promise<ReconcileResult> {
   const height = await chain.headHeight()
   const chainBalanceLuna = await chain.confirmedBalanceLuna(chain.custodyAddress())
 
@@ -508,8 +554,8 @@ export async function reconcile(pool: Pool, chain: ChainClient, alerts?: Alerts)
     await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY')
     const controls = await readControls(client)
     ledgerLuna = await ledgerBalanceLuna(client, controls)
-    inFlightLuna = await inFlightOutgoingLuna(client)
-    stale = await staleInFlightOutgoing(client)
+    inFlightLuna = await inFlightOutgoingLuna(client, height, opts)
+    stale = await staleInFlightOutgoing(client, height, opts)
     await client.query('COMMIT')
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {})
@@ -518,24 +564,26 @@ export async function reconcile(pool: Pool, chain: ChainClient, alerts?: Alerts)
     client.release()
   }
 
+  // The observation is COMPLETE here and nowhere earlier: the chain reads and
+  // the ledger snapshot are both behind us. Drawing the generation now orders
+  // passes by when they finished looking rather than by when they started, so
+  // a pass that began first but stalled correctly counts as the newer view
+  // (R3, migration 009).
+  const { rows: seqRows } = await pool.query<{ seq: string }>(
+    "SELECT nextval('reconcile_observation_seq')::BIGINT AS seq",
+  )
+  const observationSeq = BigInt(seqRows[0].seq)
+  if (opts?.onObserved) await opts.onObserved()
+
   const explainableMinimumLuna = ledgerLuna - inFlightLuna
   const short = chainBalanceLuna < explainableMinimumLuna - CROSS_CHECK_EPSILON_LUNA
 
-  // One statement stamps the cross-check AND the durable shortfall verdict (N3).
-  // `COALESCE` keeps the FIRST time the condition was seen across repeated
-  // failing passes; a clean pass is the only thing that writes NULL back.
-  await pool.query(
-    `UPDATE custody_controls
-     SET reconciled_confirmed_balance_luna = $1,
-         last_reconciled_height = $2,
-         last_reconciled_at = now(),
-         shortfall_detected_at = CASE
-           WHEN $3::bool THEN COALESCE(shortfall_detected_at, now())
-           ELSE NULL
-         END
-     WHERE singleton`,
-    [chainBalanceLuna.toString(), height.toString(), short],
-  )
+  const accepted = await writeReconciliation(pool, {
+    chainBalanceLuna,
+    height,
+    observationSeq,
+    short,
+  })
 
   const notify = alerts ?? consoleAlerts()
 
@@ -549,8 +597,21 @@ export async function reconcile(pool: Pool, chain: ChainClient, alerts?: Alerts)
       shortfallLuna: (explainableMinimumLuna - chainBalanceLuna).toString(),
       height,
     }
-    await pause(pool, `chain balance ${chainBalanceLuna} below ledger balance ${ledgerLuna}`)
-    await notify.notify('insolvent', detail)
+    if (accepted) {
+      await pause(pool, `chain balance ${chainBalanceLuna} below ledger balance ${ledgerLuna}`)
+      await notify.notify('insolvent', detail)
+    } else {
+      // Our shortfall was observed from an OLDER view than the one on record,
+      // which already says something newer. Overruling it would be the R3 bug
+      // in reverse — a stale pass deciding the current state of custody — so
+      // the verdict stands and the observation is reported instead of acted on.
+      // The next periodic reconciliation re-decides from a current view.
+      await notify.notify('manual_review', {
+        ...detail,
+        reason: 'superseded_shortfall_observation',
+        observationSeq: observationSeq.toString(),
+      })
+    }
   }
 
   // N1: attempts excluded from the offset above. Money the books have committed
@@ -565,6 +626,85 @@ export async function reconcile(pool: Pool, chain: ChainClient, alerts?: Alerts)
       lunaTotal: stale.lunaTotal.toString(),
       height,
     })
+  }
+
+  return { short, accepted, height, observationSeq }
+}
+
+/**
+ * Stamp the cross-check and the durable shortfall verdict — under the controls
+ * lock, and only from an observation that is not out of date (R3).
+ *
+ * Two independent guards, because an observation can be stale in two ways.
+ *
+ *  - **Generation.** The whole write is refused unless this observation's
+ *    generation is strictly greater than the one on record, i.e. unless it
+ *    finished looking after the observation currently written there. That is
+ *    what stops a stalled pass from landing its numbers — and its `ELSE NULL` —
+ *    on top of a later pass's.
+ *  - **Shortfall height.** A clean pass may always refresh the cross-check
+ *    numbers (refusing that would let a node lagging by a block stall
+ *    activations on staleness), but it may only CLEAR a standing shortfall if
+ *    its own chain view is at least as new as the head that shortfall was seen
+ *    at. Money missing at height H is not explained by a healthy reading taken
+ *    at height H − 5, whichever process finished first.
+ *
+ * `COALESCE` on the shortfall branch keeps the FIRST time the condition was
+ * seen across repeated failing passes, and its height with it.
+ *
+ * Returns whether the write was accepted. `false` is not an error: a newer pass
+ * has already stamped the row, so the freshness `lockControls` demands is
+ * satisfied and the verdict on record is the better-informed one.
+ */
+async function writeReconciliation(
+  pool: Pool,
+  o: { chainBalanceLuna: bigint; height: number; observationSeq: bigint; short: boolean },
+): Promise<boolean> {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    // Serializes two passes that would otherwise both read the recorded
+    // generation, both decide they are newer, and both write.
+    await client.query('SELECT 1 FROM custody_controls WHERE singleton FOR UPDATE')
+    const { rowCount } = await client.query(
+      `UPDATE custody_controls
+       SET reconciled_confirmed_balance_luna = $1,
+           last_reconciled_height = $2,
+           last_reconciled_at = now(),
+           reconcile_observed_seq = $3,
+           shortfall_detected_at = CASE
+             WHEN $4::bool THEN COALESCE(shortfall_detected_at, now())
+             WHEN shortfall_observed_height IS NOT NULL
+                  AND $2::bigint < shortfall_observed_height THEN shortfall_detected_at
+             ELSE NULL
+           END,
+           shortfall_observed_height = CASE
+             WHEN $4::bool THEN COALESCE(shortfall_observed_height, $2::bigint)
+             WHEN shortfall_observed_height IS NOT NULL
+                  AND $2::bigint < shortfall_observed_height THEN shortfall_observed_height
+             ELSE NULL
+           END
+       WHERE singleton
+         AND $3::bigint > reconcile_observed_seq`,
+      [o.chainBalanceLuna.toString(), o.height.toString(), o.observationSeq.toString(), o.short],
+    )
+    await client.query('COMMIT')
+    if (rowCount === 0) {
+      console.warn(
+        JSON.stringify({
+          event: 'reconcile_observation_superseded',
+          observationSeq: o.observationSeq.toString(),
+          height: o.height,
+          short: o.short,
+        }),
+      )
+    }
+    return rowCount !== 0
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw err
+  } finally {
+    client.release()
   }
 }
 

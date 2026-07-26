@@ -98,11 +98,11 @@ export interface ReserveClaimInput {
   /** Canonical hash of the request the key was used for. */
   requestHash: string
   /**
-   * Called once this request is known to be a GENUINELY NEW slot reservation:
-   * the wallet signature has verified, no idempotency record or existing claim
-   * answers it, and its challenge has not already been spent. The HTTP layer
-   * charges its per-drop rate-limit bucket here. Throwing from this hook aborts
-   * the reservation before anything is written.
+   * Called once, by the ONE request that is actually committing a new
+   * reservation. The HTTP layer charges its per-drop rate-limit bucket here.
+   * Throwing from this hook aborts the reservation: it runs inside the
+   * allocation transaction, immediately before the claim row is inserted, so a
+   * throw rolls back everything including the consumed challenge.
    *
    * G1 review finding 8 moved this behind signature verification, so an
    * unauthenticated flood — malformed bodies, unknown challenges, forged
@@ -110,11 +110,18 @@ export interface ReserveClaimInput {
    * behind the retry checks as well: a signature proves who is asking, not that
    * they are asking for anything NEW, so a claimant retrying their own request
    * (the exact thing the idempotency contract invites them to do) was still
-   * charged. Two wallets retrying five times each exhausted a ten-claim drop
-   * and locked out its real claimants — the same denial of service, now
-   * costing the attacker two valid signatures. Retries, already-claimed
-   * wallets and replayed challenges are all free; only a request that will
-   * attempt to take a slot pays.
+   * charged.
+   *
+   * Round-3 R5 moved it inside the transaction, which is the only place the
+   * question can actually be answered. The pre-lock retry check runs before any
+   * claim exists, so ten CONCURRENT copies of one retry all saw no claim, all
+   * charged the bucket, and nine of them then discovered under the lock that
+   * they were duplicates and returned the winner's claim — ten tokens spent on
+   * one reservation, a self-inflicted lockout from a claimant pressing a button
+   * ten times. Sequential retries were free and concurrent ones were not, which
+   * is not a distinction the idempotency contract lets a client control.
+   * Charging after the under-lock recheck makes duplicates free in both
+   * orderings: they never reach this line.
    */
   onAuthenticated?: () => void | Promise<void>
 }
@@ -368,17 +375,11 @@ export async function reserveClaim(pool: Pool, o: ReserveClaimInput): Promise<Cl
 
   // A challenge that has already been spent cannot become a reservation, so a
   // replay of one is not a new claim attempt either. The atomic consume inside
-  // the transaction remains the authority — this read only decides whether the
-  // request is worth charging for (round-2 F8), and answering it here is also
-  // the difference between a replay costing a drop's budget and costing nothing.
+  // the transaction remains the authority — this read only saves the pointless
+  // work of taking the custody lock for a request that cannot succeed.
   if (challenge.consumed_at !== null) {
     throw new ClaimRejectedError('challenge_consumed', 'challenge already used')
   }
-
-  // Everything above answers "does this wallet already have what it is asking
-  // for". Only past this line does the request actually try to TAKE a slot, so
-  // only past this line may it spend the drop's claim budget (findings 8, F8).
-  if (o.onAuthenticated) await o.onAuthenticated()
 
   // ---- allocation: one transaction, locks in the mandated order ---------------
 
@@ -459,7 +460,15 @@ export async function reserveClaim(pool: Pool, o: ReserveClaimInput): Promise<Cl
       )
     }
 
-    // 6. Claim, payout intent and idempotency record: one commit or none.
+    // 6. This request — and only this request — is now committing a NEW slot,
+    //    so this is where it pays for one (R5). Everything that could have made
+    //    it a duplicate, a replay or a refusal is behind us, and every other
+    //    concurrent copy of it is either still waiting for the custody lock or
+    //    has already left through the raced-claim branch above without paying.
+    //    A throw here rolls the whole allocation back, challenge included.
+    if (o.onAuthenticated) await o.onAuthenticated()
+
+    // 7. Claim, payout intent and idempotency record: one commit or none.
     //    The id is generated here, not by the database, so the bearer token can
     //    be derived before the row that stores its hash is written.
     const claimId = randomUUID()

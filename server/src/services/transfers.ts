@@ -2,7 +2,7 @@ import type { Pool, PoolClient } from 'pg'
 import { MEMO_MAX_BYTES, type ChainClient } from '../chain/types'
 import { errorMessage, validityWindowBlocks } from '../config'
 import type { Queryable } from '../db/pool'
-import type { Alerts } from './alerts'
+import type { AlertKind, Alerts } from './alerts'
 import {
   PausedError,
   SolvencyError,
@@ -252,8 +252,8 @@ function toOpenAttempt(row: OpenAttemptRow): OpenAttempt {
  * makes "two observations five minutes apart" mean five minutes of real time
  * rather than two lookups in the same tick.
  */
-async function recordAbsence(pool: Pool, attemptId: string): Promise<void> {
-  await pool.query(
+async function recordAbsence(db: Queryable, attemptId: string): Promise<void> {
+  await db.query(
     `UPDATE transaction_attempts
      SET absent_checks = absent_checks + 1,
          first_absent_at = COALESCE(first_absent_at, now())
@@ -441,12 +441,27 @@ export async function signAndPersistAttempt(
  * anyway (the ambiguous-broadcast case), so the attempt stays `signed` with the
  * error recorded and reconciliation resolves it by hash. Rethrowing would tempt
  * a caller into treating "we did not hear back" as "it did not happen".
+ *
+ * **Round-3 R4 — the attempt is marked as BROADCAST-ATTEMPTED first**, in its
+ * own committed statement, before the bytes leave. From that moment the
+ * attempt's `signed` state no longer means "the chain cannot have debited
+ * this": the solvency cross-check reads the marker instead of guessing from
+ * the state, so an ambiguous broadcast explains the money the chain took
+ * rather than looking like a shortfall. The write must precede the call — a
+ * process killed the instant the network accepts the transaction is exactly
+ * the case the marker exists for.
  */
 export async function broadcastStored(
   pool: Pool,
   chain: ChainClient,
   attempt: StoredAttempt,
 ): Promise<'acknowledged' | 'unknown'> {
+  await pool.query(
+    `UPDATE transaction_attempts
+     SET broadcast_attempted_at = COALESCE(broadcast_attempted_at, now())
+     WHERE id = $1`,
+    [attempt.attemptId],
+  )
   try {
     await chain.broadcast(attempt.rawTxHex)
   } catch (err) {
@@ -460,35 +475,47 @@ export async function broadcastStored(
   return 'acknowledged'
 }
 
+/**
+ * The three writes that record an acknowledged broadcast. Takes a
+ * {@link Queryable} so a caller that already holds the attempt row lock can do
+ * them inside that transaction (R1) instead of opening a second one.
+ *
+ * Write order is attempt → transfer → claim, the order every path in this file
+ * and in `recover.ts prepareReplacement` uses. Do not reorder.
+ */
+async function applyBroadcastMark(db: Queryable, attempt: StoredAttempt): Promise<void> {
+  await db.query(
+    `UPDATE transaction_attempts
+     SET state = 'broadcast', last_error = NULL
+     WHERE id = $1 AND state = 'signed'`,
+    [attempt.attemptId],
+  )
+  // Hold off the next rebroadcast: the chain needs time to include it and is
+  // mempool-blind until it does.
+  await db.query(
+    `UPDATE outgoing_transfers
+     SET next_attempt_at = now() + make_interval(secs => $2::float8 / 1000)
+     WHERE id = $1 AND state <> 'confirmed'`,
+    [attempt.transferId, REBROADCAST_COOLDOWN_MS],
+  )
+  if (attempt.claimId) {
+    // `manual_review` is in the list on purpose: once an operator's recovery
+    // gets a payment broadcast, the claimant should see `confirming` again
+    // rather than stay on a flag that no longer describes their money. The
+    // only state deliberately left alone is `paid` — never walk that back.
+    await db.query(
+      `UPDATE claims SET state = 'confirming'
+       WHERE id = $1 AND state IN ('reserved', 'sending', 'manual_review')`,
+      [attempt.claimId],
+    )
+  }
+}
+
 async function markBroadcast(pool: Pool, attempt: StoredAttempt): Promise<void> {
   const client = await pool.connect()
   try {
     await client.query('BEGIN')
-    await client.query(
-      `UPDATE transaction_attempts
-       SET state = 'broadcast', last_error = NULL
-       WHERE id = $1 AND state = 'signed'`,
-      [attempt.attemptId],
-    )
-    // Hold off the next rebroadcast: the chain needs time to include it and is
-    // mempool-blind until it does.
-    await client.query(
-      `UPDATE outgoing_transfers
-       SET next_attempt_at = now() + make_interval(secs => $2::float8 / 1000)
-       WHERE id = $1 AND state <> 'confirmed'`,
-      [attempt.transferId, REBROADCAST_COOLDOWN_MS],
-    )
-    if (attempt.claimId) {
-      // `manual_review` is in the list on purpose: once an operator's recovery
-      // gets a payment broadcast, the claimant should see `confirming` again
-      // rather than stay on a flag that no longer describes their money. The
-      // only state deliberately left alone is `paid` — never walk that back.
-      await client.query(
-        `UPDATE claims SET state = 'confirming'
-         WHERE id = $1 AND state IN ('reserved', 'sending', 'manual_review')`,
-        [attempt.claimId],
-      )
-    }
+    await applyBroadcastMark(client, attempt)
     await client.query('COMMIT')
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {})
@@ -502,12 +529,91 @@ async function markBroadcast(pool: Pool, attempt: StoredAttempt): Promise<void> 
 
 type Progress = 'changed' | 'unchanged'
 
+/** What one locked pass over an attempt decided, to be acted on after COMMIT. */
+interface AttemptOutcome {
+  progress: Progress
+  /** Rebroadcast the same bytes once the lock is released. */
+  rebroadcast?: boolean
+  /** Fired after COMMIT, so an alert can never describe a rolled-back write. */
+  alert?: { kind: AlertKind; detail: Record<string, unknown> }
+  /** Set when this pass finalized the payment; logged after COMMIT. */
+  confirmedHeight?: number
+}
+
+/** The attempt row and its intent, as they stand under the row lock. */
+interface LockedAttempt {
+  state: 'signed' | 'broadcast' | 'confirmed' | 'proven_dead'
+  observedHeight: number | null
+  transferState: string
+  nextAttemptAt: Date | null
+}
+
+/**
+ * Pin the attempt row for the rest of the caller's transaction.
+ *
+ * `FOR UPDATE OF a` locks ONLY the attempt row: the intent row is joined for
+ * its state and is locked later, by the UPDATEs, which keeps the write order
+ * attempt → transfer that `recover.ts prepareReplacement` also uses.
+ */
+async function lockAttemptRow(
+  client: PoolClient,
+  attemptId: string,
+): Promise<LockedAttempt | null> {
+  const { rows } = await client.query<{
+    state: LockedAttempt['state']
+    observed_height: string | null
+    transfer_state: string
+    next_attempt_at: Date | null
+  }>(
+    `SELECT a.state, a.observed_height, t.state AS transfer_state, t.next_attempt_at
+     FROM transaction_attempts a
+     JOIN outgoing_transfers t ON t.id = a.transfer_id
+     WHERE a.id = $1
+     FOR UPDATE OF a`,
+    [attemptId],
+  )
+  const row = rows[0]
+  if (!row) return null
+  return {
+    state: row.state,
+    observedHeight: row.observed_height === null ? null : Number(row.observed_height),
+    transferState: row.transfer_state,
+    nextAttemptAt: row.next_attempt_at,
+  }
+}
+
 /**
  * Resolve one open attempt against the chain — the heart of restart safety.
  *
  * Called for every `signed`/`broadcast` attempt on startup and on each tick.
  * Every branch is a decision about an unknown outcome, so each one is spelled
  * out below rather than collapsed into cleverness.
+ *
+ * **Round-3 R1 — the attempt row is LOCKED before the chain is asked, and the
+ * answer is persisted inside that same transaction.** The lookup and the write
+ * it justifies used to be two unsynchronized steps, which left this window:
+ *
+ *   1. this function gets a positive lookup — the payment is on chain;
+ *   2. before it can clear the absence series, it is descheduled;
+ *   3. `recover.ts replace` takes the attempt row lock, makes its own lookup,
+ *      gets a transient not-found (the chain is mempool-blind and one node's
+ *      answer is one node's opinion), reads the STILL-STALE absence series as
+ *      corroboration, marks the attempt `proven_dead` and signs a replacement;
+ *   4. this function resumes and clears a series that no longer matters, for an
+ *      attempt that is now dead on paper and alive on chain.
+ *
+ * Both payments then land. Holding the row lock across the lookup closes it
+ * structurally: a sighting either commits before `replace` takes the lock (and
+ * `replace` reads the cleared series) or `replace` waits behind it (and its own
+ * lookup, made under the lock, sees what this one saw). The cost is one chain
+ * round trip per open attempt per tick with a row lock held — a row nothing
+ * else contends for except the operator command this is being serialized
+ * against.
+ *
+ * Lock order is unchanged and consistent: `recover.ts` takes
+ * custody_controls → attempt → transfer; this path takes a SUBSET of that tail
+ * (attempt → transfer) and never reaches for custody_controls, so no cycle
+ * exists.
  */
 export async function progressAttempt(
   pool: Pool,
@@ -518,135 +624,21 @@ export async function progressAttempt(
   opts?: WindowOptions,
 ): Promise<Progress> {
   const head = headHeight ?? (await chain.headHeight())
-  const alreadyFlagged = attempt.transferState === 'manual_review'
 
-  let tx
-  try {
-    tx = await chain.getTransaction(attempt.txHash)
-  } catch (err) {
-    // "We could not ask." Not absence, not failure — just no information.
-    const message = errorMessage(err)
-    await pool.query('UPDATE transaction_attempts SET last_error = $2 WHERE id = $1', [
-      attempt.attemptId,
-      message,
-    ])
-    const age = Date.now() - attempt.createdAt.getTime()
-    if (age >= UNRESOLVED_BUDGET_MS && !alreadyFlagged) {
-      await flagManualReview(pool, alerts, attempt, {
-        reason: 'unresolvable_lookup',
-        message,
-        ageMs: age,
-      })
-      return 'changed'
-    }
-    return 'unchanged'
-  }
-
-  if (tx) {
-    // A sighting breaks any absence series (finding 2). This runs before every
-    // other branch on purpose: even an execution-failed or not-yet-final
-    // sighting is proof the hash reached the chain, and stale absence evidence
-    // is exactly what would let `replace` build a second payment.
-    await clearAbsenceSeries(pool, attempt.attemptId)
-
-    if (!tx.executionOk) {
-      // On chain and failed: no amount of waiting changes this.
-      if (alreadyFlagged) return 'unchanged'
-      await flagManualReview(pool, alerts, attempt, {
-        reason: 'execution_failed',
-        includedHeight: tx.includedHeight,
-      })
-      return 'changed'
-    }
-
-    if (chain.isFinal(tx, head)) {
-      // The single authority for "paid". Never the library's own `confirmed`.
-      return (await confirmAttempt(pool, attempt, tx.includedHeight)) ? 'changed' : 'unchanged'
-    }
-
-    // Included but not final yet: record the sighting and keep waiting.
-    const promoted = attempt.state === 'signed'
-    const newSighting = attempt.observedHeight !== tx.includedHeight
-    if (promoted || newSighting) {
-      await markBroadcast(pool, attempt)
-      await pool.query(
-        'UPDATE transaction_attempts SET observed_height = $2 WHERE id = $1',
-        [attempt.attemptId, tx.includedHeight.toString()],
-      )
-      return 'changed'
-    }
-    return 'unchanged'
-  }
-
-  // ---- not found -------------------------------------------------------------
-  // Mempool blindness (G0 §5A): absence is NOT evidence of death. It is one
-  // observation, recorded BEFORE any early return below so that an intent
-  // already in `manual_review` keeps accumulating the evidence an operator
-  // needs — `recover.ts replace` reads this series and refuses without it.
-  await recordAbsence(pool, attempt.attemptId)
-
-  const deadlineHeight = attempt.validityStartHeight + windowOf(opts)
-  if (head > deadlineHeight) {
-    // Absent AND unincludable: this is the only shape a dead attempt can take.
-    // The worker still does not mark it `proven_dead` — that transition creates
-    // the right to spend the money again, so it belongs to an operator running
-    // `recover.ts replace`, which re-proves both halves for itself.
-    if (alreadyFlagged) return 'unchanged'
-    await flagManualReview(pool, alerts, attempt, {
-      reason: 'validity_window_expired',
-      validityStartHeight: attempt.validityStartHeight,
-      deadlineHeight,
-      head,
-      hint: 'proven_dead + replacement requires: pnpm tsx src/recover.ts replace <transferId>',
-    })
-    return 'changed'
-  }
-
-  if (alreadyFlagged) return 'unchanged'
-
-  // Still includable and we cannot see it: rebroadcast the SAME bytes. This is
-  // idempotent by hash, so it can never become a second payment, and it is the
-  // only action that helps if the first broadcast never reached the network.
-  if (attempt.nextAttemptAt !== null && attempt.nextAttemptAt.getTime() > Date.now()) {
-    return 'unchanged'
-  }
-  return (await broadcastStored(pool, chain, attempt)) === 'acknowledged' ? 'changed' : 'unchanged'
-}
-
-/** Atomically finalize attempt, intent and claim. Returns false if already done. */
-async function confirmAttempt(
-  pool: Pool,
-  attempt: OpenAttempt,
-  includedHeight: number,
-): Promise<boolean> {
   const client = await pool.connect()
+  let outcome: AttemptOutcome
   try {
     await client.query('BEGIN')
-    const updated = await client.query(
-      `UPDATE transaction_attempts
-       SET state = 'confirmed',
-           confirmed_height = $2,
-           observed_height = COALESCE(observed_height, $2),
-           last_error = NULL
-       WHERE id = $1 AND state IN ('signed', 'broadcast')`,
-      [attempt.attemptId, includedHeight.toString()],
-    )
-    if (updated.rowCount === 0) {
-      await client.query('ROLLBACK')
-      return false
-    }
-    await client.query(
-      `UPDATE outgoing_transfers
-       SET state = 'confirmed', last_error = NULL, next_attempt_at = NULL
-       WHERE id = $1`,
-      [attempt.transferId],
-    )
-    if (attempt.claimId) {
-      await client.query(`UPDATE claims SET state = 'paid' WHERE id = $1 AND state <> 'paid'`, [
-        attempt.claimId,
-      ])
-    }
+    outcome = await progressLocked(client, chain, attempt, head, opts)
     await client.query('COMMIT')
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw err
+  } finally {
+    client.release()
+  }
+
+  if (outcome.confirmedHeight !== undefined) {
     // The one line that says money finished moving. Emitted after COMMIT, so it
     // can never claim a payment the database did not keep.
     console.info(
@@ -657,62 +649,243 @@ async function confirmAttempt(
         txHash: attempt.txHash,
         sequence: attempt.sequence,
         claimId: attempt.claimId,
-        includedHeight,
+        includedHeight: outcome.confirmedHeight,
       }),
     )
-    return true
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => {})
-    throw err
-  } finally {
-    client.release()
   }
+  if (outcome.alert) await alerts.notify(outcome.alert.kind, outcome.alert.detail)
+
+  if (outcome.rebroadcast) {
+    // Deliberately OUTSIDE the lock. Rebroadcasting the stored bytes is
+    // idempotent by hash and cannot become a second payment, so it does not
+    // need the serialization the decision above does — and it must not hold a
+    // row lock across a network write that may hang.
+    return (await broadcastStored(pool, chain, attempt)) === 'acknowledged'
+      ? 'changed'
+      : 'unchanged'
+  }
+  return outcome.progress
+}
+
+/** The decision half of {@link progressAttempt}, inside the caller's transaction. */
+async function progressLocked(
+  client: PoolClient,
+  chain: ChainClient,
+  attempt: OpenAttempt,
+  head: number,
+  opts?: WindowOptions,
+): Promise<AttemptOutcome> {
+  const locked = await lockAttemptRow(client, attempt.attemptId)
+  // The row cannot vanish (nothing deletes attempts), but if it ever did, doing
+  // nothing is the only safe answer.
+  if (!locked) return { progress: 'unchanged' }
+  // Already finalized by another pass while we waited for the lock.
+  if (locked.state === 'confirmed') return { progress: 'unchanged' }
+
+  const alreadyFlagged = locked.transferState === 'manual_review'
+
+  let tx
+  try {
+    tx = await chain.getTransaction(attempt.txHash)
+  } catch (err) {
+    // "We could not ask." Not absence, not failure — just no information.
+    const message = errorMessage(err)
+    await client.query('UPDATE transaction_attempts SET last_error = $2 WHERE id = $1', [
+      attempt.attemptId,
+      message,
+    ])
+    const age = Date.now() - attempt.createdAt.getTime()
+    if (age >= UNRESOLVED_BUDGET_MS && !alreadyFlagged) {
+      return {
+        progress: 'changed',
+        alert: await applyManualReview(client, attempt, {
+          reason: 'unresolvable_lookup',
+          message,
+          ageMs: age,
+        }),
+      }
+    }
+    return { progress: 'unchanged' }
+  }
+
+  if (tx) {
+    if (locked.state === 'proven_dead') {
+      // RECONCILIATION EMERGENCY (R1). An operator proved this attempt dead and
+      // signed a replacement for the same intent — and here it is, on chain.
+      // Confirming it would mark the intent paid while a second payment is
+      // still live; ignoring it would leave a payment nobody is accounting for.
+      // Neither is survivable automatically, so the intent goes to a human with
+      // both hashes named.
+      return {
+        progress: 'changed',
+        alert: await applyManualReview(client, attempt, {
+          reason: 'proven_dead_attempt_landed',
+          includedHeight: tx.includedHeight,
+          executionOk: tx.executionOk,
+          head,
+          hint:
+            'this attempt was marked proven_dead and REPLACED, but the chain shows it landed. ' +
+            'A second payment for the same intent may also be live: reconcile both hashes on ' +
+            'the explorer before anything else, and pause custody if both paid.',
+        }),
+      }
+    }
+
+    // A sighting breaks any absence series (finding 2). This runs before every
+    // other branch on purpose: even an execution-failed or not-yet-final
+    // sighting is proof the hash reached the chain, and stale absence evidence
+    // is exactly what would let `replace` build a second payment.
+    await clearAbsenceSeries(client, attempt.attemptId)
+
+    if (!tx.executionOk) {
+      // On chain and failed: no amount of waiting changes this.
+      if (alreadyFlagged) return { progress: 'unchanged' }
+      return {
+        progress: 'changed',
+        alert: await applyManualReview(client, attempt, {
+          reason: 'execution_failed',
+          includedHeight: tx.includedHeight,
+        }),
+      }
+    }
+
+    if (chain.isFinal(tx, head)) {
+      // The single authority for "paid". Never the library's own `confirmed`.
+      const confirmed = await applyConfirm(client, attempt, tx.includedHeight)
+      return confirmed
+        ? { progress: 'changed', confirmedHeight: tx.includedHeight }
+        : { progress: 'unchanged' }
+    }
+
+    // Included but not final yet: record the sighting and keep waiting.
+    const promoted = locked.state === 'signed'
+    const newSighting = locked.observedHeight !== tx.includedHeight
+    if (promoted || newSighting) {
+      await applyBroadcastMark(client, attempt)
+      await client.query('UPDATE transaction_attempts SET observed_height = $2 WHERE id = $1', [
+        attempt.attemptId,
+        tx.includedHeight.toString(),
+      ])
+      return { progress: 'changed' }
+    }
+    return { progress: 'unchanged' }
+  }
+
+  // ---- not found -------------------------------------------------------------
+  // A dead attempt that the chain also cannot see is simply dead: its
+  // replacement is the live payment now, and adding absence evidence to a row
+  // nothing reads would say nothing.
+  if (locked.state === 'proven_dead') return { progress: 'unchanged' }
+
+  // Mempool blindness (G0 §5A): absence is NOT evidence of death. It is one
+  // observation, recorded BEFORE any early return below so that an intent
+  // already in `manual_review` keeps accumulating the evidence an operator
+  // needs — `recover.ts replace` reads this series and refuses without it.
+  await recordAbsence(client, attempt.attemptId)
+
+  const deadlineHeight = attempt.validityStartHeight + windowOf(opts)
+  if (head > deadlineHeight) {
+    // Absent AND unincludable: this is the only shape a dead attempt can take.
+    // The worker still does not mark it `proven_dead` — that transition creates
+    // the right to spend the money again, so it belongs to an operator running
+    // `recover.ts replace`, which re-proves both halves for itself.
+    if (alreadyFlagged) return { progress: 'unchanged' }
+    return {
+      progress: 'changed',
+      alert: await applyManualReview(client, attempt, {
+        reason: 'validity_window_expired',
+        validityStartHeight: attempt.validityStartHeight,
+        deadlineHeight,
+        head,
+        hint: 'proven_dead + replacement requires: pnpm tsx src/recover.ts replace <transferId>',
+      }),
+    }
+  }
+
+  if (alreadyFlagged) return { progress: 'unchanged' }
+
+  // Still includable and we cannot see it: rebroadcast the SAME bytes. This is
+  // idempotent by hash, so it can never become a second payment, and it is the
+  // only action that helps if the first broadcast never reached the network.
+  if (locked.nextAttemptAt !== null && locked.nextAttemptAt.getTime() > Date.now()) {
+    return { progress: 'unchanged' }
+  }
+  return { progress: 'unchanged', rebroadcast: true }
 }
 
 /**
- * Hand an intent to a human and tell them about it.
+ * Atomically finalize attempt, intent and claim inside the caller's
+ * transaction. Returns false if the attempt was no longer open.
+ */
+async function applyConfirm(
+  db: Queryable,
+  attempt: OpenAttempt,
+  includedHeight: number,
+): Promise<boolean> {
+  const updated = await db.query(
+    `UPDATE transaction_attempts
+     SET state = 'confirmed',
+         confirmed_height = $2,
+         observed_height = COALESCE(observed_height, $2),
+         last_error = NULL
+     WHERE id = $1 AND state IN ('signed', 'broadcast')`,
+    [attempt.attemptId, includedHeight.toString()],
+  )
+  // Unreachable: the caller holds the row lock and has already read a state
+  // this UPDATE matches. Kept because the cost of being wrong is a claim marked
+  // paid by a transaction we did not actually confirm.
+  if (updated.rowCount === 0) return false
+
+  await db.query(
+    `UPDATE outgoing_transfers
+     SET state = 'confirmed', last_error = NULL, next_attempt_at = NULL
+     WHERE id = $1`,
+    [attempt.transferId],
+  )
+  if (attempt.claimId) {
+    await db.query(`UPDATE claims SET state = 'paid' WHERE id = $1 AND state <> 'paid'`, [
+      attempt.claimId,
+    ])
+  }
+  return true
+}
+
+/**
+ * Hand an intent to a human, inside the caller's transaction, and return the
+ * alert for the caller to fire AFTER it commits.
  *
  * The attempt row is deliberately left open (`signed`/`broadcast`): while it is
  * open, `one_open_attempt` physically prevents any replacement from being
  * signed. A drop with a `manual_review` payout stays non-terminal (design §9),
  * so nothing settles or refunds around the stuck money.
  */
-async function flagManualReview(
-  pool: Pool,
-  alerts: Alerts,
+async function applyManualReview(
+  db: Queryable,
   attempt: OpenAttempt,
   detail: Record<string, unknown>,
-): Promise<void> {
-  const client = await pool.connect()
-  try {
-    await client.query('BEGIN')
-    await client.query(
-      `UPDATE outgoing_transfers
-       SET state = 'manual_review', last_error = $2
-       WHERE id = $1 AND state <> 'confirmed'`,
-      [attempt.transferId, JSON.stringify(detail)],
+): Promise<{ kind: AlertKind; detail: Record<string, unknown> }> {
+  await db.query(
+    `UPDATE outgoing_transfers
+     SET state = 'manual_review', last_error = $2
+     WHERE id = $1 AND state <> 'confirmed'`,
+    [attempt.transferId, JSON.stringify(detail)],
+  )
+  if (attempt.claimId) {
+    await db.query(
+      `UPDATE claims SET state = 'manual_review' WHERE id = $1 AND state <> 'paid'`,
+      [attempt.claimId],
     )
-    if (attempt.claimId) {
-      await client.query(
-        `UPDATE claims SET state = 'manual_review' WHERE id = $1 AND state <> 'paid'`,
-        [attempt.claimId],
-      )
-    }
-    await client.query('COMMIT')
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => {})
-    throw err
-  } finally {
-    client.release()
   }
-
-  await alerts.notify('manual_review', {
-    transferId: attempt.transferId,
-    attemptId: attempt.attemptId,
-    txHash: attempt.txHash,
-    sequence: attempt.sequence,
-    ...detail,
-  })
+  return {
+    kind: 'manual_review',
+    detail: {
+      transferId: attempt.transferId,
+      attemptId: attempt.attemptId,
+      txHash: attempt.txHash,
+      sequence: attempt.sequence,
+      ...detail,
+    },
+  }
 }
 
 /**

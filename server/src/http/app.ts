@@ -194,6 +194,7 @@ const FUNDING_MESSAGES: Record<FundingRejectionCode, string> = {
   invalid_sender: 'that transaction has no usable sender',
   reused_hash: 'that transaction was already used to fund a drop',
   drop_not_fundable: 'this drop is no longer awaiting funding',
+  attested_as_float: 'that transaction is already recorded as an operator deposit',
 }
 
 /** Retry hint for a temporarily unavailable money path. */
@@ -534,16 +535,20 @@ export function makeApp(deps: AppDeps): Hono {
       signatureHex,
       idemKey,
       requestHash: requestHash(scope, { challengeId, publicKey: publicKeyHex, signature: signatureHex }),
-      // G1 review finding 8 + round-2 F8: the per-drop bucket is charged only
-      // when the request is a genuinely NEW slot reservation — signature
-      // verified, no idempotency record or existing claim to answer it with,
-      // challenge unspent. Charging it up front made a targeted lockout cost
-      // nothing (ten junk requests a minute at one drop id and its real
-      // claimants got 429s while the attacker never signed anything); charging
-      // it on every authenticated request still let two wallets retrying five
-      // times each close a ten-claim drop. Junk and retries are charged to the
-      // per-IP limiter instead, which is the one an attacker cannot aim at
-      // someone else's drop.
+      // G1 review finding 8, round-2 F8, round-3 R5: the per-drop bucket is
+      // charged only by the request that actually commits a new reservation,
+      // from inside the allocation transaction. Charging it up front made a
+      // targeted lockout cost nothing (ten junk requests a minute at one drop
+      // id and its real claimants got 429s while the attacker never signed
+      // anything); charging every authenticated request let two wallets
+      // retrying five times each close a ten-claim drop; charging before the
+      // transaction let ten CONCURRENT copies of one retry each spend a token
+      // for the single claim they collectively produced. Junk and retries are
+      // charged to the per-IP limiter instead, which is the one an attacker
+      // cannot aim at someone else's drop.
+      //
+      // This runs while the singleton custody lock is held, so it must stay
+      // what it is: an in-memory token bucket that returns immediately.
       onAuthenticated: () => enforce(dropClaimBucket, publicId),
     })
 

@@ -23,6 +23,7 @@ import {
   InsolventError,
   assertSolvent,
   ensureNetworkBinding,
+  ledgerMovementsLuna,
   lockControls,
   readControls,
 } from '../src/services/solvency'
@@ -690,6 +691,125 @@ describe.skipIf(!hasDb)('operator float and status (real Postgres)', () => {
     expect((await readControls(pool)).operatorFloatLuna).toBe(0n)
     expect(await attestedFloatDepositsLuna(pool)).toBe(0n)
     expect(await chain.confirmedBalanceLuna(CUSTODY)).toBe(50_000n)
+  })
+
+  // ---- R6: the bound is conservative, not raced ---------------------------------
+
+  it('subtracts every attempt that could still land before it attests anything', async () => {
+    // Bind before any attempt row exists, as booting `worker.ts` does.
+    await ensureNetworkBinding(pool, chain)
+    const tx = topUpCustody(200_000n)
+    // A payout the worker has already broadcast. Nothing about the chain
+    // balance says so yet — the transaction has not been included — so all
+    // 200_000 luna still LOOKS like headroom.
+    const drop = await insertDrop(pool, { activated: false })
+    const claim = await insertClaim(pool, drop.id, 0)
+    const transfer = await insertTransfer(pool, {
+      purpose: 'payout',
+      dropId: drop.id,
+      claimId: claim.id,
+      amountLuna: 50_000n,
+      state: 'in_progress',
+    })
+    await insertAttempt(pool, { transferId: transfer.id, state: 'broadcast', feeLuna: 100n })
+    expect(await chain.confirmedBalanceLuna(CUSTODY)).toBe(200_000n)
+
+    // Holding the custody lock cannot stop an already-broadcast transaction
+    // from being included, so the bound stops trying: the 50_100 luna committed
+    // to that attempt is not headroom, landed or not.
+    await expect(setOperatorFloat(pool, chain, '200000', tx)).rejects.toBeInstanceOf(
+      OverAttestationError,
+    )
+    await expect(setOperatorFloat(pool, chain, '200000', tx)).rejects.toThrow(/50100/)
+    expect((await readControls(pool)).operatorFloatLuna).toBe(0n)
+  })
+
+  it('an attempt landing mid-command cannot leave the float over-attested', async () => {
+    await ensureNetworkBinding(pool, chain)
+    const tx = topUpCustody(200_000n)
+    const drop = await insertDrop(pool, { activated: false })
+    const claim = await insertClaim(pool, drop.id, 0)
+    const transfer = await insertTransfer(pool, {
+      purpose: 'payout',
+      dropId: drop.id,
+      claimId: claim.id,
+      amountLuna: 50_000n,
+      state: 'in_progress',
+    })
+    await insertAttempt(pool, { transferId: transfer.id, state: 'broadcast', feeLuna: 0n })
+
+    // The operator attests the whole deposit. Whether that is accepted is the
+    // command's business — what is asserted below is the property that must
+    // hold either way.
+    await setOperatorFloat(pool, chain, '200000', tx).catch(() => undefined)
+
+    // …and now the attempt lands, which is precisely the event no lock could
+    // have prevented: the chain balance the bound was checked against is gone.
+    chain.deposit({
+      hash: `landed-${randomUUID()}`,
+      sender: CUSTODY,
+      recipient: 'NQ07 CLAIMANT',
+      valueLuna: 50_000n,
+      includedHeight: 2,
+    })
+    const chainAfter = await chain.confirmedBalanceLuna(CUSTODY)
+    expect(chainAfter).toBe(150_000n)
+
+    const controls = await readControls(pool)
+    const ledgerAfter = controls.operatorFloatLuna + (await ledgerMovementsLuna(pool))
+    expect(
+      ledgerAfter <= chainAfter,
+      `ledger ${ledgerAfter} must not exceed the chain's ${chainAfter} once the in-flight ` +
+        'attempt landed — a float attested against a balance that was about to shrink',
+    ).toBe(true)
+  })
+
+  // ---- R2: a deposit is drop funding OR operator float, never both ---------------
+
+  it('refuses a deposit that carries a drop funding memo', async () => {
+    // A sponsor's funding transaction that no drop has been activated with yet:
+    // `funding_tx_hash` is still NULL everywhere, so the drop-funding check
+    // cannot see it. The memo is what gives it away.
+    const memoed = `memoed-${randomUUID()}`
+    chain.deposit({
+      hash: memoed,
+      sender: 'NQ07 SPONSOR',
+      recipient: CUSTODY,
+      valueLuna: 500n,
+      dataUtf8: 'ND1:abcdefghijklmnopqrstuv',
+      includedHeight: 1,
+    })
+    chain.setHead(1_000)
+
+    expect(await attestationCode(setOperatorFloat(pool, chain, '500', memoed))).toBe('drop_memo')
+    expect((await readControls(pool)).operatorFloatLuna).toBe(0n)
+    expect(await attestedFloatDepositsLuna(pool)).toBe(0n)
+  })
+
+  it('will not let an attested float deposit become a drop funding hash', async () => {
+    const tx = topUpCustody(100_000n)
+    await setOperatorFloat(pool, chain, '100000', tx)
+
+    // The database backstop (migration 008), reached directly: even hand-written
+    // SQL cannot point a drop's funding at money the float already counts.
+    const drop = await insertDrop(pool, { activated: false })
+    await expect(
+      pool.query('UPDATE drops SET funding_tx_hash = $2 WHERE id = $1', [drop.id, tx]),
+    ).rejects.toThrow(/attested as operator float/i)
+  })
+
+  it("will not let a drop's funding hash become an attested float deposit", async () => {
+    const drop = await insertDrop(pool)
+    const fundingHash = `funding-${randomUUID()}`
+    await pool.query('UPDATE drops SET funding_tx_hash = $2 WHERE id = $1', [drop.id, fundingHash])
+
+    await expect(
+      pool.query(
+        `INSERT INTO operator_float_deposits (tx_hash, value_luna, included_height, network)
+         VALUES ($1, 500, 1, 'TestAlbatross')`,
+        [fundingHash],
+      ),
+    ).rejects.toThrow(/funding of drop/i)
   })
 
   // ---- float show -------------------------------------------------------------

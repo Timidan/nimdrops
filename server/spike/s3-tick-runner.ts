@@ -28,6 +28,12 @@
  * the chain client — `broadcast` — and every state transition around it is
  * produced by `services/transfers.ts` exactly as it runs in `worker.ts`.
  *
+ * And nothing here SKIPS worker startup either (round-3 R7): each child takes
+ * the single-worker advisory lock for its lifetime, verifies the database's
+ * network binding, and runs the same startup reconciliation in the same order
+ * as `worker.ts`, before it ticks. A restart that omitted those was not the
+ * production restart this leg's evidence claims it was.
+ *
  * The kill is `process.kill(pid, 'SIGKILL')` on itself: SIGKILL cannot be
  * blocked, caught or deferred, so no `finally`, no shutdown hook and no pending
  * microtask gets to run. That is the difference between this and a
@@ -40,8 +46,8 @@ import { writeSync } from 'node:fs'
 import pg from 'pg'
 import { NimiqChain, type NimiqNetwork } from '../src/chain/nimiq'
 import { consoleAlerts } from '../src/services/alerts'
-import { reconcile } from '../src/services/solvency'
-import { reconcileOnStartup, runWorkerTick } from '../src/services/transfers'
+import { ensureNetworkBinding, reconcile } from '../src/services/solvency'
+import { acquireWorkerLock, reconcileOnStartup, runWorkerTick } from '../src/services/transfers'
 // Side-effect import: int8-as-string, so BIGINT luna never becomes a JS number.
 import '../src/db/pool'
 
@@ -59,6 +65,8 @@ const EXIT_USAGE = 2
 const EXIT_NO_CRASH = 3
 const EXIT_NOT_FINISHED = 4
 const EXIT_PRECONDITION = 5
+/** Another process holds advisory lock 42, or the database is bound elsewhere. */
+const EXIT_NOT_THE_WORKER = 6
 
 const t0 = Date.now()
 function say(...parts: unknown[]): void {
@@ -176,9 +184,41 @@ async function main(): Promise<void> {
   await chain.connect()
   say(`consensus in ${((Date.now() - connectStarted) / 1000).toFixed(1)}s, head ${await chain.headHeight()}`)
 
-  // ---- the worker's own startup sequence, in this order (worker.ts) ---------
-  await reconcile(pool, chain, alerts)
+  // ---- worker.ts's startup sequence, in ITS order (round-3 R7) --------------
+  //
+  // This leg claims to be a production worker restart, so it has to BE one. It
+  // used to skip straight to reconciliation, which meant the kill/restart
+  // evidence was produced by a process that had never taken the single-worker
+  // advisory lock and had never checked which chain the database belongs to —
+  // the two things `worker.ts` does before it will touch money. A restart that
+  // skips them is not the restart being claimed.
+  //
+  // 1. One dedicated connection holds advisory lock 42 for this process's
+  //    lifetime. SIGKILL ends the session, Postgres drops the lock, and the
+  //    next child can take it — which is precisely the recovery property the
+  //    kill legs are supposed to demonstrate.
+  const lockClient = await pool.connect()
+  if (!(await acquireWorkerLock(lockClient))) {
+    bail(
+      EXIT_NOT_THE_WORKER,
+      'another process holds transfer advisory lock 42 — refusing to run as a second worker. ' +
+        'Advisory locks are per DATABASE, not per schema, so a deployed worker pointed at this ' +
+        'same Postgres counts: stop it, or run the harness against its own database.',
+    )
+  }
+  say('worker lock acquired')
+
+  // 2. Bind the database to this chain, or refuse every chain action.
+  const network = await ensureNetworkBinding(pool, chain).catch((err: unknown) => {
+    bail(EXIT_NOT_THE_WORKER, `network binding refused: ${String(err)}`)
+  })
+  say(`network binding verified: ${network}`)
+
+  // 3. Attempts before the solvency cross-check (round-3 R4): an ambiguous
+  //    broadcast must be resolved into the books before the books are compared
+  //    against a chain that has already debited it.
   await reconcileOnStartup(pool, chain, alerts)
+  await reconcile(pool, chain, alerts)
   say('startup reconciled')
 
   const deadline = Date.now() + (mode === 'finish' ? FINISH_DEADLINE_MS : CRASH_DEADLINE_MS)

@@ -61,14 +61,6 @@ export function requireNetwork(): NetworkName {
 export const VALIDITY_WINDOW_FLOOR_BLOCKS = 7_200
 
 /**
- * `Policy.BLOCK_SEPARATION_TIME` on both Albatross networks: one block per
- * second. Only ever used to turn a window measured in BLOCKS into the same
- * window measured in WALL TIME, for durable rows that carry a timestamp rather
- * than a height (see `solvency.inFlightMaxAgeMs`).
- */
-export const BLOCK_SEPARATION_MS = 1_000
-
-/**
  * One Albatross batch is 60 blocks (`Policy.BLOCKS_PER_BATCH`), so 64 blocks
  * always spans at least one macro block wherever in the batch the transaction
  * landed. Measured in `server/spike/g0-evidence.md`.

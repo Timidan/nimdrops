@@ -893,6 +893,30 @@ function toSolvencyView(o: {
   }
 }
 
+/**
+ * Principal plus fee of every outgoing attempt whose money could still leave
+ * custody — anything not yet `confirmed` and not yet `proven_dead` (round-3 R6).
+ *
+ * Deliberately broader than `inFlightOutgoingLuna`: that function answers "what
+ * can EXPLAIN a chain balance below the books", so it only counts attempts
+ * whose bytes provably reached the network and are still includable. This one
+ * answers a different and stricter question — "what could still be taken out of
+ * the balance I am about to attest against" — and for that, an attempt whose
+ * bytes may or may not have been broadcast must be assumed broadcast, and an
+ * attempt near its validity deadline must be assumed includable. Over-counting
+ * makes the float smaller, which is the only direction an attestation is
+ * allowed to be wrong in.
+ */
+async function committedOutflowLuna(db: Queryable): Promise<bigint> {
+  const { rows } = await db.query<{ luna: string }>(
+    `SELECT COALESCE(SUM(t.amount_luna + a.fee_luna), 0)::BIGINT AS luna
+     FROM transaction_attempts a
+     JOIN outgoing_transfers t ON t.id = a.transfer_id
+     WHERE a.state IN ('signed', 'broadcast')`,
+  )
+  return BigInt(rows[0].luna)
+}
+
 /** Total of the finalized deposits `float set` has attributed the float to. */
 export async function attestedFloatDepositsLuna(db: Queryable): Promise<bigint> {
   const { rows } = await db.query<{ luna: string }>(
@@ -905,7 +929,12 @@ async function readSolvency(db: PoolClient): Promise<LedgerSnapshot> {
   const controls = await readControls(db)
   const movementsLuna = await ledgerMovementsLuna(db)
   const outstandingLuna = await outstandingPrincipalLuna(db)
-  const inFlightLuna = await inFlightOutgoingLuna(db)
+  // Reported against the last reconciled head rather than a fresh chain read:
+  // this snapshot is READ ONLY and must not depend on a reachable node (round-3
+  // R4 made the in-flight window a height comparison). `0` before the first
+  // reconciliation is the inclusive end of that scale — every attempt still
+  // counts as in flight, which over-reports rather than under-reports.
+  const inFlightLuna = await inFlightOutgoingLuna(db, controls.lastReconciledHeight ?? 0)
   const attestedDepositsLuna = await attestedFloatDepositsLuna(db)
   return {
     controls,
@@ -1000,6 +1029,12 @@ export type DepositRejectionCode =
   | 'self_transfer'
   /** Already counted as some drop's funding: that money belongs to claimants. */
   | 'drop_funding'
+  /**
+   * Carries a `ND1:` funding memo. A memo-bearing deposit is drop funding by
+   * construction, whether or not the drop it names has been activated yet
+   * (round-3 R2).
+   */
+  | 'drop_memo'
   /** Already backs the float: counting it twice would double the attestation. */
   | 'already_attested'
   /** The requested float is not the sum of the deposits backing it. */
@@ -1157,6 +1192,23 @@ async function proveFloatDeposit(
         `${head}. A credit that a reorg can still remove must not become spendable capacity.`,
     )
   }
+  // Round-3 R2. A deposit carrying a funding memo is drop money by
+  // construction: the sponsor addressed it to a drop, and `submitFunding` will
+  // credit it to that drop's principal the moment the hash is submitted —
+  // which can happen long after this command runs, because activation is driven
+  // by the client. Attesting it as float credits the same luna twice, and the
+  // drop-funding check below cannot catch it because `funding_tx_hash` is not
+  // set yet. The memo does not even have to name a drop that exists: an
+  // operator's own float is sent WITHOUT a memo, so a memo here means the money
+  // was not the operator's to claim.
+  if (tx.dataUtf8 !== null && tx.dataUtf8.startsWith(MEMO_PREFIX)) {
+    throw new DepositAttestationError(
+      'drop_memo',
+      `transaction ${txHash} carries the funding memo "${tx.dataUtf8}": it was sent to fund a drop, ` +
+        'not as operator float, and crediting it here would count the same luna twice once the ' +
+        'drop is activated. Operator float is deposited with NO memo.',
+    )
+  }
   return tx
 }
 
@@ -1281,18 +1333,43 @@ export async function setOperatorFloat(
     const beforeLedgerLuna = before.operatorFloatLuna + movementsLuna
     const afterLedgerLuna = nextFloatLuna + movementsLuna
 
-    // The money bound comes FIRST, on the in-lock chain balance (N2). A verified
-    // deposit is not by itself proof the money is still there: custody may have
-    // spent it since, and it is the current balance — not the deposit's history
-    // — that decides what may be treated as spendable capacity.
-    if (afterLedgerLuna > chainConfirmedLuna) {
+    // ROUND-3 R6 — the bound is made CONSERVATIVE rather than raced.
+    //
+    // Round 2 moved the chain read inside the lock, which was necessary and not
+    // sufficient: the lock cannot stop an already-broadcast transaction from
+    // being included by the network. Between this read and the write, a payout
+    // that was in flight can land, custody's real balance drops, and a float
+    // that was honest against the number we read is over-attested against the
+    // number that is now true. No amount of locking fixes that — the other
+    // party to the race is the chain.
+    //
+    // So the bound stops racing and starts assuming the worst: every attempt
+    // that could still land is subtracted from the usable balance IN FULL,
+    // principal and fee, whether or not it has landed yet.
+    //
+    //  - if it has NOT landed, the chain balance still holds that money and we
+    //    are refusing to count money that is about to leave;
+    //  - if it HAS landed, the chain balance no longer holds it and we subtract
+    //    it a second time — a strictly tighter bound.
+    //
+    // Either way a landing transaction can only make this attestation MORE
+    // conservative, never less, which is the property the lock could not
+    // provide. `confirmed` attempts are excluded because both sides already
+    // account for them (the chain has debited them and `ledgerMovements`
+    // subtracts them); `proven_dead` attempts are excluded because an operator
+    // has already proven they can never be included.
+    const pendingOutflowLuna = await committedOutflowLuna(client)
+    const usableChainLuna = chainConfirmedLuna - pendingOutflowLuna
+
+    if (afterLedgerLuna > usableChainLuna) {
+      const largestHonest = usableChainLuna - movementsLuna
       throw new OverAttestationError(
         `refusing to attest an operator float of ${nextFloatLuna} luna: it would put the ledger ` +
           `balance at ${afterLedgerLuna} luna while the chain confirms only ${chainConfirmedLuna} ` +
-          `luna in custody ${chain.custodyAddress()} at height ${headHeight}. The largest honest ` +
-          `float right now is ${
-            chainConfirmedLuna - movementsLuna > 0n ? chainConfirmedLuna - movementsLuna : 0n
-          } luna. Deposit the money first, then attest it.`,
+          `luna in custody ${chain.custodyAddress()} at height ${headHeight}, of which ` +
+          `${pendingOutflowLuna} luna is committed to outgoing attempts that can still land. The ` +
+          `largest honest float right now is ${largestHonest > 0n ? largestHonest : 0n} luna. ` +
+          'Deposit the money first, or wait for the open attempts to settle, then attest it.',
       )
     }
 

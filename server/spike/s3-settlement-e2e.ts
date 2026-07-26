@@ -38,10 +38,15 @@
  *      points: (a) after the `signed` attempt row commits and before broadcast,
  *      (b) the instant the real broadcast returns, before `markBroadcast`. A
  *      third process restarts and lets `reconcileOnStartup` finish the job.
+ *      Each child runs the FULL worker startup sequence — advisory lock 42 held
+ *      for its lifetime, network binding verified, attempts reconciled before
+ *      the solvency cross-check — so the leg proves a production restart rather
+ *      than a reconciliation loop (round-3 R7).
  *      ASSERTS exactly one attempt row, exactly one hash, one confirmed
  *      attempt, one on-chain transaction paying the claimant, and — because
  *      claimant B is a brand-new address — a final claimant balance of EXACTLY
- *      one share. Two payments would show up as two.
+ *      one share. Two payments would show up as two. Also ASSERTS the restart
+ *      left custody unpaused with no standing shortfall (round-3 R8).
  *   7. FORCE EXPIRY — the single test lever in this script: `expires_at` is set
  *      to one second ago with a direct UPDATE, because the real horizon is 24h.
  *      Everything downstream of that UPDATE is production code.
@@ -60,13 +65,23 @@
  *  11. LEG 4 — CONSERVATION, asserted here rather than by an operator's SQL
  *      after the fact: `sum(confirmed payouts) + refund == expected_funding`,
  *      the refund covers exactly the unallocated slots, and the custody wallet's
- *      own balance moved by exactly principal + recorded fees.
+ *      own balance moved by exactly principal + recorded fees. That last audit
+ *      is never skipped: custody is faucet-funded only in pre-flight and its
+ *      balance is allowed to settle before the baseline is taken, so a run can
+ *      no longer print PASSED while an unattributable credit hides the delta
+ *      (round-3 R8).
  *  12. Print every transaction hash, explorer link, timing and final state, and
  *      write `spike/g1-local-evidence.md` (or `S3_EVIDENCE_PATH`).
  *
  * ISOLATION: everything runs in a throwaway Postgres schema named after the run
  * id, migrated from scratch and dropped at the end (`S3_KEEP_SCHEMA=1` keeps it
  * for inspection). The custody wallet is real, so the money is real testnet NIM.
+ *
+ * NOT ISOLATED: the single-worker advisory lock the kill/restart children now
+ * take is per DATABASE, not per schema. A deployed worker running against the
+ * same Postgres will make those children refuse to start — correctly, since two
+ * worker paths over one custody wallet is the kill criterion this lock exists
+ * for. Stop the worker, or give the harness its own database.
  *
  * TestAlbatross only — it refuses to run against MainAlbatross.
  */
@@ -221,10 +236,33 @@ function loadDevKeys(): DevKeys | null {
   return JSON.parse(readFileSync(DEV_KEY_PATH, 'utf8')) as DevKeys
 }
 
-/** True once the faucet has topped custody up during THIS run (see the audit). */
+/**
+ * Faucet accounting for the custody wallet (round-3 R8).
+ *
+ * The custody-delta audit at the end of the run subtracts every authorised
+ * payment from the balance measured at the start and demands the wallet's real
+ * balance match exactly. A faucet payment landing at any point after that
+ * measurement breaks the arithmetic — and the harness used to respond by
+ * SKIPPING the audit and printing `S3 PASSED` anyway, which is the one outcome
+ * a conservation gate must never produce: an unrecorded payment hides in
+ * exactly the same way a faucet credit does.
+ *
+ * So the tap is confined to a pre-flight phase. Custody is funded and its
+ * balance is allowed to SETTLE before the baseline is taken; from that moment
+ * `custodyBaselineTaken` is set and any further custody tap is a hard failure
+ * rather than a reason to look away.
+ */
 let custodyFaucetTapped = false
+let custodyBaselineTaken = false
 
 async function tapFaucet(address: string, who: string): Promise<void> {
+  if (who === 'custody' && custodyBaselineTaken) {
+    fail(
+      'the faucet was asked to top custody up AFTER the conservation baseline was measured. ' +
+        'The custody-delta audit can no longer attribute the wallet’s movement, and a run that ' +
+        'cannot audit its own custody wallet does not pass. Pre-fund custody and re-run.',
+    )
+  }
   const res = await fetch(FAUCET_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -253,6 +291,36 @@ async function ensureFunded(
     log(`${who} balance: ${formatNim(balance)} NIM`)
   }
   return balance
+}
+
+/**
+ * Wait until the wallet's balance stops moving, then return it (R8).
+ *
+ * A faucet request is answered by one transaction now and, sometimes, another
+ * a few blocks later. Returning the first reading that merely CLEARS the
+ * minimum leaves a second credit free to land in the middle of the run, where
+ * the audit would read it as an unaccounted payment. Two identical readings a
+ * settle-interval apart is the cheap version of "nothing else is coming".
+ */
+async function settledBalanceLuna(
+  chain: NimiqChain,
+  address: string,
+  who: string,
+): Promise<bigint> {
+  const SETTLE_MS = 15_000
+  const MAX_WAITS = 8
+  let previous = await chain.confirmedBalanceLuna(address)
+  for (let i = 0; i < MAX_WAITS; i++) {
+    await sleep(SETTLE_MS)
+    const current = await chain.confirmedBalanceLuna(address)
+    if (current === previous) return current
+    log(`${who} balance still moving: ${formatNim(previous)} -> ${formatNim(current)} NIM`)
+    previous = current
+  }
+  fail(
+    `${who} balance never settled: it is still changing after ${(MAX_WAITS * SETTLE_MS) / 1000}s. ` +
+      'The conservation baseline would be measured against a moving wallet.',
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -620,12 +688,16 @@ async function main(): Promise<void> {
     console.log('float target :', `${formatNim(floatLuna)} NIM`)
 
     // -- balances ------------------------------------------------------------
-    const custodyStartLuna = await ensureFunded(
-      chain,
-      custodyAddress,
-      CUSTODY_MIN_LUNA,
-      'custody',
-    )
+    // Pre-flight only: fund custody, let the balance stop moving, and only then
+    // take the number the conservation audit is measured against (R8). After
+    // this point a custody faucet tap is a hard failure, not a reason to skip
+    // the audit.
+    const fundedLuna = await ensureFunded(chain, custodyAddress, CUSTODY_MIN_LUNA, 'custody')
+    const custodyStartLuna = custodyFaucetTapped
+      ? await settledBalanceLuna(chain, custodyAddress, 'custody')
+      : fundedLuna
+    custodyBaselineTaken = true
+    log(`conservation baseline: custody holds ${formatNim(custodyStartLuna)} NIM`)
     assert(
       custodyStartLuna >= CUSTODY_MIN_LUNA,
       `custody holds ${formatNim(custodyStartLuna)} NIM, needs ${formatNim(CUSTODY_MIN_LUNA)} ` +
@@ -951,6 +1023,30 @@ async function main(): Promise<void> {
         'counted on the chain rather than in our own books',
     )
 
+    // Round-3 R8: a restart must not leave custody paused. Crash window (b)
+    // hands the restarting worker an attempt whose money the chain has already
+    // taken while the books still say `signed`; if the cross-check reads that
+    // as a shortfall it pauses custody, and confirming the attempt afterwards
+    // does NOT unpause it. Three children have now booted over that state, each
+    // running the full worker startup sequence, so a pause here means the
+    // restart path itself is broken and every later leg would be running
+    // against a system that is only accidentally alive.
+    const afterRestart = await readControls(pool)
+    assert(
+      !afterRestart.paused,
+      'the kill/restart leg left custody PAUSED — a restart reconciled its own in-flight payment ' +
+        'as a shortfall',
+    )
+    assert(
+      afterRestart.shortfallDetectedAt === null,
+      `the kill/restart leg left shortfall_detected_at=${afterRestart.shortfallDetectedAt?.toISOString()} ` +
+        '— the cross-check mistook a restart for missing money',
+    )
+    noteLeg(
+      'LEG 2 restart health: after two kills and three worker startups custody is unpaused with ' +
+        'no standing shortfall verdict',
+    )
+
     // -- 8. TEST LEVER: force expiry -----------------------------------------
     // The production horizon is 24h after activation (drops.ts EXPIRY_HOURS).
     // This UPDATE is the ONLY thing the script fakes; every transition after it
@@ -1016,7 +1112,7 @@ async function main(): Promise<void> {
     // the chain holds less than the books can explain.
     const controlsNow = await readControls(pool)
     const ledgerNow = await ledgerBalanceLuna(pool, controlsNow)
-    const inFlightNow = await inFlightOutgoingLuna(pool)
+    const inFlightNow = await inFlightOutgoingLuna(pool, await chain.headHeight())
     const custodyNow = await chain.confirmedBalanceLuna(custodyAddress)
     const explainableMin = ledgerNow - inFlightNow
     const debitLuna = custodyNow - explainableMin + SHORTFALL_MARGIN_LUNA
@@ -1189,24 +1285,28 @@ async function main(): Promise<void> {
     console.log('custody start    :', custodyStartLuna.toString(), 'luna')
     console.log('custody end      :', custodyEndLuna.toString(), 'luna')
     console.log('expected end     :', expectedEndLuna.toString(), 'luna')
-    if (custodyFaucetTapped) {
-      log(
-        'custody balance audit SKIPPED: the faucet topped custody up during this run, so the ' +
-          'delta is not attributable. Re-run against a pre-funded custody wallet to assert it.',
-      )
-    } else {
-      assert(
-        custodyEndLuna === expectedEndLuna,
-        `CUSTODY BALANCE AUDIT FAILED: custody moved ${custodyStartLuna - custodyEndLuna} luna but ` +
-          `exactly ${paidLuna + refundedLuna + recordedFeesLuna + harnessFeesLuna} was authorised — ` +
-          'a payment exists that the books do not know about',
-      )
-      noteLeg(
-        `LEG 4 custody audit: the wallet moved exactly ${custodyStartLuna - custodyEndLuna} luna ` +
-          `(${paidLuna} payouts + ${refundedLuna} refund + ${recordedFeesLuna} recorded fees + ` +
-          `${harnessFeesLuna} harness fees) — no unaccounted payment`,
-      )
-    }
+    // Round-3 R8: this audit is never skipped. It used to be waived whenever
+    // the faucet had topped custody up during the run, which turned the one
+    // check that can see a payment the books know nothing about into a check
+    // that a bad run could switch off by being unlucky. The tap now happens
+    // only in pre-flight, before the baseline is measured (see `tapFaucet`),
+    // so a tapped run is still an auditable run.
+    assert(
+      custodyEndLuna === expectedEndLuna,
+      `CUSTODY BALANCE AUDIT FAILED: custody moved ${custodyStartLuna - custodyEndLuna} luna but ` +
+        `exactly ${paidLuna + refundedLuna + recordedFeesLuna + harnessFeesLuna} was authorised — ` +
+        'a payment exists that the books do not know about' +
+        (custodyFaucetTapped
+          ? '. NOTE: the faucet funded custody during pre-flight; if a second faucet payment ' +
+            'landed after the baseline was measured, that is the discrepancy — but it is a ' +
+            'failure to re-run, not a result to accept.'
+          : ''),
+    )
+    noteLeg(
+      `LEG 4 custody audit: the wallet moved exactly ${custodyStartLuna - custodyEndLuna} luna ` +
+        `(${paidLuna} payouts + ${refundedLuna} refund + ${recordedFeesLuna} recorded fees + ` +
+        `${harnessFeesLuna} harness fees) — no unaccounted payment`,
+    )
 
     // -- 13. evidence ---------------------------------------------------------
     const claimStates = await readClaimStates(pool, draft.publicId)
@@ -1284,7 +1384,7 @@ async function main(): Promise<void> {
       `custody start    : ${custodyStartLuna} luna`,
       `custody end      : ${custodyEndLuna} luna`,
       `recorded fees    : ${recordedFeesLuna} luna (+ ${harnessFeesLuna} luna of harness fees)`,
-      `custody audit    : ${custodyFaucetTapped ? 'SKIPPED (faucet topped custody up mid-run)' : 'ASSERTED'}`,
+      `custody audit    : ASSERTED${custodyFaucetTapped ? ' (custody was faucet-funded in pre-flight, before the baseline)' : ''}`,
       '```',
       '',
       'NOTE: this is a LOCAL run of the harness unless it was executed on the VPS.',

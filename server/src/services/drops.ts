@@ -100,6 +100,11 @@ export type FundingRejectionCode =
   | 'invalid_sender'
   | 'reused_hash'
   | 'drop_not_fundable'
+  /**
+   * The hash is already attested as operator float (round-3 R2). Crediting it
+   * as funding too would put the same luna in the ledger twice.
+   */
+  | 'attested_as_float'
 
 export class FundingRejectedError extends DropError {
   constructor(
@@ -252,6 +257,39 @@ function isUniqueViolation(err: unknown): boolean {
   return (err as { code?: string } | null)?.code === '23505'
 }
 
+/**
+ * Migration 008's trigger fired: this hash is already attested as operator
+ * float. The application checks for it first with a better message; this is the
+ * backstop speaking, and it must not surface as a 500.
+ */
+function isFloatExclusivityViolation(err: unknown): boolean {
+  const e = err as { code?: string; message?: string } | null
+  return e?.code === '23514' && /attested as operator float/i.test(e.message ?? '')
+}
+
+/**
+ * Round-3 R2. A deposit is EITHER a drop's funding OR the operator's float,
+ * never both — the ledger credits each of them separately, so counting one
+ * transaction as both invents money that was never in custody.
+ *
+ * `float set` refuses a hash that is already some drop's funding and refuses
+ * any hash carrying a `ND1:` memo. This is the same rule from the other side:
+ * an operator who attested a memo-less deposit and only afterwards discovered
+ * it was meant to fund a drop must not be able to activate that drop on top of
+ * the attestation. The float has to be withdrawn first, deliberately.
+ */
+async function assertHashNotAttestedFloat(db: Queryable, txHash: string): Promise<void> {
+  const { rows } = await db.query('SELECT 1 FROM operator_float_deposits WHERE tx_hash = $1', [
+    txHash,
+  ])
+  if (rows.length > 0) {
+    throw new FundingRejectedError(
+      'attested_as_float',
+      'that transaction is already attested as operator float; it cannot also fund a drop',
+    )
+  }
+}
+
 async function assertHashUnusedElsewhere(
   db: Queryable,
   publicId: string,
@@ -300,6 +338,9 @@ export async function submitFunding(
     )
   }
   await assertHashUnusedElsewhere(pool, publicId, txHash)
+  // Cheap pre-check so the sponsor is told the truth before a chain round trip;
+  // `activate()` re-checks it under the custody lock, which is the authority.
+  await assertHashNotAttestedFloat(pool, txHash)
 
   // ---- chain verification, OUTSIDE any database transaction ----------------
 
@@ -378,6 +419,12 @@ async function recordPending(pool: Pool, publicId: string, txHash: string): Prom
     if (isUniqueViolation(err)) {
       throw new FundingRejectedError('reused_hash', 'funding transaction already funded another drop')
     }
+    if (isFloatExclusivityViolation(err)) {
+      throw new FundingRejectedError(
+        'attested_as_float',
+        'that transaction is already attested as operator float; it cannot also fund a drop',
+      )
+    }
     throw err
   }
 }
@@ -423,6 +470,10 @@ async function activate(
       )
     }
     await assertHashUnusedElsewhere(client, publicId, txHash)
+    // R2, under the custody lock — the same lock `float set` takes, which is
+    // what makes this check and that command mutually exclusive rather than
+    // racing. Migration 008's trigger enforces it in the schema as well.
+    await assertHashNotAttestedFloat(client, txHash)
 
     // The drop is not yet counted in outstanding principal (`activated_height`
     // is still NULL), so its whole principal is what this activation adds.
@@ -444,6 +495,12 @@ async function activate(
     await client.query('ROLLBACK').catch(() => {})
     if (isUniqueViolation(err)) {
       throw new FundingRejectedError('reused_hash', 'funding transaction already funded another drop')
+    }
+    if (isFloatExclusivityViolation(err)) {
+      throw new FundingRejectedError(
+        'attested_as_float',
+        'that transaction is already attested as operator float; it cannot also fund a drop',
+      )
     }
     throw err
   } finally {
