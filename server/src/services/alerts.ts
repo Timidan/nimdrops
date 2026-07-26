@@ -22,12 +22,19 @@ import { redact, safeLog } from '../http/redact'
  * a live-principal cap that a signature would exceed. Both mean the same thing
  * operationally: money is owed that the worker will not sign for until a human
  * tops up custody or raises the cap.
+ *
+ * `sig_scheme_mismatch` is the odd one out: no money is at risk, but every
+ * claimant is. It fires when a wallet signature is refused under the configured
+ * `SIG_SCHEME` and would have verified under the other one, which means the
+ * deployment is turning away valid claimants and looks, from the outside,
+ * exactly like a working system nobody is using.
  */
 export type AlertKind =
   | 'manual_review'
   | 'paused'
   | 'stale_reconciliation'
   | 'insolvent'
+  | 'sig_scheme_mismatch'
   | 'heartbeat'
 
 export interface Alerts {

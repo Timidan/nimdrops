@@ -40,7 +40,7 @@ Exactly one thing in that run is forced: `expires_at` is set one second into the
 **Not proven, and not claimed.**
 
 - **No mainnet run has happened.** Every transaction above is TestAlbatross. The mainnet spike is blocked on operator provisioning (mainnet custody key generated on the host, mainnet NIM). Three things must be re-measured, not assumed, before mainnet: whether a 0-luna fee is still accepted, the finality wall-clock, and consensus establishment time from the deployment host. **Do not read this README as a claim of mainnet readiness.**
-- **No real Nimiq Pay device signature fixture exists yet.** `SIG_SCHEME` selects which bytes a wallet signs (`raw` or `nimiq-signed-message`) and fails closed when unset — it is a configuration lock waiting on a measurement from a real phone, not a proven value. The exact return shape of `sendBasicTransactionWithData` (hash, or serialized transaction from which the hash must be derived) is likewise still to be settled on device; the bridge passes the provider's string through unchanged and logs the raw value.
+- **No real Nimiq Pay device signature fixture exists yet.** `SIG_SCHEME` is now set from Nimiq's own published format — a wallet signs `sha256('\x16Nimiq Signed Message:\n' + message.length + message)`, so `nimiq-signed-message` is the value, and `server/test/fixtures/device-sign.json` locks it. That fixture is **source-derived, not device-captured**: it is generated from the documented format with a throwaway key, so it proves the server verifies what the format says, not that Nimiq Pay obeys the format. A capture from a real phone is still owed. The exact return shape of `sendBasicTransactionWithData` (hash, or serialized transaction from which the hash must be derived) is likewise still to be settled on device; the bridge passes the provider's string through unchanged and logs the raw value.
 - **TLS and a public hostname are not configured.** `Caddyfile` still names `drops.example.com`; no DNS name has been provided, so the stack currently listens only on the docker network.
 - **The Day-0 (G0) mainnet gate and the real-device release matrix in [`docs/HACKATHON.md`](./docs/HACKATHON.md) are open**, as is the final adversarial code review of the settlement gate.
 - **The deposit reconciliation report enumerates only against a test double.** See [Security and threat boundary](#security-and-threat-boundary).
@@ -120,7 +120,7 @@ The invariants that actually protect other people's money:
 | `CUSTODY_PRIVATE_KEY_HEX` | Custody wallet key. Generate on the deployment host, back up encrypted, never in Git |
 | `STATUS_TOKEN_SECRET` | HMAC secret for opaque claim status tokens |
 | `NIMIQ_NETWORK` | `TestAlbatross` or `MainAlbatross`. No default; every process refuses to start without it |
-| `SIG_SCHEME` | Which bytes a wallet signs: `raw` or `nimiq-signed-message`. Fails closed when unset |
+| `SIG_SCHEME` | Which bytes a wallet signs: `raw` or `nimiq-signed-message`. Fails closed when unset. **A deployment serving Nimiq Pay must be `nimiq-signed-message`** |
 | `PUBLIC_ORIGIN` | Canonical origin used in share links, OG tags and claim challenges |
 | `PORT` | API port. Optional, defaults to 8080 |
 | `ALERT_WEBHOOK_URL` | Operator alerts. Optional; falls back to console |

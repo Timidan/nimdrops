@@ -7,12 +7,19 @@ import {
   issueChallenge as mintChallenge,
   type Challenge,
 } from '../auth/challenge'
-import { addressFromPublicKey, verifyWalletSignature, type SigScheme } from '../auth/verify'
+import {
+  addressFromPublicKey,
+  checkWalletSignature,
+  otherScheme,
+  WALLET_SIG_SCHEME,
+  type SigScheme,
+} from '../auth/verify'
 import { requireNetwork } from '../config'
 import type { Queryable } from '../db/pool'
 import { ConflictError, bindIdem, idemKeyHash, lookupIdem } from '../http/idempotency'
 import { statusToken, hashToken } from '../ids'
 import { formatNim } from '../money'
+import type { AlertKind } from './alerts'
 import { DropNotFoundError } from './drops'
 import { assertSolvent, lockControls } from './solvency'
 
@@ -72,10 +79,27 @@ export type ClaimRejectionCode =
   | 'drop_expired'
   | 'exhausted'
 
+/**
+ * An operator-facing finding attached to a refusal that the claimant must not
+ * be told apart from any other refusal.
+ *
+ * It exists for exactly one situation so far: a signature that verifies under
+ * the scheme we are NOT configured for. That is a deployment fault — every
+ * claimant of every drop is being turned away — and it is invisible from the
+ * outside, because a rejected claim looks the same either way. The claim is
+ * still refused; the alert is how the fault stops being silent.
+ */
+export interface ClaimDiagnostic {
+  alert: AlertKind
+  detail: Record<string, unknown>
+}
+
 export class ClaimRejectedError extends ClaimError {
   constructor(
     readonly code: ClaimRejectionCode,
     message: string,
+    /** Never reaches the client. `http/app.ts` turns it into an operator alert. */
+    readonly diagnostic?: ClaimDiagnostic,
   ) {
     super(message)
   }
@@ -150,10 +174,14 @@ function requireOrigin(): string {
 }
 
 /**
- * Which bytes the wallet signs. Locked by the Task 7 device fixture and supplied
- * as config; an unset or unknown value fails closed rather than guessing, since
- * guessing wrong would either reject every real claimant or accept a signature
- * over bytes we never authored.
+ * Which bytes the wallet signs. An unset or unknown value fails closed rather
+ * than guessing, since guessing wrong rejects every real claimant.
+ *
+ * A deployment serving Nimiq Pay wants {@link WALLET_SIG_SCHEME}; see
+ * `auth/verify.ts` for where that is established. It stays configurable so a
+ * non-wallet signer can be verified too, and because a wrong value must be
+ * *detectable* — {@link reserveClaim} says so out loud when the signature it
+ * just refused would have verified under the other scheme.
  */
 function requireSigScheme(): SigScheme {
   const scheme = process.env.SIG_SCHEME
@@ -344,14 +372,33 @@ export async function reserveClaim(pool: Pool, o: ReserveClaimInput): Promise<Cl
   const message = challenge.canonical_message
   const parsed = parseChallenge(message, o.publicId)
 
-  if (
-    !verifyWalletSignature({
-      message,
-      publicKeyHex: o.publicKeyHex,
-      signatureHex: o.signatureHex,
-      scheme,
-    })
-  ) {
+  const check = checkWalletSignature({
+    message,
+    publicKeyHex: o.publicKeyHex,
+    signatureHex: o.signatureHex,
+    scheme,
+  })
+  if (!check.ok) {
+    // A mismatch is OUR fault, not the claimant's, and it refuses everyone
+    // silently: the claim still fails, but an operator gets told why. Accepting
+    // the other scheme here instead would mean the running server verifies
+    // bytes nobody configured it to verify, which is not a fix, it is a second
+    // undocumented scheme.
+    if (check.schemeMismatch) {
+      throw new ClaimRejectedError(
+        'invalid_signature',
+        `signature does not verify under SIG_SCHEME=${scheme}`,
+        {
+          alert: 'sig_scheme_mismatch',
+          detail: {
+            dropId: drop.id,
+            configured: scheme,
+            verifiesUnder: otherScheme(scheme),
+            walletScheme: WALLET_SIG_SCHEME,
+          },
+        },
+      )
+    }
     throw new ClaimRejectedError('invalid_signature', 'signature does not verify')
   }
 

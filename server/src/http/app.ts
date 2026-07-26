@@ -163,7 +163,13 @@ const CLAIM_MESSAGES: Record<ClaimRejectionCode, string> = {
   cross_drop_challenge: 'this claim request is no longer valid — start again',
   challenge_expired: 'this claim request expired — start again',
   challenge_consumed: 'this claim request was already used — start again',
-  invalid_signature: 'the wallet signature could not be verified',
+  // NOT "the wallet signature could not be verified". That sentence reads as
+  // "your wallet refused you", which is the one thing it never means: the
+  // wallet did its part and this server could not confirm it. The claimant
+  // declining in Nimiq Pay is a different screen with its own words, so this
+  // one owes them the other half — nothing was spent, and the link still works.
+  invalid_signature:
+    'we could not check that approval — nothing was claimed and nothing left your wallet, so try again or come back to this link later',
   message_mismatch: 'this claim request is no longer valid — start again',
   drop_not_live: 'this drop is not accepting claims',
   drop_expired: 'this drop has expired',
@@ -409,6 +415,12 @@ export function makeApp(deps: AppDeps): Hono {
     if (mapped.code === 'paused') void alerts.notify('paused', { surface: 'api' })
     if (mapped.code === 'degraded') void alerts.notify('stale_reconciliation', { surface: 'api' })
     if (mapped.code === 'unavailable') void alerts.notify('insolvent', { surface: 'api' })
+    // A refusal the claimant is not told apart from any other refusal, because
+    // it is not about them: the service found the failure operator-shaped and
+    // said so. See `ClaimDiagnostic` in `services/claims.ts`.
+    if (err instanceof ClaimRejectedError && err.diagnostic) {
+      void alerts.notify(err.diagnostic.alert, { surface: 'api', ...err.diagnostic.detail })
+    }
     return envelope(mapped)
   })
 

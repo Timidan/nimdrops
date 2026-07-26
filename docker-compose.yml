@@ -34,7 +34,7 @@ x-app: &app
     ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
     NIMIQ_NETWORK: ${NIMIQ_NETWORK:?set NIMIQ_NETWORK in .env}
     PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?set PUBLIC_ORIGIN in .env}
-    SIG_SCHEME: ${SIG_SCHEME:-raw}
+    SIG_SCHEME: ${SIG_SCHEME:-nimiq-signed-message}
     # Proves to the API that an X-NimDrops-Client-IP header came from our own
     # Caddy and not from someone who found the origin. OPTIONAL and unset by
     # default: with no proxy the API buckets by socket peer, which is right. Set
@@ -104,7 +104,7 @@ services:
       ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
       NIMIQ_NETWORK: ${NIMIQ_NETWORK:?set NIMIQ_NETWORK in .env}
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?set PUBLIC_ORIGIN in .env}
-      SIG_SCHEME: ${SIG_SCHEME:-raw}
+      SIG_SCHEME: ${SIG_SCHEME:-nimiq-signed-message}
     deploy:
       replicas: 1
 

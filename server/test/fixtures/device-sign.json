@@ -1,0 +1,39 @@
+{
+  "provenance": {
+    "deviceCaptured": false,
+    "kind": "source-derived",
+    "summary": "Generated from Nimiq's published signed-message format with a throwaway key. NOT captured from a phone. Every byte below is reproducible from the sources listed in `derivedFrom` plus `testKey.privateKey`.",
+    "derivedFrom": [
+      "nimiq/keyguard src/lib/Key.js — Key.signMessage(): buffer = utf8(prefix) + utf8(message.byteLength.toString(10)) + message; hash = Nimiq.Hash.computeSha256(buffer); the Ed25519 signature is over that 32-byte hash, never over the message.",
+      "nimiq/hub client/HubApi.ts — public static readonly MSG_PREFIX = '\\x16Nimiq Signed Message:\\n' (23 bytes: 0x16 is the length of the 22-byte label that follows).",
+      "nimiq/hub sign-message API reference — states the signed bytes verbatim as sign( sha256( '\\x16Nimiq Signed Message:\\n' + message.length + message ) )."
+    ],
+    "notDerivedFrom": [
+      "@nimiq/mini-app-sdk 0.1.0 — dist/provider.js sign() only forwards { method: 'sign', params: { message } } over the native bridge. It never touches the bytes, so it cannot tell you what gets signed.",
+      "@nimiq/core 2.7.1 — ships no message-signing or message-verifying helper, and the string 'Nimiq Signed Message' appears nowhere in its wasm. SignatureProof.verify(data) verifies transaction data, not prefixed messages."
+    ],
+    "proves": "The server verifies exactly the bytes Nimiq's documented format produces, and refuses the same signature under the `raw` scheme.",
+    "doesNotProve": "That the Nimiq Pay build on any given handset follows that documented format. The wallet side of the mini-app bridge is closed source; only a capture from a real device settles it.",
+    "howToReplaceWithACapture": "Open a live drop inside Nimiq Pay, tap the claim button, approve, then read window.__nimiqRawLog (web/src/sdk/adapter.ts records every sign() request and response). Copy the request `message` and the response `publicKey`/`signature` into this file, set deviceCaptured to true, replace `derivedFrom` with the device/app version, and delete `testKey`. test/device-sign.test.ts must still pass unchanged — that is the whole point of it.",
+    "generatedAt": "2026-07-26"
+  },
+
+  "scheme": "nimiq-signed-message",
+  "message": "{\"action\":\"claim\",\"aud\":\"https://nimdrops.timidan.xyz\",\"drop\":\"215iSmgp9JQg68QPDwDV8A\",\"exp\":1785000300,\"iat\":1785000000,\"net\":\"MainAlbatross\",\"nonce\":\"oQ2vT8kZ1mB6cX4nR0sPfw\",\"v\":1}",
+  "messageByteLength": 182,
+  "signedMessageDigest": "06e99360e05d79cad7e3ba2e257e11aa94d940eae3cd9f5a2b220892a5e8eb39",
+  "publicKey": "29e5833a915a6429a4e3a7948475c338ef436eb82be89c92f059704403db9d55",
+  "signature": "01731bc512033fc8eaddc6116a0491cbec5459d425c4edcbbaab32195a2f7e4cda40ceff749b147575387e7df4371ca293137158b070b32f45ed66ac7f3ba00b",
+  "walletReportedAddress": "NQ07 CDQK RDEC P1FY VN23 UL49 UFMM S8U2 X2RX",
+
+  "rawSchemeCounterExample": {
+    "note": "The SAME key over the SAME message under the `raw` scheme: Ed25519 straight over the UTF-8 message bytes, no prefix and no hash. Present so the test can prove the mismatch diagnostic fires in BOTH directions, not just the one that broke production.",
+    "scheme": "raw",
+    "signature": "922791696986f65bbde71f66e93f5303cbacd5add0fcff4a49fa21a51f3133af2c2edfe2b3545896c3654889a0cd660e0877b48cc490b85f1a973be085150d0c"
+  },
+
+  "testKey": {
+    "note": "Throwaway. Deterministic, non-secret, never funded, never used on any network — the same convention as CUSTODY_KEY_HEX in test/boot-binding.test.ts. It is here so the committed signatures can be re-derived and proven un-fudged; Ed25519 signing is deterministic (RFC 8032), so regenerating must reproduce them byte for byte. Delete this block when a real device capture replaces the vector.",
+    "privateKey": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5"
+  }
+}

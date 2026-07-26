@@ -52,6 +52,8 @@ interface Wallet {
   publicKeyHex: string
   address: string
   sign(message: string): string
+  /** Ed25519 over the prefixed SHA-256 digest: what Nimiq Pay actually sends. */
+  signLikeNimiqPay(message: string): string
 }
 
 /** A real Ed25519 wallet: the suite never fakes a signature it then verifies. */
@@ -61,6 +63,21 @@ function newWallet(): Wallet {
     publicKeyHex: keyPair.publicKey.toHex(),
     address: keyPair.publicKey.toAddress().toUserFriendlyAddress(),
     sign: (message: string) => keyPair.sign(new Uint8Array(Buffer.from(message, 'utf8'))).toHex(),
+    // What a real Nimiq wallet returns, which this suite's `SIG_SCHEME=raw`
+    // deliberately does NOT accept — see the misconfiguration test below.
+    signLikeNimiqPay: (message: string) => {
+      const body = Buffer.from(message, 'utf8')
+      const digest = createHash('sha256')
+        .update(
+          Buffer.concat([
+            Buffer.from('\x16Nimiq Signed Message:\n', 'utf8'),
+            Buffer.from(String(body.byteLength), 'utf8'),
+            body,
+          ]),
+        )
+        .digest()
+      return keyPair.sign(new Uint8Array(digest)).toHex()
+    },
   }
 }
 
@@ -664,6 +681,67 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
       409,
       'drop_not_live',
     )
+  })
+
+  /**
+   * The live incident: production ran `SIG_SCHEME=raw`, a claimant approved in
+   * Nimiq Pay, and the server refused a perfectly good signature. From the
+   * outside it was indistinguishable from a wallet that declined — nobody could
+   * see it but the claimant, and what they saw blamed their wallet.
+   *
+   * The refusal is correct and stays: the server must not start accepting bytes
+   * it was not configured to accept. What changes is that it now says why, to
+   * the one party who can fix it.
+   */
+  it('alerts the operator when a refused signature fits the OTHER SIG_SCHEME', async () => {
+    const warnings: string[] = []
+    vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+      warnings.push(args.map(String).join(' '))
+    })
+
+    const draft = await liveDrop()
+    const wallet = newWallet()
+    const issued = await challenge(draft.publicId)
+    const res = await post(`/api/drops/${draft.publicId}/claims`, {
+      idemKey: randomUUID(),
+      body: {
+        challengeId: issued.challengeId,
+        publicKey: wallet.publicKeyHex,
+        signature: wallet.signLikeNimiqPay(issued.message),
+      },
+    })
+
+    const message = await expectEnvelope(res, 409, 'invalid_signature')
+    // The claimant is not blamed and is not told to blame their wallet.
+    expect(message).not.toMatch(/wallet signature/i)
+    expect(message).toMatch(/nothing was claimed/i)
+
+    const alert = warnings.find((line) => line.includes('sig_scheme_mismatch'))
+    expect(alert).toBeDefined()
+    const parsed = JSON.parse(alert as string) as Record<string, unknown>
+    expect(parsed.alert).toBe('sig_scheme_mismatch')
+    expect(parsed.detail).toMatchObject({
+      configured: 'raw',
+      verifiesUnder: 'nimiq-signed-message',
+      walletScheme: 'nimiq-signed-message',
+    })
+
+    // And a signature that is simply wrong stays an ordinary refusal.
+    warnings.length = 0
+    const other = await challenge(draft.publicId)
+    await expectEnvelope(
+      await post(`/api/drops/${draft.publicId}/claims`, {
+        idemKey: randomUUID(),
+        body: {
+          challengeId: other.challengeId,
+          publicKey: wallet.publicKeyHex,
+          signature: newWallet().sign(other.message),
+        },
+      }),
+      409,
+      'invalid_signature',
+    )
+    expect(warnings.some((line) => line.includes('sig_scheme_mismatch'))).toBe(false)
   })
 
   it('answers money paths with 503 and a retry hint while custody is paused', async () => {
