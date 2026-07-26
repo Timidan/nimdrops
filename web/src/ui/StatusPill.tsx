@@ -18,7 +18,7 @@ const LABELS: Record<ClaimUiState, string> = {
   reserved: 'Reserved',
   confirming: 'Confirming',
   paid: 'Paid',
-  rejected: 'Not approved',
+  rejected: 'Not claimed',
   exhausted: 'All claimed',
   expired: 'Ended',
   degraded: 'Network trouble',

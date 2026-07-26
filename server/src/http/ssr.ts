@@ -73,7 +73,10 @@ function escapeHtml(value: string): string {
  * Static preview copy. Deliberately free of numbers: see rule 1. It also avoids
  * "one tap" (Global Constraints) — approving a payment is a real, deliberate act.
  */
-const OG_DESCRIPTION = 'A fixed share of NIM from one funded campaign. Open in Nimiq Pay to claim yours.'
+// This is the first thing a stranger reads, in a chat preview, before they know
+// what NimDrops is. It introduces the product, not the mechanism: "campaign" is
+// the sponsor's word for what they funded, never the recipient's word for a gift.
+const OG_DESCRIPTION = 'One link. A fixed share of NIM for everyone who opens it.'
 const GENERIC_OG_TITLE = 'Someone is sharing NIM'
 
 function ogTitle(drop: DropPublic | null): string {

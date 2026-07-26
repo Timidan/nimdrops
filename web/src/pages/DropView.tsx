@@ -419,7 +419,13 @@ const OUTCOME_TITLES: Partial<Record<ClaimUiState, string>> = {
   paused: 'Claims are paused for safety',
   expired: 'This drop has ended',
   exhausted: 'You just missed it',
-  rejected: 'Not approved',
+  // Deliberately neutral: this heading is shared by two different outcomes —
+  // the claimant declined in their wallet, and the server could not verify a
+  // signature it did receive. "Not approved" states the first as though it were
+  // both, blaming the reader for our fault. The body copy below distinguishes
+  // them; the heading only has to be true of either and reassure that nothing
+  // was spent.
+  rejected: 'Nothing was claimed',
 }
 
 function Outcome({
