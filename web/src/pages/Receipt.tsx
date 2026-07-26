@@ -8,6 +8,10 @@ import { explorerTxUrl } from '../state/claim'
  * it is checkable by someone who does not trust NimDrops: the amount, the
  * sponsor label (marked unverified, because it is just text the sponsor typed),
  * and the transaction on a public explorer.
+ *
+ * It does not restate the amount as a headline. The envelope it rises into has
+ * that number printed on its face, under the gold keyline; saying it twice at
+ * two sizes would read as two different facts.
  */
 export interface ReceiptProps {
   publicId: string
@@ -25,30 +29,27 @@ function shortHash(hash: string): string {
 export default function Receipt({ publicId, amountEach, txHash, sponsorLabel }: ReceiptProps) {
   return (
     <section aria-label="Claim receipt">
-      <header className="flex items-center gap-3">
+      <header className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1">
         <p className="rounded-full bg-ink px-2.5 py-1 text-[0.6875rem] font-semibold tracking-wide text-paper">
           Paid
         </p>
         <span className="text-xs text-ink/45">on the Nimiq blockchain</span>
       </header>
 
-      <h1 className="mt-5 text-4xl font-semibold tracking-tight tabular-nums">
-        {amountEach} <span className="text-2xl font-medium text-ink/60">NIM</span>
-      </h1>
-      <p className="mt-2 text-sm leading-relaxed text-ink/60">
+      <p className="mt-4 text-center text-sm leading-relaxed text-ink/60">
         Sent to your wallet — the same one that approved the signature.
       </p>
 
-      <dl className="mt-7 divide-y divide-ink/10 rounded-3xl border border-ink/10 bg-white text-sm">
-        <div className="flex items-baseline justify-between px-4 py-3">
-          <dt className="text-ink/55">From</dt>
-          <dd className="text-right">
+      <dl className="mt-6 divide-y divide-ink/10 rounded-3xl border border-ink/10 bg-white text-sm">
+        <div className="flex items-baseline justify-between gap-3 px-4 py-3">
+          <dt className="shrink-0 text-ink/55">From</dt>
+          <dd className="min-w-0 text-right [overflow-wrap:anywhere]">
             {sponsorLabel} <span className="text-xs text-ink/40">(unverified)</span>
           </dd>
         </div>
-        <div className="flex items-baseline justify-between px-4 py-3">
-          <dt className="text-ink/55">Transaction</dt>
-          <dd className="text-right font-mono text-xs">
+        <div className="flex items-baseline justify-between gap-3 px-4 py-3">
+          <dt className="shrink-0 text-ink/55">Transaction</dt>
+          <dd className="min-w-0 text-right font-mono text-xs [overflow-wrap:anywhere]">
             {txHash ? shortHash(txHash) : 'confirmed — id syncing'}
           </dd>
         </div>
@@ -59,7 +60,8 @@ export default function Receipt({ publicId, amountEach, txHash, sponsorLabel }: 
           href={explorerTxUrl(txHash)}
           target="_blank"
           rel="noreferrer noopener"
-          className="mt-4 block text-center text-sm font-semibold text-gold-deep underline underline-offset-4"
+          /* py-3 keeps the tap target past 44px; a link is a control too. */
+          className="mt-3 block py-3 text-center text-sm font-semibold text-gold-deep underline underline-offset-4"
         >
           View on the Nimiq explorer
         </a>
@@ -67,7 +69,7 @@ export default function Receipt({ publicId, amountEach, txHash, sponsorLabel }: 
 
       <Link
         to={`/create?amount=${encodeURIComponent(amountEach)}`}
-        className="nd-primary mt-8 block w-full text-center"
+        className="nd-primary mt-6 block w-full text-center"
       >
         Drop one back
       </Link>

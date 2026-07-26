@@ -11,6 +11,8 @@ import {
 import { capProblem, formatNim, lunaFromNim, MAX_CLAIMS, MIN_CLAIMS } from '../money'
 import { nimiqPayDeeplink, resolveBridge, type BridgeResult } from '../sdk/adapter'
 import AmountInput from '../ui/AmountInput'
+import Envelope from '../ui/Envelope'
+import NdScreen from '../ui/Screen'
 import Sheet from '../ui/Sheet'
 
 /**
@@ -190,7 +192,9 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
     }
   }, [polled, publicId])
 
-  if (phase === 'live' && draft) return <Live draft={draft} drop={drop} />
+  if (phase === 'live' && draft) {
+    return <Live draft={draft} drop={drop} sealMark={sponsorLabel.trim().slice(0, 1).toUpperCase()} />
+  }
 
   if (phase === 'no-wallet') return <NoWallet />
 
@@ -288,7 +292,12 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
         Nimiq Pay.
       </p>
 
-      <Sheet open={reviewOpen} title="Before you fund" onClose={() => setReviewOpen(false)}>
+      <Sheet
+        open={reviewOpen}
+        title="Before you fund"
+        sealMark={sponsorLabel.trim().slice(0, 1).toUpperCase()}
+        onClose={() => setReviewOpen(false)}
+      >
         <dl className="divide-y divide-ink/10 text-sm">
           <Row label="Each person gets">{`${amountEach || '0'} NIM`}</Row>
           <Row label="People">{String(claimCount)}</Row>
@@ -313,11 +322,16 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
 
 // ---- pieces ---------------------------------------------------------------------
 
+/**
+ * The create flow is the envelope before it has a flap: a blank sheet the
+ * sponsor fills in. The wax appears at the two moments it means something —
+ * the review sheet (sealing it) and the share screen (sealed).
+ */
 function Screen({ children }: { children: ReactNode }) {
   return (
-    <main className="mx-auto flex min-h-dvh w-full max-w-[430px] flex-col bg-paper px-6 pt-6 pb-16 text-ink">
-      {children}
-    </main>
+    <NdScreen>
+      <main className="nd-face flex-1 pt-7 pb-14 text-ink">{children}</main>
+    </NdScreen>
   )
 }
 
@@ -558,64 +572,81 @@ function NoWallet() {
   )
 }
 
-function Live({ draft, drop }: { draft: Draft; drop: DropPublic | null }) {
+function Live({
+  draft,
+  drop,
+  sealMark,
+}: {
+  draft: Draft
+  drop: DropPublic | null
+  sealMark: string
+}) {
   const [copied, setCopied] = useState(false)
   const canShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function'
 
   return (
-    <Screen>
-      <div className="py-10">
-        <p className="text-xs font-semibold tracking-[0.14em] text-gold uppercase">Funded</p>
-        <h1 className="mt-2 text-2xl font-semibold tracking-tight">Your drop is live</h1>
-        <p className="mt-3 text-sm leading-relaxed text-ink/60">
-          {drop
-            ? `${drop.remaining} of ${drop.claimCount} shares of ${drop.amountEach} NIM are waiting. Share the link — the first ${drop.claimCount} wallets to open it each get one.`
-            : 'Share the link. Each wallet that opens it can claim one fixed share.'}
-        </p>
+    <NdScreen>
+      {/* Sealed, and about to be handed round: the same object the claimant
+          will meet at the other end of the link. */}
+      <Envelope open={false} {...(sealMark ? { sealMark } : {})}>
+        <div className="pb-12">
+          <p className="inline-flex rounded-full bg-gold/20 px-2.5 py-1 text-xs font-semibold text-gold-deep">
+            Funded
+          </p>
+          <h1 className="mt-3 text-2xl font-semibold tracking-tight">Your drop is live</h1>
+          <p className="mt-3 text-sm leading-relaxed text-ink/60">
+            {drop
+              ? `${drop.remaining} of ${drop.claimCount} shares of ${drop.amountEach} NIM are waiting. Share the link — the first ${drop.claimCount} wallets to open it each get one.`
+              : 'Share the link. Each wallet that opens it can claim one fixed share.'}
+          </p>
 
-        <div className="mt-8 rounded-3xl border border-ink/10 bg-white p-5">
-          <img
-            src={`/d/${draft.publicId}/qr.svg`}
-            alt="QR code for this drop's link"
-            width={220}
-            height={220}
-            className="mx-auto h-auto w-full max-w-[220px]"
-          />
-          <p className="mt-4 break-all text-center text-xs text-ink/60">{draft.shareUrl}</p>
-        </div>
+          <div className="mt-8 rounded-3xl border border-ink/10 bg-white p-5">
+            <img
+              src={`/d/${draft.publicId}/qr.svg`}
+              alt="QR code for this drop's link"
+              width={220}
+              height={220}
+              className="mx-auto h-auto w-full max-w-[200px]"
+            />
+            <p className="mt-4 text-center text-xs break-all text-ink/60">{draft.shareUrl}</p>
+          </div>
 
-        <div className="mt-6 space-y-3">
-          {canShare ? (
+          <div className="mt-6 space-y-3">
+            {canShare ? (
+              <button
+                type="button"
+                className="nd-primary w-full"
+                onClick={() => {
+                  // A dismissed share sheet rejects with AbortError; that is a
+                  // choice, not a failure.
+                  void navigator
+                    .share({ title: 'A NimDrop for you', url: draft.shareUrl })
+                    .catch(() => {})
+                }}
+              >
+                Share
+              </button>
+            ) : null}
             <button
               type="button"
-              className="nd-primary w-full"
+              className={canShare ? 'nd-secondary w-full' : 'nd-primary w-full'}
               onClick={() => {
-                // A dismissed share sheet rejects with AbortError; that is a
-                // choice, not a failure.
-                void navigator.share({ title: 'A NimDrop for you', url: draft.shareUrl }).catch(() => {})
+                void navigator.clipboard
+                  ?.writeText(draft.shareUrl)
+                  .then(() => setCopied(true))
+                  .catch(() => setCopied(false))
               }}
             >
-              Share
+              {copied ? 'Link copied' : 'Copy link'}
             </button>
-          ) : null}
-          <button
-            type="button"
-            className={canShare ? 'nd-secondary w-full' : 'nd-primary w-full'}
-            onClick={() => {
-              void navigator.clipboard
-                ?.writeText(draft.shareUrl)
-                .then(() => setCopied(true))
-                .catch(() => setCopied(false))
-            }}
-          >
-            {copied ? 'Link copied' : 'Copy link'}
-          </button>
-        </div>
+          </div>
 
-        <p className="mt-8 text-xs leading-relaxed text-ink/50">
-          Unclaimed shares are refunded to the wallet that funded this drop, 24 hours after it went live.
-        </p>
-      </div>
-    </Screen>
+          <p className="mt-8 text-xs leading-relaxed text-ink/50">
+            Unclaimed shares are refunded to the wallet that funded this drop, 24 hours after it
+            went live.
+          </p>
+        </div>
+      </Envelope>
+    </NdScreen>
   )
 }

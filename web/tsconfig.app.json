@@ -4,7 +4,12 @@
     "target": "es2023",
     "lib": ["ES2023", "DOM"],
     "module": "esnext",
-    "types": ["vite/client"],
+    /* `node` is here for the vitest suites only — `Envelope.test.tsx` reads
+       `index.css` off disk to assert the reduced-motion contract, which is the
+       one design rule that lives entirely in the stylesheet. Application code
+       still targets the browser; nothing under `src` outside a `.test.*` file
+       may reach for a node builtin. */
+    "types": ["vite/client", "node"],
     "allowArbitraryExtensions": true,
     "skipLibCheck": true,
 

@@ -144,6 +144,21 @@ describe('Create — review sheet', () => {
     // §10.4: first come, first served, one per wallet, no personhood proof.
     expect(within(sheet).getByText(/one per wallet/i)).toBeTruthy()
   })
+
+  it('seals the envelope: the sponsor initial is pressed into wax on the sheet', () => {
+    render(<Create discoverBridge={bridgeOf(new MockBridge())} />)
+    fillForm({ from: 'Team NimDrops' })
+    const sheet = openReview()
+
+    // §4.4: this is the moment the sponsor seals it, so it carries the same
+    // wax the claimant will break at the other end of the link.
+    const wax = sheet.querySelector('.nd-wax')
+    expect(wax).toBeTruthy()
+    expect(wax?.getAttribute('aria-hidden')).toBe('true')
+    expect(wax?.querySelector('.nd-wax-mark')?.textContent).toBe('T')
+    // Decorative only — it must not have crowded out the dialog's own label.
+    expect(within(sheet).getByRole('heading', { name: /before you fund/i })).toBeTruthy()
+  })
 })
 
 describe('Create — funding', () => {

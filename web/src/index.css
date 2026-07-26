@@ -2,18 +2,39 @@
 
 /**
  * Design §4.4: a sealed paper envelope, passed around one real group.
- * A deep blue field, one gold accent, system type, and nothing else. Task 17
- * builds the envelope moment on top of this; it should not need to undo any of
- * it.
+ * A deep blue field, one gold accent, system type, and nothing else.
+ *
+ * The envelope is not a card drawn on the screen — it IS the screen. The deep
+ * blue field shows only as the safe-area frame and as the headroom the flap
+ * swings into. Everything below builds that one object: face, flap, wax.
  */
 @theme {
   --color-ink: #1f2348;
   --color-gold: #e9b213;
   --color-gold-deep: #c8960b;
   --color-paper: #fbf9f4;
+  /* The tone of a folded-over sheet: the same paper, one shade in shadow. */
+  --color-paper-fold: #f0ebdd;
 
   --font-sans:
     system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', sans-serif;
+}
+
+:root {
+  /* Flap depth tracks the width, the way a real envelope's does. 320px → 104px,
+     390px → 117px, 430px and up → 129px. */
+  --nd-flap-h: clamp(6.5rem, 30vw, 8.125rem);
+  /**
+   * The blue the flap swings up into. It has to clear the flap's own projected
+   * height at the open angle — `flap × cos(48°) × perspective foreshortening`,
+   * about 0.62 of the flap — with a little air left over.
+   */
+  --nd-headroom: calc(var(--nd-flap-h) * 0.68);
+  /** How far past vertical the flap leans when the envelope is open. */
+  --nd-open-angle: -132deg;
+  /* Side gutter: 20px on a 320px phone, 24px from ~400px up. */
+  --nd-gutter: clamp(1.25rem, 6vw, 1.5rem);
+  --nd-wax-size: 3.5rem;
 }
 
 html {
@@ -27,6 +48,313 @@ body {
   color: var(--color-ink);
 }
 
+/* ---- the field ------------------------------------------------------------ */
+
+/**
+ * The WebView can have a notch and a home indicator. The field absorbs both, so
+ * the paper never runs under hardware and the blue that is left over reads as
+ * intentional matting rather than a clipped screen.
+ */
+.nd-field {
+  display: flex;
+  justify-content: center;
+  min-height: 100dvh;
+  background-color: var(--color-ink);
+  padding-top: env(safe-area-inset-top);
+  padding-right: env(safe-area-inset-right);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
+}
+
+.nd-column {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+  max-width: 430px;
+}
+
+/* ---- the envelope ---------------------------------------------------------- */
+
+.nd-envelope {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  margin-top: var(--nd-headroom);
+  perspective: 900px;
+}
+
+.nd-face {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  padding-right: var(--nd-gutter);
+  padding-left: var(--nd-gutter);
+  border-radius: 0.75rem 0.75rem 0 0;
+  /* Flat paper on purpose: the flap needs a clean sheet to cast a crease onto. */
+  background-color: var(--color-paper);
+  /* Stated, not inherited — nothing about this surface should depend on what
+     mounts it. */
+  color: var(--color-ink);
+  box-shadow: 0 18px 44px -20px rgb(0 0 0 / 0.6);
+  transition: transform 620ms cubic-bezier(0.22, 1.15, 0.36, 1);
+}
+
+/* Room for the flap and the wax that straddles its point. */
+.nd-face--sealed {
+  padding-top: calc(var(--nd-flap-h) + 1.5rem);
+}
+
+.nd-envelope[data-envelope-open='true'] .nd-face {
+  /* The face lifts a few pixels as the flap comes away from it. */
+  transform: translateY(-6px);
+}
+
+/**
+ * The inside of the envelope, revealed where the flap used to lie. Without it
+ * an opened envelope is just a blank margin; with it, the top of the face reads
+ * as depth you are looking into.
+ */
+.nd-liner {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  z-index: 1;
+  height: calc(var(--nd-flap-h) + 0.25rem);
+  border-radius: 0.75rem 0.75rem 0 0;
+  /* Warm, because paper in its own shadow is brown, not grey. */
+  background-image: linear-gradient(
+    180deg,
+    rgb(92 72 34 / 0.17) 0%,
+    rgb(92 72 34 / 0.06) 44%,
+    rgb(92 72 34 / 0) 100%
+  );
+  opacity: 0;
+  transition: opacity 520ms ease-out;
+  pointer-events: none;
+}
+
+.nd-envelope[data-envelope-open='true'] .nd-liner {
+  opacity: 1;
+}
+
+.nd-flap {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  z-index: 2;
+  height: var(--nd-flap-h);
+  transform-origin: top center;
+  transform: rotateX(0deg);
+  transition: transform 640ms cubic-bezier(0.22, 1.15, 0.36, 1);
+  pointer-events: none;
+}
+
+.nd-envelope[data-envelope-open='true'] .nd-flap {
+  transform: rotateX(var(--nd-open-angle));
+}
+
+/**
+ * The two diagonal fold seams. They are the clipped edges of the flap itself,
+ * and the shadow the clip casts onto the sheet below is what makes them read as
+ * creases in paper rather than as a shape someone drew.
+ */
+.nd-flap-face {
+  height: 100%;
+  border-radius: 0.75rem 0.75rem 0 0;
+  clip-path: polygon(0 0, 100% 0, 50% 100%);
+  background-image: linear-gradient(176deg, #f8f4ea 0%, #f1ecdd 62%, #e9e2d0 100%);
+  filter: drop-shadow(0 2px 3px rgb(31 35 72 / 0.13));
+}
+
+/* Leaned back past vertical, the flap shows its underside — so it is shaded,
+   and it throws a longer shadow. */
+.nd-envelope[data-envelope-open='true'] .nd-flap-face {
+  filter: drop-shadow(0 6px 12px rgb(10 12 30 / 0.4)) brightness(0.9);
+}
+
+/* ---- the wax ---------------------------------------------------------------- */
+
+.nd-seal {
+  position: absolute;
+  top: calc(var(--nd-flap-h) - var(--nd-wax-size) / 2);
+  left: 50%;
+  z-index: 3;
+  transform: translateX(-50%);
+  transition: transform 420ms cubic-bezier(0.4, 0, 0.2, 1);
+  pointer-events: none;
+}
+
+.nd-envelope[data-envelope-open='true'] .nd-seal {
+  transform: translateX(-50%) scale(0.86);
+}
+
+/** A disc of gold wax, pressed slightly off-square the way a real stamp lands. */
+.nd-wax {
+  position: relative;
+  display: inline-block;
+  flex-shrink: 0;
+  width: var(--nd-wax-size);
+  height: var(--nd-wax-size);
+  transform: rotate(-7deg);
+}
+
+/**
+ * Wax, not a bauble. A pressed disc is nearly flat: a broad, low sheen instead
+ * of a specular dot, a darker rim where it spread and cooled, and a ring
+ * pressed in by the stamp. The ring lives on each half so it splits with them.
+ */
+.nd-wax-half {
+  position: absolute;
+  inset: 0;
+  /* Not a circle: wax spreads. */
+  border-radius: 47% 53% 52% 48% / 51% 49% 51% 49%;
+  background-image:
+    radial-gradient(ellipse 70% 60% at 38% 30%, rgb(255 249 219 / 0.5) 0%, rgb(255 249 219 / 0) 62%),
+    radial-gradient(circle at 50% 44%, #e8b422 0%, #d9a412 58%, #ab7f08 100%);
+  box-shadow:
+    inset 0 1px 1px rgb(255 244 205 / 0.5),
+    inset 0 -2px 4px rgb(96 62 2 / 0.45),
+    0 1px 2px rgb(31 35 72 / 0.3),
+    0 5px 10px -5px rgb(31 35 72 / 0.5);
+  transition:
+    transform 480ms cubic-bezier(0.3, 1.1, 0.4, 1),
+    opacity 380ms ease-out;
+}
+
+.nd-wax-half::after {
+  content: '';
+  position: absolute;
+  inset: 13%;
+  border-radius: inherit;
+  box-shadow:
+    inset 0 0 0 1.5px rgb(112 74 4 / 0.26),
+    inset 0 1px 0 rgb(255 244 205 / 0.3);
+}
+
+/* The halves overlap by a hair so the sealed disc has no crack down it. */
+.nd-wax-half.is-left {
+  clip-path: inset(0 49.6% 0 0);
+}
+.nd-wax-half.is-right {
+  clip-path: inset(0 0 0 49.6%);
+}
+
+/* The seal breaks: the disc splits along its middle and fades. */
+.nd-envelope[data-envelope-open='true'] .nd-wax-half.is-left {
+  transform: translateX(-0.6rem) rotate(-13deg);
+  opacity: 0;
+}
+.nd-envelope[data-envelope-open='true'] .nd-wax-half.is-right {
+  transform: translateX(0.6rem) rotate(13deg);
+  opacity: 0;
+}
+
+.nd-wax-mark {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: calc(var(--nd-wax-size) * 0.36);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: color-mix(in srgb, var(--color-ink) 72%, transparent);
+  /* Struck into the wax, so it has a lit lower edge. */
+  text-shadow: 0 1px 0 rgb(255 244 205 / 0.4);
+  transition: opacity 240ms ease-out;
+}
+
+.nd-envelope[data-envelope-open='true'] .nd-wax-mark {
+  opacity: 0;
+}
+
+/* Dead ends — ended, all claimed, paused. Nothing here is going to be opened,
+   and the wax says so before the sentence does. */
+.nd-envelope[data-envelope-tone='quiet'] .nd-wax-half {
+  background-image:
+    radial-gradient(ellipse 70% 60% at 38% 30%, rgb(255 255 255 / 0.4) 0%, rgb(255 255 255 / 0) 62%),
+    radial-gradient(circle at 50% 44%, #cdc8bb 0%, #b6b1a2 58%, #8e8977 100%);
+}
+
+/* ---- the printed amount ------------------------------------------------------ */
+
+/** Struck onto the face like a denomination, not typed into a field. */
+.nd-amount {
+  font-weight: 600;
+  line-height: 0.95;
+  letter-spacing: -0.035em;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/** The single celebratory beat in the whole product. */
+.nd-keyline {
+  width: 3.25rem;
+  height: 2px;
+  margin: 0.875rem auto 0;
+  border-radius: 999px;
+  background-color: var(--color-gold);
+  animation: nd-keyline 520ms cubic-bezier(0.22, 1.15, 0.36, 1) 1 both;
+}
+
+@keyframes nd-keyline {
+  from {
+    transform: scaleX(0);
+  }
+}
+
+/** One pass of warmth behind the amount as the seal comes apart. Once. */
+.nd-bloom {
+  position: absolute;
+  top: calc(var(--nd-flap-h) + 1.5rem);
+  right: -12%;
+  left: -12%;
+  height: 12rem;
+  border-radius: 50%;
+  background-image: radial-gradient(
+    closest-side,
+    color-mix(in srgb, var(--color-gold) 58%, transparent) 0%,
+    transparent 100%
+  );
+  filter: blur(18px);
+  opacity: 0;
+  animation: nd-bloom 900ms ease-out 1;
+  pointer-events: none;
+}
+
+@keyframes nd-bloom {
+  0% {
+    opacity: 0;
+    transform: scale(0.75);
+  }
+  38% {
+    opacity: 0.55;
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.25);
+  }
+}
+
+/** The receipt rising into the opened envelope. */
+.nd-rise {
+  animation: nd-rise 520ms cubic-bezier(0.22, 1.1, 0.36, 1) both;
+}
+
+@keyframes nd-rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+}
+
+/* ---- controls ---------------------------------------------------------------- */
+
 /* One primary action per screen, and it always looks like this. */
 .nd-primary {
   border-radius: 1rem;
@@ -36,6 +364,7 @@ body {
   font-weight: 600;
   /* ~52px tall: comfortably past the 44px touch-target floor. */
   padding: 0.9rem 1.25rem;
+  min-height: 3.25rem;
   transition: opacity 120ms ease-out;
 }
 .nd-primary:disabled {
@@ -53,6 +382,7 @@ body {
   font-size: 1rem;
   font-weight: 600;
   padding: 0.9rem 1.25rem;
+  min-height: 3.25rem;
 }
 
 :where(button, a, input):focus-visible {
@@ -81,7 +411,15 @@ body {
   animation: nd-pulse 1.6s ease-in-out infinite;
 }
 
-/* Design §4.4: every state is reachable with animation off. */
+/**
+ * Design §4.4: every state is reachable with animation off.
+ *
+ * The opened envelope is a STATE, not a keyframe — the flap angle, the split
+ * wax and the lifted face are all plain declarations under
+ * `[data-envelope-open='true']`, reached by transition. Killing the durations
+ * here therefore lands on the finished, legible opened envelope rather than
+ * skipping it.
+ */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

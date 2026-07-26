@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, type ReactNode } from 'react'
+import { Wax } from './Envelope'
 
 /**
  * A bottom sheet: the review surface of the create flow.
@@ -7,15 +8,21 @@ import { useEffect, useId, useRef, type ReactNode } from 'react'
  * page scroll locked while it is up. The slide-in is CSS only and is disabled
  * by `prefers-reduced-motion` in `index.css` (design §4.4), so the sheet is
  * fully usable with animation off.
+ *
+ * `sealMark` puts the same wax on it that a claimant will break. This is the
+ * moment the sponsor seals the envelope, so it should look like the same
+ * object from the other side.
  */
 export interface SheetProps {
   open: boolean
   title: string
   onClose: () => void
+  /** The sponsor's initial, pressed into the wax above the title. */
+  sealMark?: string
   children: ReactNode
 }
 
-export default function Sheet({ open, title, onClose, children }: SheetProps) {
+export default function Sheet({ open, title, onClose, sealMark, children }: SheetProps) {
   const titleId = useId()
   const panel = useRef<HTMLDivElement>(null)
 
@@ -54,9 +61,12 @@ export default function Sheet({ open, title, onClose, children }: SheetProps) {
         className="nd-sheet relative w-full max-w-[430px] rounded-t-3xl bg-paper px-6 pt-5 pb-8 text-ink shadow-2xl outline-none"
       >
         <div aria-hidden="true" className="mx-auto mb-4 h-1 w-10 rounded-full bg-ink/15" />
-        <h2 id={titleId} className="text-lg font-semibold tracking-tight">
-          {title}
-        </h2>
+        <div className="flex items-center gap-3">
+          {sealMark !== undefined ? <Wax mark={sealMark} size="2.25rem" /> : null}
+          <h2 id={titleId} className="text-lg font-semibold tracking-tight">
+            {title}
+          </h2>
+        </div>
         <div className="mt-4">{children}</div>
       </div>
     </div>
