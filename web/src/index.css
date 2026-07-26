@@ -1,6 +1,17 @@
 @import 'tailwindcss';
 
 /**
+ * The dev-only design boards under `pages/design/` write plain CSS into their
+ * own `<style>` elements and use no Tailwind utilities at all. Without this
+ * exclusion Tailwind still scans them, and ordinary CSS keywords that happen to
+ * also be utility names — `flex`, `grid`, `absolute`, `hidden`, `underline` —
+ * get emitted into the PRODUCTION stylesheet even though the components
+ * themselves are tree-shaken out of the bundle. Dead JavaScript costs nothing;
+ * dead CSS ships. Measured: 2.05 kB raw off the production stylesheet.
+ */
+@source not "./pages/design";
+
+/**
  * Design §4.4: a sealed paper envelope, passed around one real group.
  * A deep blue field, one gold accent, system type, and nothing else.
  *
