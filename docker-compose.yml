@@ -45,7 +45,13 @@ services:
       POSTGRES_USER: nimdrops
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
     ports:
-      - "5432:5432"
+      # LOOPBACK ONLY. `5432:5432` binds 0.0.0.0 and publishes the custody
+      # database to the internet — docker-proxy also punches straight past a
+      # host firewall, so ufw would not have saved us. The app talks to
+      # `postgres:5432` over the compose network and never needs this mapping;
+      # it exists so an operator on the box can run psql. Anything remote goes
+      # through an SSH tunnel.
+      - '127.0.0.1:5432:5432'
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
