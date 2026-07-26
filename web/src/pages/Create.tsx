@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import {
   ApiError,
   createDrop,
@@ -27,6 +28,26 @@ import Sheet from '../ui/Sheet'
 
 /** Design §4.2 step 5: poll the public state, do not guess. */
 const POLL_MS = 3000
+
+/** How many people the form starts on, and the count a `?amount=` is judged against. */
+const DEFAULT_CLAIM_COUNT = 5
+
+/**
+ * The reciprocity loop's one piece of state: "Drop one back" carries the amount
+ * the claimant just received as `?amount=`, so the return drop opens with that
+ * number already in the field.
+ *
+ * A link is not typed input, but it is held to exactly the same rules — the same
+ * `lunaFromNim` parse and the same `capProblem` caps the form itself uses. A
+ * param that fails any of them is dropped in silence and the field opens empty:
+ * a stale or hand-edited link is not a mistake the claimant made, so it is not a
+ * mistake they are shown. Only the amount travels; the people count is the
+ * sponsor's own decision and stays at its default.
+ */
+function prefillAmount(raw: string | null): string {
+  if (raw === null) return ''
+  return capProblem(lunaFromNim(raw), DEFAULT_CLAIM_COUNT) === null ? raw : ''
+}
 
 type Phase =
   | 'form'
@@ -65,8 +86,11 @@ export interface CreateProps {
 }
 
 export default function Create({ discoverBridge = resolveBridge }: CreateProps) {
-  const [amountEach, setAmountEach] = useState('')
-  const [claimCount, setClaimCount] = useState(5)
+  // Read once, on mount: the param seeds the field, it does not own it. Every
+  // later keystroke wins, and nothing here writes back to the URL.
+  const [searchParams] = useSearchParams()
+  const [amountEach, setAmountEach] = useState(() => prefillAmount(searchParams.get('amount')))
+  const [claimCount, setClaimCount] = useState(DEFAULT_CLAIM_COUNT)
   const [sponsorLabel, setSponsorLabel] = useState('')
   const [message, setMessage] = useState('')
 

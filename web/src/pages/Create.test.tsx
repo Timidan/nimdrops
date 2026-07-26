@@ -7,12 +7,15 @@
  *  - a wallet rejection is recoverable and NEVER reads as "fund it again";
  *  - `Detecting → Confirming → Live` is driven by polled server state, not by
  *    a timer we made up.
+ *  - "Drop one back" arrives with `?amount=`, and that param is trusted no
+ *    further than typed input is.
  */
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BridgeError, type BridgeResult, type WalletBridge } from '../sdk/adapter'
 import { MockBridge } from '../sdk/mock'
-import Create from './Create'
+import Create, { type CreateProps } from './Create'
 
 /** 22 base64url chars — the shape `ids.ts` mints and `app.ts` validates. */
 const PUBLIC_ID = 'Ab3Cd4Ef5Gh6Ij7Kl8Mn9O'
@@ -85,6 +88,19 @@ function rejectingBridge(): WalletBridge {
   }
 }
 
+/** Create reads its `?amount=` seed from the router, so it always mounts inside one. */
+function renderCreate(props: CreateProps = {}, path = '/create') {
+  return render(
+    <MemoryRouter initialEntries={[path]}>
+      <Create {...props} />
+    </MemoryRouter>,
+  )
+}
+
+function amountField() {
+  return screen.getByLabelText(/NIM per person/i) as HTMLInputElement
+}
+
 function fillForm(opts: { amount?: string; people?: string; from?: string } = {}) {
   fireEvent.change(screen.getByLabelText(/NIM per person/i), {
     target: { value: opts.amount ?? '2' },
@@ -118,21 +134,82 @@ afterEach(() => {
 
 describe('Create — amount entry', () => {
   it('derives the total from NIM per person × people', () => {
-    render(<Create discoverBridge={bridgeOf(new MockBridge())} />)
+    renderCreate({ discoverBridge: bridgeOf(new MockBridge()) })
     fillForm({ amount: '2', people: '5' })
     expect(screen.getByText('10 NIM')).toBeTruthy()
   })
 
   it('keeps the total exact for fractional amounts (no float drift)', () => {
-    render(<Create discoverBridge={bridgeOf(new MockBridge())} />)
+    renderCreate({ discoverBridge: bridgeOf(new MockBridge()) })
     fillForm({ amount: '0.07', people: '3' })
     expect(screen.getByText('0.21 NIM')).toBeTruthy()
   })
 })
 
+describe('Create — "Drop one back" prefill', () => {
+  it('opens with the amount the claimant was handed by the link', () => {
+    renderCreate({ discoverBridge: bridgeOf(new MockBridge()) }, '/create?amount=2.5')
+    expect(amountField().value).toBe('2.5')
+    // Only the amount travelled, so the people count stays at its own default
+    // rather than being invented from the sender's drop.
+    expect((screen.getByLabelText(/how many people/i) as HTMLInputElement).value).toBe('5')
+    // 2.5 × 5 — derived from the seed exactly as it would be from typing.
+    expect(screen.getByTestId('derived-total').textContent).toBe('12.5 NIM')
+  })
+
+  it('accepts an amount that only just fits under the total cap', () => {
+    // 20 × the default 5 people is exactly the 100 NIM launch cap.
+    renderCreate({ discoverBridge: bridgeOf(new MockBridge()) }, '/create?amount=20')
+    expect(amountField().value).toBe('20')
+  })
+
+  it('leaves the seeded amount fully editable', () => {
+    renderCreate({ discoverBridge: bridgeOf(new MockBridge()) }, '/create?amount=2.5')
+    fireEvent.change(amountField(), { target: { value: '7' } })
+    expect(amountField().value).toBe('7')
+    expect(screen.getByTestId('derived-total').textContent).toBe('35 NIM')
+  })
+
+  it('starts empty when no amount was passed', () => {
+    renderCreate({ discoverBridge: bridgeOf(new MockBridge()) }, '/create')
+    expect(amountField().value).toBe('')
+    expect(screen.getByTestId('derived-total').textContent).toBe('—')
+  })
+
+  // A link is not a keystroke: the claimant did not type any of this, so a param
+  // that fails the form's own rules is dropped without a word.
+  const rejected: [string, string][] = [
+    ['junk', 'abc'],
+    ['a comma decimal', '2,5'],
+    ['a negative amount', '-1'],
+    ['zero', '0'],
+    ['zero written out', '0.00000'],
+    ['an empty value', ''],
+    ['more than five decimals', '0.123456'],
+    ['a total over the 100 NIM cap at the default count', '21'],
+    ['an absurd number', '99999999999999999999'],
+    ['whitespace', '  2  '],
+  ]
+
+  for (const [label, value] of rejected) {
+    it(`ignores ${label} without an error the user did not cause`, () => {
+      renderCreate(
+        { discoverBridge: bridgeOf(new MockBridge()) },
+        `/create?amount=${encodeURIComponent(value)}`,
+      )
+      expect(amountField().value).toBe('')
+      expect(screen.getByTestId('derived-total').textContent).toBe('—')
+      // The default form has no complaint on it; the cap note is for a total the
+      // sponsor actually built.
+      expect(screen.queryByText(/A drop can hold up to 100 NIM/i)).toBeNull()
+      expect(document.body.textContent ?? '').not.toMatch(/invalid|not a valid|error/i)
+    })
+  }
+})
+
 describe('Create — review sheet', () => {
   it('shows the custody disclosure, expiry and refund rule before the wallet opens', () => {
-    render(<Create discoverBridge={bridgeOf(new MockBridge())} />)
+    renderCreate({ discoverBridge: bridgeOf(new MockBridge()) })
     fillForm()
     const sheet = openReview()
     expect(within(sheet).getByText('10 NIM')).toBeTruthy()
@@ -146,7 +223,7 @@ describe('Create — review sheet', () => {
   })
 
   it('seals the envelope: the sponsor initial is pressed into wax on the sheet', () => {
-    render(<Create discoverBridge={bridgeOf(new MockBridge())} />)
+    renderCreate({ discoverBridge: bridgeOf(new MockBridge()) })
     fillForm({ from: 'Team NimDrops' })
     const sheet = openReview()
 
@@ -172,7 +249,7 @@ describe('Create — funding', () => {
     })
     vi.useFakeTimers()
 
-    render(<Create discoverBridge={bridgeOf(bridge)} />)
+    renderCreate({ discoverBridge: bridgeOf(bridge) })
     fillForm()
     const sheet = openReview()
     fireEvent.click(within(sheet).getByRole('button', { name: /fund drop/i }))
@@ -195,7 +272,7 @@ describe('Create — funding', () => {
 
   it('recovers from a wallet rejection without ever suggesting a second transaction', async () => {
     installFetch({ create: { status: 201, body: DRAFT } })
-    render(<Create discoverBridge={bridgeOf(rejectingBridge())} />)
+    renderCreate({ discoverBridge: bridgeOf(rejectingBridge()) })
     fillForm()
     const sheet = openReview()
     fireEvent.click(within(sheet).getByRole('button', { name: /fund drop/i }))
@@ -217,7 +294,7 @@ describe('Create — funding', () => {
     })
     vi.useFakeTimers()
 
-    render(<Create discoverBridge={bridgeOf(bridge)} />)
+    renderCreate({ discoverBridge: bridgeOf(bridge) })
     fillForm()
     const sheet = openReview()
     fireEvent.click(within(sheet).getByRole('button', { name: /fund drop/i }))
@@ -246,7 +323,7 @@ describe('Create — share screen', () => {
       funding: { status: 200, body: dropBody('live') },
       drops: [{ status: 200, body: dropBody('live') }],
     })
-    render(<Create discoverBridge={bridgeOf(bridge)} />)
+    renderCreate({ discoverBridge: bridgeOf(bridge) })
     fillForm()
     const sheet = openReview()
     fireEvent.click(within(sheet).getByRole('button', { name: /fund drop/i }))
