@@ -49,6 +49,8 @@ interface Reply {
 
 interface Script {
   drop?: Reply
+  /** Consumed one per drop read; the last entry repeats forever. Wins over `drop`. */
+  drops?: Reply[]
   challenge?: Reply
   claim?: Reply
   status?: Reply[]
@@ -56,6 +58,7 @@ interface Script {
 
 function installFetch(script: Script) {
   const statuses = [...(script.status ?? [])]
+  const drops = script.drops ? [...script.drops] : null
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: unknown) => {
@@ -64,6 +67,7 @@ function installFetch(script: Script) {
       if (url.includes('/api/claims/')) reply = statuses.length > 1 ? statuses.shift() : statuses[0]
       else if (url.endsWith('/challenge')) reply = script.challenge
       else if (url.endsWith('/claims')) reply = script.claim
+      else if (drops) reply = drops.length > 1 ? drops.shift() : drops[0]
       else reply = script.drop
       if (!reply) throw new Error(`unscripted fetch: ${url}`)
       return { ok: reply.status < 400, status: reply.status, json: async () => reply.body }
@@ -94,11 +98,17 @@ function seedResumableClaim() {
   )
 }
 
-function mount(discoverBridge: () => Promise<BridgeResult> = bridgeOf(new MockBridge())) {
+function mount(
+  discoverBridge: () => Promise<BridgeResult> = bridgeOf(new MockBridge()),
+  pollMs = 5,
+) {
   return render(
     <MemoryRouter initialEntries={[`/d/${PUBLIC_ID}`]}>
       <Routes>
-        <Route path="/d/:publicId" element={<Drop discoverBridge={discoverBridge} pollMs={5} />} />
+        <Route
+          path="/d/:publicId"
+          element={<Drop discoverBridge={discoverBridge} pollMs={pollMs} />}
+        />
       </Routes>
     </MemoryRouter>,
   )
@@ -160,6 +170,66 @@ describe('Drop — opened in a plain browser (no wallet)', () => {
     expect(screen.getByRole('button', { name: /copy link/i })).toBeTruthy()
     // The offer is still visible, so the claimant knows what it is worth.
     expect(screen.getByTestId('amount-hero').textContent).toMatch(/2\s*NIM/)
+  })
+})
+
+describe('Drop — the sponsor has not funded it yet', () => {
+  it('keeps the offer visible and says why, without a claim button that cannot work', async () => {
+    installFetch({ drop: { status: 200, body: dropBody({ state: 'awaiting_funding' }) } })
+    mount()
+
+    const panel = await screen.findByTestId('awaiting-funding')
+    expect(panel.textContent).toMatch(/has not funded this NimDrop yet/i)
+    expect(panel.textContent).toMatch(/nothing is wrong with this link/i)
+    // The promise the poll has to keep.
+    expect(panel.textContent).toMatch(/appears here as soon as the funding is confirmed/i)
+
+    // A dead primary button reads as a broken page: there must not be one.
+    expect(screen.queryByRole('button', { name: /claim/i })).toBe(null)
+    expect(screen.getByTestId('status-pill').textContent).toBe('Not funded yet')
+    // ...but there IS something that works.
+    expect(screen.getByRole('button', { name: /copy link/i })).toBeTruthy()
+
+    // The envelope stays sealed, and everything real stays on screen.
+    expect(screen.getByTestId('envelope').getAttribute('data-envelope-open')).toBe('false')
+    expect(screen.getByTestId('amount-hero').textContent).toMatch(/2\s*NIM/)
+    expect(screen.getByText('Team NimDrops')).toBeTruthy()
+    expect(screen.getByTestId('remaining').textContent).toMatch(/3.*5/)
+
+    // No spinner language, no blame, no promise of a tap that does nothing.
+    expect(document.body.textContent ?? '').not.toMatch(/Opening/i)
+    expect(document.body.textContent ?? '').not.toMatch(/one[\s-]?tap/i)
+    expect(document.body.textContent ?? '').not.toMatch(/failed|error|your fault/i)
+  })
+
+  it('turns into a claimable drop on its own when the funding confirms', async () => {
+    installFetch({
+      drops: [
+        { status: 200, body: dropBody({ state: 'awaiting_funding' }) },
+        { status: 200, body: dropBody({ state: 'live' }) },
+      ],
+    })
+    // A slower poll than the rest of this file uses, so the unfunded screen is
+    // observably rendered before the refresh replaces it.
+    mount(bridgeOf(new MockBridge()), 60)
+
+    await screen.findByTestId('awaiting-funding')
+    // No reload and no interaction — the poll does it.
+    const button = await screen.findByRole('button', { name: /claim 2 NIM/i })
+    expect((button as HTMLButtonElement).disabled).toBe(false)
+    expect(screen.queryByTestId('awaiting-funding')).toBe(null)
+  })
+
+  it('says a pending funding transaction is confirming, not that the page is opening', async () => {
+    installFetch({ drop: { status: 200, body: dropBody({ state: 'funding_pending' }) } })
+    mount()
+
+    const panel = await screen.findByTestId('funding-confirming')
+    expect(panel.textContent).toMatch(/funding transaction is on the network and confirming/i)
+    expect(panel.textContent).toMatch(/goes live the moment that transaction is final/i)
+    expect(screen.getByTestId('status-pill').textContent).toBe('Confirming')
+    expect(screen.queryByRole('button', { name: /claim/i })).toBe(null)
+    expect(document.body.textContent ?? '').not.toMatch(/Opening/i)
   })
 })
 

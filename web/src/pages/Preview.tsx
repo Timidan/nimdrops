@@ -51,6 +51,24 @@ const LONG_MESSAGE =
 
 const CASES: Case[] = [
   { name: 'loading', state: 'loading', drop: null },
+  {
+    // The live-phone defect: a shared link to a campaign the sponsor created
+    // but never paid for. No transaction exists, so there is no claim button.
+    //
+    // `expiresAt: null` because the server only sets an expiry at activation —
+    // a countdown on these two would be a fixture inventing a fact.
+    name: 'awaiting-funding',
+    note: 'sponsor has not paid yet — sealed, no dead button',
+    state: 'awaiting-funding',
+    drop: drop({ state: 'awaiting_funding', remaining: 5, expiresAt: null }),
+  },
+  {
+    // Still `loading` in the machine, because this one resolves on its own.
+    name: 'funding confirming',
+    note: "the sponsor's funding tx is on the network",
+    state: 'loading',
+    drop: drop({ state: 'funding_pending', remaining: 5, expiresAt: null }),
+  },
   { name: 'ready', state: 'ready' },
   { name: 'signing', state: 'signing' },
   { name: 'no-wallet', state: 'no-wallet' },

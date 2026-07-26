@@ -53,9 +53,17 @@ export function explorerTxUrl(txHash: string): string {
  * `manual_review` member: a review means "we hold your slot and a human is
  * looking", which is still in flight, so it displays as `confirming` with the
  * raw `serverState` carrying the reason for the copy.
+ *
+ * `awaiting-funding` is its own member rather than a flavour of `loading`
+ * because the two are different facts. `loading` means "we are fetching, this
+ * ends in a moment". A drop in `awaiting_funding` has no funding transaction
+ * anywhere — the sponsor has not paid — so nothing is in flight and nothing is
+ * guaranteed to end. Displaying that as a spinner under a dead claim button is
+ * how a shared link to an unfunded campaign comes to look broken.
  */
 export type ClaimUiState =
   | 'loading'
+  | 'awaiting-funding'
   | 'no-wallet'
   | 'ready'
   | 'signing'
@@ -136,8 +144,12 @@ function clearStored(publicId: string): void {
 export function stateForDrop(drop: DropPublic): ClaimUiState {
   switch (drop.state) {
     case 'awaiting_funding':
+      // No funding transaction exists. Not a refusal and not a wait with a
+      // known end: say so, and keep asking in case the sponsor pays.
+      return 'awaiting-funding'
     case 'funding_pending':
-      // Not a refusal: the sponsor is mid-funding. Keep asking.
+      // A funding transaction is on the network and confirming. This one does
+      // resolve on its own, so it stays a wait.
       return 'loading'
     case 'paused':
     case 'manual_review':
@@ -167,14 +179,16 @@ function uiForServer(state: ClaimServerState): ClaimUiState {
 /**
  * Pre-claim states whose truth is the drop projection, so they keep asking:
  * a drop still being funded goes live on its own, and a remaining count falls
- * while the claimant reads the card.
+ * while the claimant reads the card. `awaiting-funding` is here for the same
+ * reason — it is the whole promise of that screen, which says the page will
+ * become claimable by itself the moment the sponsor's funding lands.
  *
  * `degraded` is NOT here. Degradation is a fact about the money path (a 503
  * from the challenge or claim endpoint), and a drop projection that reads fine
  * is not evidence that payouts resumed — silently re-enabling the button on
  * that basis would invite a tap the server is about to refuse again.
  */
-const DROP_POLLED: readonly ClaimUiState[] = ['loading', 'ready']
+const DROP_POLLED: readonly ClaimUiState[] = ['loading', 'awaiting-funding', 'ready']
 
 export function useClaim(publicId: string, options: UseClaimOptions = {}): ClaimController {
   const { discoverBridge = resolveBridge, pollMs = CLAIM_POLL_MS } = options

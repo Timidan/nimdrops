@@ -49,6 +49,8 @@ interface Reply {
 
 interface Script {
   drop?: Reply
+  /** Consumed one per drop read; the last entry repeats forever. Wins over `drop`. */
+  drops?: Reply[]
   challenge?: Reply
   claim?: Reply
   /** Consumed one per poll; the last entry repeats forever. */
@@ -64,6 +66,7 @@ interface Call {
 function installFetch(script: Script) {
   const calls: Call[] = []
   const statuses = [...(script.status ?? [])]
+  const drops = script.drops ? [...script.drops] : null
   const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
     const url = String(input)
     const method = (init?.method ?? 'GET').toUpperCase()
@@ -72,6 +75,7 @@ function installFetch(script: Script) {
     if (url.includes('/api/claims/')) reply = statuses.length > 1 ? statuses.shift() : statuses[0]
     else if (url.endsWith('/challenge')) reply = script.challenge
     else if (url.endsWith('/claims')) reply = script.claim
+    else if (drops) reply = drops.length > 1 ? drops.shift() : drops[0]
     else reply = script.drop
     if (!reply) throw new Error(`unscripted fetch: ${method} ${url}`)
     return { ok: reply.status < 400, status: reply.status, json: async () => reply.body }
@@ -108,8 +112,11 @@ function errorBody(code: string, message = 'nope') {
   return { error: { code, message } }
 }
 
-function mount(discoverBridge: () => Promise<BridgeResult> = bridgeOf(new MockBridge())) {
-  return renderHook(() => useClaim(PUBLIC_ID, { discoverBridge, pollMs: 5 }))
+function mount(
+  discoverBridge: () => Promise<BridgeResult> = bridgeOf(new MockBridge()),
+  pollMs = 5,
+) {
+  return renderHook(() => useClaim(PUBLIC_ID, { discoverBridge, pollMs }))
 }
 
 afterEach(() => {
@@ -164,6 +171,43 @@ describe('useClaim — landing', () => {
     const { result } = mount()
 
     await waitFor(() => expect(result.current.state).toBe('degraded'))
+  })
+})
+
+describe('useClaim — a drop the sponsor has not funded', () => {
+  it('names `awaiting_funding` instead of pretending to load', async () => {
+    installFetch({ drop: { status: 200, body: dropBody({ state: 'awaiting_funding' }) } })
+    const { result } = mount()
+
+    await waitFor(() => expect(result.current.state).toBe('awaiting-funding'))
+    // The campaign itself is real and stays readable.
+    expect(result.current.amountEach).toBe('2')
+    expect(result.current.drop?.sponsorLabel).toBe('Team NimDrops')
+  })
+
+  it('keeps asking, and becomes claimable by itself when the funding lands', async () => {
+    const { calls } = installFetch({
+      drops: [
+        { status: 200, body: dropBody({ state: 'awaiting_funding' }) },
+        { status: 200, body: dropBody({ state: 'live' }) },
+      ],
+    })
+    // A slower poll than the rest of this file uses, so the unfunded screen is
+    // observably on screen before the refresh replaces it.
+    const { result } = mount(bridgeOf(new MockBridge()), 60)
+
+    await waitFor(() => expect(result.current.state).toBe('awaiting-funding'))
+    // No reload, no tap: the poll flips the screen.
+    await waitFor(() => expect(result.current.state).toBe('ready'))
+    expect(calls.filter((c) => c.method === 'GET').length).toBeGreaterThan(1)
+  })
+
+  it('still treats `funding_pending` as a wait — that one resolves on its own', async () => {
+    installFetch({ drop: { status: 200, body: dropBody({ state: 'funding_pending' }) } })
+    const { result } = mount()
+
+    await waitFor(() => expect(result.current.drop?.state).toBe('funding_pending'))
+    expect(result.current.state).toBe('loading')
   })
 })
 

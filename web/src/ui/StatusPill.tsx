@@ -11,6 +11,7 @@ import type { ClaimUiState } from '../state/claim'
  */
 const LABELS: Record<ClaimUiState, string> = {
   loading: 'Opening',
+  'awaiting-funding': 'Not funded yet',
   'no-wallet': 'Wallet needed',
   ready: 'Live',
   signing: 'Waiting for your wallet',
@@ -27,6 +28,9 @@ const LABELS: Record<ClaimUiState, string> = {
 /** Gold = something is happening; ink = a settled fact; muted = a dead end. */
 const TONES: Record<ClaimUiState, string> = {
   loading: 'bg-ink/8 text-ink/55',
+  // Muted, not gold: nothing is happening yet. It is also not a dead end, so
+  // the copy under it — not the pill — carries the "this can still go live".
+  'awaiting-funding': 'bg-ink/8 text-ink/55',
   'no-wallet': 'bg-ink/8 text-ink/55',
   ready: 'bg-gold/18 text-gold-deep',
   signing: 'bg-gold/18 text-gold-deep',

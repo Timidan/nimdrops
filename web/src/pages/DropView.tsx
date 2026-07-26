@@ -12,7 +12,7 @@ import Receipt from './Receipt'
  * Everything the campaign page looks like, with none of what it knows.
  *
  * `Drop` owns the claim machine; this owns the envelope. Splitting them is what
- * lets `/preview` render all twelve states at once from fixtures, and it is
+ * lets `/preview` render all thirteen states at once from fixtures, and it is
  * also what keeps the envelope MOUNTED across a state change — the seal can
  * only be seen to break if the same DOM node was sealed a moment ago.
  */
@@ -105,6 +105,18 @@ function Face({
   const paid = state === 'paid'
   const inFlight = state === 'reserved' || state === 'confirming'
   const review = inFlight && serverState === 'manual_review'
+
+  /**
+   * Two different pre-funding facts, told apart here because only one of them
+   * has a transaction behind it.
+   *
+   * `awaiting-funding` is a state of its own. `funding_pending` stays folded
+   * into `loading` in the machine — it genuinely resolves on its own — but the
+   * drop projection is right here, so the screen can say *which* wait this is
+   * instead of showing the boot spinner's "Opening" for a minute.
+   */
+  const unfunded = state === 'awaiting-funding'
+  const fundingConfirming = state === 'loading' && drop?.state === 'funding_pending'
 
   return (
     <div className="flex flex-1 flex-col pb-12">
@@ -200,6 +212,8 @@ function Face({
 
           {state === 'no-wallet' ? (
             <NoWallet publicId={publicId} />
+          ) : unfunded || fundingConfirming ? (
+            <Funding confirming={fundingConfirming} />
           ) : (
             <div className="mt-7">
               <div className="mb-4 flex justify-center">
@@ -221,10 +235,15 @@ function Face({
             </div>
           )}
 
-          <p className="mt-auto pt-8 text-center text-xs leading-relaxed text-ink/45">
-            One share per wallet. NimDrops holds the NIM until it is claimed, then sends it to the
-            wallet that signed.
-          </p>
+          {/* Not shown while unfunded: NimDrops is holding nothing yet, and a
+              footer that says otherwise would be the one invented fact on an
+              otherwise honest screen. */}
+          {unfunded ? null : (
+            <p className="mt-auto pt-8 text-center text-xs leading-relaxed text-ink/45">
+              One share per wallet. NimDrops holds the NIM until it is claimed, then sends it to the
+              wallet that signed.
+            </p>
+          )}
         </>
       )}
     </div>
@@ -238,6 +257,62 @@ function Opening() {
     <div className="flex flex-1 flex-col items-center justify-center pb-24 text-center">
       <div className="nd-pulse h-1.5 w-16 rounded-full bg-gold" aria-hidden="true" />
       <p className="mt-6 text-sm text-ink/55">Opening this NimDrop…</p>
+    </div>
+  )
+}
+
+/**
+ * The campaign exists, the money does not — yet.
+ *
+ * There is no claim button here on purpose. A primary button that can never be
+ * pressed is read as a broken page, and on `awaiting_funding` there is no
+ * transaction anywhere to make it pressable. The amount, the sponsor and the
+ * share count above are all real and stay on screen; this block replaces only
+ * the affordance, with the plain reason and a working secondary action.
+ *
+ * The page goes on polling underneath, which is the only thing that makes the
+ * last sentence true.
+ */
+function Funding({ confirming }: { confirming: boolean }) {
+  return (
+    <div data-testid={confirming ? 'funding-confirming' : 'awaiting-funding'} className="mt-7">
+      <div className="mb-4 flex justify-center">
+        <StatusPill state={confirming ? 'confirming' : 'awaiting-funding'} />
+      </div>
+
+      <div className="rounded-2xl bg-ink/5 p-4">
+        {confirming ? (
+          <>
+            <p className="text-sm leading-relaxed text-ink/75">
+              The sponsor&rsquo;s funding transaction is on the network and confirming now.
+            </p>
+            <p className="mt-3 text-sm leading-relaxed text-ink/60">
+              There is nothing to do. This drop goes live the moment that transaction is final, and
+              this page updates itself.
+            </p>
+          </>
+        ) : (
+          <>
+            <p className="text-sm leading-relaxed text-ink/75">
+              The sponsor has not funded this NimDrop yet. Until they send the NIM, there is nothing
+              here to claim.
+            </p>
+            <p className="mt-3 text-sm leading-relaxed text-ink/60">
+              Nothing is wrong with this link. The page keeps checking on its own, and the claim
+              button appears here as soon as the funding is confirmed.
+            </p>
+          </>
+        )}
+      </div>
+
+      {confirming ? null : (
+        <>
+          <CopyLinkButton className="nd-secondary mt-5 w-full" />
+          <p className="mt-3 text-center text-xs leading-relaxed text-ink/50">
+            Keep the link if you would rather come back later — it stays the same.
+          </p>
+        </>
+      )}
     </div>
   )
 }
