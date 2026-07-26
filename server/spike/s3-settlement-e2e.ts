@@ -58,7 +58,9 @@ import '../src/db/pool'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const DEV_KEY_PATH = join(HERE, '.dev-key')
-const EVIDENCE_PATH = join(HERE, 'g1-local-evidence.md')
+// Override with S3_EVIDENCE_PATH when the source tree is read-only (e.g. inside the
+// deploy image, where the evidence file belongs on a mounted volume instead).
+const EVIDENCE_PATH = process.env.S3_EVIDENCE_PATH ?? join(HERE, 'g1-local-evidence.md')
 
 const FAUCET_URL = 'https://faucet.pos.nimiq-testnet.com/tapit'
 const EXPLORER = 'https://test.nimiq.watch'
@@ -156,6 +158,22 @@ async function ensureFunded(
 // ---------------------------------------------------------------------------
 // database
 // ---------------------------------------------------------------------------
+
+/**
+ * Persist the run write-up. Never throws: by the time this runs the settlement
+ * result is already proven and printed, so a read-only source tree (the deploy
+ * image) must not turn a passing gate run into a non-zero exit.
+ */
+function writeEvidence(lines: string[]): void {
+  try {
+    writeFileSync(EVIDENCE_PATH, lines.join('\n'))
+    log(`wrote ${EVIDENCE_PATH}`)
+  } catch (err) {
+    log(`WARNING: could not write ${EVIDENCE_PATH}: ${(err as Error).message}`)
+    log('evidence follows on stdout instead:')
+    console.log(lines.join('\n'))
+  }
+}
 
 async function createRunSchema(): Promise<pg.Pool> {
   const admin = new pg.Pool({ connectionString: DATABASE_URL })
@@ -501,9 +519,9 @@ async function main(): Promise<void> {
     console.log('total runtime    :', el())
     console.log('=== S3 PASSED ===')
 
-    writeFileSync(
-      EVIDENCE_PATH,
-      [
+    // The settlement result is already proven above; a failure to persist the
+    // write-up must not turn a passing gate run into a non-zero exit.
+    writeEvidence([
         '# G1 local evidence — s3-settlement-e2e',
         '',
         `- run id: \`${RUN_ID}\``,
@@ -529,9 +547,7 @@ async function main(): Promise<void> {
         'UPDATE (the production horizon is 24h). Every transition after that UPDATE was',
         'produced by the shipped services.',
         '',
-      ].join('\n'),
-    )
-    log(`wrote ${EVIDENCE_PATH}`)
+    ])
   } finally {
     await pool.end()
     await dropRunSchema()
