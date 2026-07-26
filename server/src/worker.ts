@@ -7,7 +7,7 @@ import { exitAfterFlush, exitAfterTeardown } from './exit'
 import { logError, logInfo, logWarn } from './http/redact'
 import { type Alerts, createAlerts, throttled } from './services/alerts'
 import { gcDrafts, settleTerminal, sweepExpiry } from './services/expiry'
-import { ensureChainBinding, reconcile } from './services/solvency'
+import { assertFloatAttestationIntact, ensureChainBinding, reconcile } from './services/solvency'
 import {
   acquireWorkerLock,
   reconcileOnStartup,
@@ -74,6 +74,11 @@ export async function runWorker(chain: ChainClient, alerts: Alerts): Promise<voi
     // spend. The database is the single authority both are checked against.
     const { network, custodyAddress } = await ensureChainBinding(pool, chain)
     log('chain_binding_verified', { network, custodyAddress })
+
+    // And the float attestation has to belong to that chain. A database carried
+    // between networks would keep counting the other chain's deposits as
+    // spendable custody money, and this is the process that spends it.
+    await assertFloatAttestationIntact(pool, network)
 
     // Order matters, and round-3 R4 REVERSED it. Attempts first:
     //

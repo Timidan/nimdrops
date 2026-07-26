@@ -8,7 +8,7 @@ import { makeApp } from './http/app'
 import { makeClientIpResolver } from './http/client-ip'
 import { logError, logInfo, logWarn } from './http/redact'
 import { createAlerts } from './services/alerts'
-import { ensureChainBinding } from './services/solvency'
+import { assertFloatAttestationIntact, ensureChainBinding } from './services/solvency'
 
 /**
  * API entrypoint (design §11).
@@ -109,6 +109,13 @@ async function main(): Promise<void> {
   // takes real deposits into a wallet the worker holds no key for.
   const { network, custodyAddress } = await ensureChainBinding(pool, chain)
   log('chain_binding_verified', { network, custodyAddress })
+
+  // The float attestation must belong to the chain we just bound. A database
+  // carried from testnet to mainnet would keep counting testnet deposits as
+  // custody money and this process would publish the resulting headroom as
+  // funding capacity. See `assertFloatAttestationIntact` for why it is here and
+  // not inside the binding itself.
+  await assertFloatAttestationIntact(pool, network)
 
   const alerts = createAlerts({ source: 'nimdrops-api' })
 

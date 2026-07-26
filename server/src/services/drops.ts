@@ -4,7 +4,15 @@ import { errorMessage, requireNetwork } from '../config'
 import type { Queryable } from '../db/pool'
 import { newPublicId } from '../ids'
 import { assertCaps, formatNim } from '../money'
-import { assertSolvent, lockControls, reconcile } from './solvency'
+import {
+  type CapacitySnapshot,
+  assertCapacityFor,
+  assertSolvent,
+  lockControls,
+  lockControlsForCapacity,
+  readCapacity,
+  reconcile,
+} from './solvency'
 
 /**
  * Drop drafts and exact funding activation (design §7).
@@ -36,6 +44,30 @@ import { assertSolvent, lockControls, reconcile } from './solvency'
 export const MEMO_PREFIX = 'ND1:'
 /** Expiry is measured from finalized activation, never from draft creation. */
 export const EXPIRY_HOURS = 24
+
+/**
+ * How long funding instructions hold aggregate cap headroom (migration 014).
+ *
+ * Two failure directions, and the number sits between them.
+ *
+ *  - TOO SHORT and a sponsor who is still reading the confirmation screen loses
+ *    their room to somebody else; they then pay, and the activation that used to
+ *    fail before this change fails after it instead. That is the exact bug being
+ *    fixed, so the window has to be comfortably longer than a real funding flow:
+ *    open the wallet, read the disclosure, approve, and wait out macro finality.
+ *  - TOO LONG and an abandoned draft keeps everyone else out. On a pilot capped
+ *    at one live drop, a single tab left open would close the product.
+ *
+ * Thirty minutes is roughly thirty times the funding flow and roughly a
+ * forty-eighth of the 24-hour draft GC horizon. It is deliberately NOT the GC
+ * horizon: garbage collection answers "when may this row be deleted", which is
+ * a question about storage, and a reservation answers "how long did we promise
+ * a stranger room", which is a question about other sponsors.
+ *
+ * A draft that has a funding hash recorded against it keeps its room past this
+ * window regardless — see `reservedPrincipalLuna`. The sponsor has paid by then.
+ */
+export const FUNDING_RESERVATION_MINUTES = 30
 
 /**
  * NOTE on `paused`: this is a PER-DROP state, never the operator kill switch.
@@ -142,6 +174,10 @@ export interface Draft {
   fundingAddress: string
   fundingMemo: string
   expectedFundingLuna: bigint
+  /** When this draft stops holding aggregate cap headroom. */
+  reservationExpiresAt: Date
+  /** The capacity picture AFTER this reservation, for the sponsor's disclosure. */
+  capacity: CapacitySnapshot
 }
 
 /** The one memo that can fund this drop. Compared with `===`, never `includes`. */
@@ -154,8 +190,32 @@ export function fundingMemoFor(publicId: string): string {
 }
 
 /**
- * Create an unfunded draft. No money exists yet, so this takes no locks and
- * makes no chain calls beyond reading the custody address to display.
+ * Create an unfunded draft AND reserve the aggregate capacity its funding will
+ * need (migration 014).
+ *
+ * This function used to take no locks, on the reasoning that a draft holds no
+ * money. The reasoning was wrong in one specific way: it hands a sponsor the
+ * custody address and an exact amount, which is a PROMISE that the money will
+ * be accepted. `max_live_principal_luna` was only enforced in `activate()`, by
+ * which time the sponsor's transaction is on chain and final — so any number of
+ * sponsors could be promised room that only one of them had, all pay, and every
+ * activation after the first fail on money already sitting in custody. Refusing
+ * there is the most expensive possible place to refuse.
+ *
+ * So capacity is committed here, where refusing costs a sponsor nothing but a
+ * sentence on screen. The shape is the same one every other money path uses:
+ *
+ *  - ONE transaction, opened with the singleton `custody_controls` lock, which
+ *    is what makes two concurrent drafts see each other. Lock order is
+ *    `custody_controls` → drop, unchanged: the only drop row touched is the one
+ *    this INSERT creates.
+ *  - `lockControlsForCapacity` rather than `lockControls`, because a
+ *    reservation spends nothing and therefore does not need a fresh
+ *    reconciliation. The pause switch still applies — see that function.
+ *  - the reservation EXPIRES (`FUNDING_RESERVATION_MINUTES`), so an abandoned
+ *    draft gives its headroom back instead of holding it until draft GC.
+ *
+ * The one chain call is `custodyAddress()`, which is local.
  */
 export async function createDraft(
   pool: Pool,
@@ -167,22 +227,51 @@ export async function createDraft(
   const publicId = newPublicId()
   const fundingMemo = fundingMemoFor(publicId)
 
-  await pool.query(
-    `INSERT INTO drops (
-       public_id, sponsor_label, message, claim_count, amount_each_luna,
-       expected_funding_luna, state
-     ) VALUES ($1, $2, $3, $4, $5, $6, 'awaiting_funding')`,
-    [
-      publicId,
-      o.sponsorLabel,
-      o.message ?? null,
-      o.claimCount,
-      o.amountEachLuna.toString(),
-      expectedFundingLuna.toString(),
-    ],
-  )
+  const client: PoolClient = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const controls = await lockControlsForCapacity(client)
+    await assertCapacityFor(client, controls, expectedFundingLuna)
 
-  return { publicId, fundingAddress: chain.custodyAddress(), fundingMemo, expectedFundingLuna }
+    const { rows } = await client.query<{ funding_reservation_expires_at: Date }>(
+      `INSERT INTO drops (
+         public_id, sponsor_label, message, claim_count, amount_each_luna,
+         expected_funding_luna, state, funding_reservation_expires_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, 'awaiting_funding',
+                 now() + make_interval(mins => $7))
+       RETURNING funding_reservation_expires_at`,
+      [
+        publicId,
+        o.sponsorLabel,
+        o.message ?? null,
+        o.claimCount,
+        o.amountEachLuna.toString(),
+        expectedFundingLuna.toString(),
+        FUNDING_RESERVATION_MINUTES,
+      ],
+    )
+
+    // Read back INSIDE the transaction, so the numbers the sponsor is shown
+    // already include their own reservation. Computing them by subtraction
+    // would be one arithmetic assumption; this is the same query the next
+    // sponsor's refusal will be decided by.
+    const capacity = await readCapacity(client, controls)
+    await client.query('COMMIT')
+
+    return {
+      publicId,
+      fundingAddress: chain.custodyAddress(),
+      fundingMemo,
+      expectedFundingLuna,
+      reservationExpiresAt: rows[0].funding_reservation_expires_at,
+      capacity,
+    }
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw err
+  } finally {
+    client.release()
+  }
 }
 
 interface DropRow {
@@ -480,13 +569,19 @@ async function activate(
     await assertSolvent(client, controls, expectedFundingLuna)
 
     await client.query(
+      // `funding_reservation_expires_at` is cleared as the principal moves from
+      // reserved to outstanding. Stamping `activated_height` already takes the
+      // row out of `reservedPrincipalLuna`, so this changes no arithmetic; it
+      // stops the column from reading as a live promise on a drop that has
+      // already been paid for.
       `UPDATE drops
        SET state = 'live',
            creator_address = $2,
            refund_address = $2,
            funding_tx_hash = $3,
            activated_height = $4,
-           expires_at = now() + make_interval(hours => $5)
+           expires_at = now() + make_interval(hours => $5),
+           funding_reservation_expires_at = NULL
        WHERE id = $1`,
       [dropId, tx.sender, txHash, tx.includedHeight.toString(), EXPIRY_HOURS],
     )

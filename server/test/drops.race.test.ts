@@ -15,7 +15,14 @@ import {
   submitFunding,
 } from '../src/services/drops'
 import { gcDrafts } from '../src/services/expiry'
-import { CapExceededError, outstandingPrincipalLuna } from '../src/services/solvency'
+import {
+  CapExceededError,
+  DropTooLargeError,
+  NoHeadroomError,
+  PausedError,
+  outstandingPrincipalLuna,
+  reservedPrincipalLuna,
+} from '../src/services/solvency'
 // Side-effect import: installs the int8-as-string parser so BIGINT luna never
 // passes through a lossy JS number. This suite builds its own pool, so it still
 // depends on that global parser being registered.
@@ -129,19 +136,27 @@ async function setControls(o: {
   feeReserveLuna?: bigint
   /** Operator-attested float; the ledger credit the fee reserve is spent from. */
   operatorFloatLuna?: bigint
+  /** Migration 014: ceiling on live + reserved drops. `null` means no limit. */
+  maxLiveDrops?: number | null
 }) {
   await pool.query(
     `UPDATE custody_controls
      SET paused = $1, max_live_principal_luna = $2, configured_fee_reserve_luna = $3,
-         operator_float_luna = $4
+         operator_float_luna = $4, max_live_drops = $5
      WHERE singleton`,
     [
       o.paused ?? false,
       (o.capLuna ?? 10_000_000n).toString(),
       (o.feeReserveLuna ?? FEE_FLOAT).toString(),
       (o.operatorFloatLuna ?? FEE_FLOAT).toString(),
+      o.maxLiveDrops ?? null,
     ],
   )
+}
+
+async function draftCount(): Promise<number> {
+  const { rows } = await pool.query<{ n: number }>('SELECT count(*)::int AS n FROM drops')
+  return rows[0].n
 }
 
 /** Expect a rejection carrying an exact `FundingRejectedError.code`. */
@@ -726,10 +741,17 @@ describe.skipIf(!hasDb)('drop drafts and exact funding activation (real Postgres
   })
 
   it('serializes concurrent activations so the global principal cap cannot be breached', async () => {
-    // Either drop fits alone; together they exceed the cap.
-    await setControls({ capLuna: PRINCIPAL + PRINCIPAL / 2n })
+    // Both drafts are created while the cap is wide, and the cap is narrowed
+    // afterwards. Since migration 014 a draft RESERVES its principal, so two
+    // drafts that cannot both fit are refused at creation — which is the point
+    // of that change and is covered by its own tests below. This test is about
+    // the other end: activation is still the last line of defence, and it has
+    // to hold when the reservation could not have known. An operator lowering
+    // the cap between the draft and the deposit is exactly that case.
     const a = await draft()
     const b = await draft()
+    // Either drop fits alone; together they exceed the cap.
+    await setControls({ capLuna: PRINCIPAL + PRINCIPAL / 2n })
     const ha = fund(a.publicId)
     const hb = fund(b.publicId)
     finalize()
@@ -750,6 +772,186 @@ describe.skipIf(!hasDb)('drop drafts and exact funding activation (real Postgres
     )
     expect(rows[0].count).toBe('1')
     expect(await outstandingPrincipalLuna(pool)).toBe(PRINCIPAL)
+  })
+
+  // ---- migration 014: capacity is reserved when instructions are issued -------
+  //
+  // The hole: `createDraft` handed out the custody address and an exact amount
+  // with no reference to `max_live_principal_luna`, which was checked only in
+  // `activate()` — after the sponsor's transaction was on chain and final. Any
+  // number of sponsors could be promised room that one of them had.
+
+  it('refuses a second draft once the cap is spoken for, before anyone has paid', async () => {
+    await setControls({ capLuna: PRINCIPAL })
+
+    const first = await draft()
+    expect(first.fundingAddress).toBe(CUSTODY)
+    expect(first.capacity.remainingLuna, 'the first draft consumed the whole cap').toBe(0n)
+    expect(first.capacity.reservedLuna).toBe(PRINCIPAL)
+    expect(first.capacity.outstandingLuna, 'nothing is outstanding until money lands').toBe(0n)
+
+    const refused = await draft().then(
+      () => null,
+      (e: unknown) => e,
+    )
+    expect(refused).toBeInstanceOf(NoHeadroomError)
+    expect((refused as NoHeadroomError).requestedLuna).toBe(PRINCIPAL)
+    expect((refused as NoHeadroomError).capacity.remainingLuna).toBe(0n)
+    // …and the refused draft left no row behind to hold room of its own.
+    expect(await draftCount()).toBe(1)
+  })
+
+  it('with headroom for exactly one drop, two CONCURRENT drafts do not both get funding instructions', async () => {
+    // The scenario the reservation exists for. Sequential refusal is easy; the
+    // question is whether two requests that are genuinely in flight at the same
+    // time can both read "there is room for one" and both answer a sponsor.
+    // They cannot, because the reservation is taken inside the singleton
+    // `custody_controls` lock — the same choke point activation uses.
+    await setControls({ capLuna: PRINCIPAL })
+
+    const results = await Promise.allSettled([draft(), draft()])
+    const issued = results.filter((r) => r.status === 'fulfilled')
+    const refused = results.filter((r) => r.status === 'rejected')
+
+    expect(issued, 'exactly one sponsor may be told where to send money').toHaveLength(1)
+    expect(refused).toHaveLength(1)
+    expect((refused[0] as PromiseRejectedResult).reason).toBeInstanceOf(NoHeadroomError)
+    expect(await draftCount()).toBe(1)
+
+    // The winner really can fund: the promise it was given is good.
+    const winner = (issued[0] as PromiseFulfilledResult<Awaited<ReturnType<typeof draft>>>).value
+    const hash = fund(winner.publicId)
+    finalize()
+    expect((await submitFunding(pool, chain, { publicId: winner.publicId, txHash: hash })).state).toBe(
+      'live',
+    )
+    expect(await outstandingPrincipalLuna(pool)).toBe(PRINCIPAL)
+  })
+
+  it('tells a sponsor that a drop bigger than the whole cap can never run, not to retry', async () => {
+    await setControls({ capLuna: PRINCIPAL - 1n })
+    const err = await draft().then(
+      () => null,
+      (e: unknown) => e,
+    )
+    // A distinct type, because the two refusals have different answers: one is
+    // "come back later" and this one is "ask for less".
+    expect(err).toBeInstanceOf(DropTooLargeError)
+    expect(err).not.toBeInstanceOf(NoHeadroomError)
+    expect(await draftCount()).toBe(0)
+  })
+
+  it('returns the headroom when an abandoned draft’s reservation expires', async () => {
+    await setControls({ capLuna: PRINCIPAL })
+    const abandoned = await draft()
+    await expect(draft()).rejects.toBeInstanceOf(NoHeadroomError)
+
+    // The sponsor closed the tab. Nothing collects the row for 24 hours, but
+    // the promise is only good for `FUNDING_RESERVATION_MINUTES`.
+    await pool.query(
+      `UPDATE drops SET funding_reservation_expires_at = now() - interval '1 minute'
+       WHERE public_id = $1`,
+      [abandoned.publicId],
+    )
+    expect((await reservedPrincipalLuna(pool)).luna).toBe(0n)
+
+    const next = await draft()
+    expect(next.capacity.reservedLuna).toBe(PRINCIPAL)
+  })
+
+  it('keeps a draft’s room past the window once its funding transaction is recorded', async () => {
+    // The sponsor has paid. Releasing their headroom now would let a later
+    // draft take the room their activation needs, which is the same bug in a
+    // new place.
+    await setControls({ capLuna: PRINCIPAL })
+    const d = await draft()
+    const hash = fund(d.publicId)
+    chain.setHead(FUND_HEIGHT + FINALITY_DEPTH - 1)
+    expect((await submitFunding(pool, chain, { publicId: d.publicId, txHash: hash })).state).toBe(
+      'funding_pending',
+    )
+
+    await pool.query(
+      `UPDATE drops SET funding_reservation_expires_at = now() - interval '1 hour'
+       WHERE public_id = $1`,
+      [d.publicId],
+    )
+    expect((await reservedPrincipalLuna(pool)).luna).toBe(PRINCIPAL)
+    await expect(draft()).rejects.toBeInstanceOf(NoHeadroomError)
+
+    // …and it activates, on the room it never gave up.
+    finalize()
+    expect((await submitFunding(pool, chain, { publicId: d.publicId, txHash: hash })).state).toBe(
+      'live',
+    )
+  })
+
+  it('moves principal from reserved to outstanding on activation, counting it once', async () => {
+    await setControls({ capLuna: PRINCIPAL })
+    const d = await draft()
+    const hash = fund(d.publicId)
+    finalize()
+    await submitFunding(pool, chain, { publicId: d.publicId, txHash: hash })
+
+    expect((await reservedPrincipalLuna(pool)).luna, 'the reservation is released').toBe(0n)
+    expect(await outstandingPrincipalLuna(pool)).toBe(PRINCIPAL)
+    const row = await pool.query<{ funding_reservation_expires_at: Date | null }>(
+      'SELECT funding_reservation_expires_at FROM drops WHERE public_id = $1',
+      [d.publicId],
+    )
+    expect(row.rows[0].funding_reservation_expires_at).toBeNull()
+
+    // The cap is still full — it is just full of a live drop now.
+    await expect(draft()).rejects.toBeInstanceOf(NoHeadroomError)
+  })
+
+  it('returns the headroom when draft GC collects an unfunded draft', async () => {
+    await setControls({ capLuna: PRINCIPAL })
+    const d = await draft()
+    await pool.query(`UPDATE drops SET created_at = now() - interval '25 hours' WHERE public_id = $1`, [
+      d.publicId,
+    ])
+    expect(await gcDrafts(pool)).toBe(1)
+
+    expect((await reservedPrincipalLuna(pool)).luna).toBe(0n)
+    await expect(draft()).resolves.toBeDefined()
+  })
+
+  it('caps the NUMBER of drops as well as their total value', async () => {
+    // Two 5 NIM drops fit inside a 12 NIM cap. On the first mainnet run that is
+    // one drop too many, and a principal cap alone cannot say so.
+    await setControls({ capLuna: PRINCIPAL * 3n, maxLiveDrops: 1 })
+    const first = await draft()
+    expect(first.capacity.remainingDrops).toBe(0)
+    expect(first.capacity.remainingLuna, 'value headroom is not the binding limit here').toBe(
+      PRINCIPAL * 2n,
+    )
+
+    const err = await draft().then(
+      () => null,
+      (e: unknown) => e,
+    )
+    expect(err).toBeInstanceOf(NoHeadroomError)
+    expect((err as NoHeadroomError).capacity.remainingDrops).toBe(0)
+  })
+
+  it('refuses to issue funding instructions while custody is paused', async () => {
+    // Being told where to send money is a promise it will be accepted. Nothing
+    // can be activated while custody is paused, so the money would sit in the
+    // wallet waiting for an operator.
+    await setControls({ paused: true })
+    await expect(draft()).rejects.toBeInstanceOf(PausedError)
+    expect(await draftCount()).toBe(0)
+  })
+
+  it('still issues funding instructions when reconciliation is stale', async () => {
+    // A reservation spends nothing, so it does not need a trustworthy balance.
+    // `submitFunding` reconciles before it activates, and `lockControls` is
+    // still what refuses to move money on a stale one.
+    await pool.query(
+      `UPDATE custody_controls SET last_reconciled_at = now() - interval '1 day' WHERE singleton`,
+    )
+    await expect(draft()).resolves.toBeDefined()
   })
 
   // ---- public projection ----------------------------------------------------

@@ -172,6 +172,30 @@ async function expectEnvelope(res: Response, status: number, code: string): Prom
 
 // ---- domain helpers ----------------------------------------------------------
 
+interface DisclosureBody {
+  network: string
+  chainLabel: string
+  custodyAddress: string
+  mainnetPilot: boolean
+  paused: boolean
+  expiryHours: number
+  fundingWindowMinutes: number
+  limits: {
+    perDropMax: string
+    perDropMaxLuna: string
+    aggregateMax: string
+    aggregateMaxLuna: string
+    remaining: string
+    remainingLuna: string
+    maxLiveDrops: number | null
+    liveDrops: number
+    reservedDrafts: number
+    remainingDrops: number | null
+  }
+  summary: string
+  points: { id: string; text: string }[]
+}
+
 interface DraftBody {
   publicId: string
   fundingAddress: string
@@ -179,6 +203,8 @@ interface DraftBody {
   expectedFunding: string
   expectedFundingLuna: string
   shareUrl: string
+  reservationExpiresAt: string | null
+  disclosure: DisclosureBody
 }
 
 async function createDrop(o: { idemKey?: string; body?: unknown } = {}): Promise<DraftBody> {
@@ -297,6 +323,7 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
       `UPDATE custody_controls
        SET paused = false,
            max_live_principal_luna = 10000000,
+           max_live_drops = NULL,
            configured_fee_reserve_luna = ${FEE_FLOAT},
            operator_float_luna = ${FEE_FLOAT},
            reconciled_confirmed_balance_luna = NULL,
@@ -433,6 +460,122 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
 
     // No status token ever reaches the logs.
     for (const line of logged) expect(line).not.toContain(reserved.statusToken)
+  })
+
+  // ---- sponsor disclosure and the capacity cap ---------------------------------
+  //
+  // NimDrops is a custodial hot wallet with a disclosed cap. A sponsor who only
+  // learns that afterwards has been misled by omission, so the server owns the
+  // words and the numbers, and the web layer's job is to render all of them
+  // above the fund button.
+
+  async function setCaps(o: { capLuna?: bigint; maxLiveDrops?: number | null }): Promise<void> {
+    await pool.query(
+      `UPDATE custody_controls SET max_live_principal_luna = $1, max_live_drops = $2
+       WHERE singleton`,
+      [(o.capLuna ?? 10_000_000n).toString(), o.maxLiveDrops ?? null],
+    )
+  }
+
+  it('serves the custody disclosure unauthenticated, with live limits', async () => {
+    const body = await json<DisclosureBody>(await get('/api/custody'))
+
+    expect(body.network).toBe('TestAlbatross')
+    expect(body.custodyAddress).toBe(CUSTODY)
+    expect(body.mainnetPilot).toBe(false)
+    expect(body.paused).toBe(false)
+    expect(body.expiryHours).toBe(24)
+    expect(body.limits.aggregateMax).toBe('100')
+    expect(body.limits.remaining).toBe('100')
+    expect(body.limits.liveDrops).toBe(0)
+
+    // Every disclosure the sponsor is owed, by id rather than by prose.
+    const ids = body.points.map((p) => p.id)
+    expect(ids).toEqual([
+      'not_escrow',
+      'operator_key',
+      'limits',
+      'destination',
+      'test_network',
+      'expiry_clock',
+      'refunds',
+      'funding_window',
+    ])
+    const text = body.points.map((p) => p.text).join('\n')
+    expect(text, 'the custody address must be readable before approving').toContain(CUSTODY)
+    expect(text, 'that the operator can move everything is the disclosure').toMatch(
+      /only key.*can move everything/i,
+    )
+    expect(text).toMatch(/not an escrow contract/i)
+    expect(text, 'no exclamation marks in interface copy').not.toContain('!')
+  })
+
+  it('names the mainnet pilot and the pause state in the disclosure', async () => {
+    await pool.query('UPDATE custody_controls SET paused = true WHERE singleton')
+    const paused = await json<DisclosureBody>(await get('/api/custody'))
+    expect(paused.paused).toBe(true)
+    expect(paused.points[0].id, 'a closed door is the first thing to say').toBe('paused')
+  })
+
+  it('carries the disclosure on the draft, with this drop already counted', async () => {
+    await setCaps({ capLuna: 1_000_000n }) // 10 NIM
+    const draft = await createDrop()
+
+    expect(draft.reservationExpiresAt, 'the room is promised for a stated time').not.toBeNull()
+    expect(new Date(draft.reservationExpiresAt as string).getTime()).toBeGreaterThan(Date.now())
+    expect(draft.disclosure.limits.aggregateMax).toBe('10')
+    // 10 NIM cap, this 5 NIM drop reserved: half is left, and the sponsor is
+    // shown the number that includes their own drop rather than a stale one.
+    expect(draft.disclosure.limits.remaining).toBe('5')
+    expect(draft.disclosure.limits.reservedDrafts).toBe(1)
+    expect(draft.disclosure.limits.perDropMax).toBe('10')
+    expect(draft.disclosure.points.map((p) => p.id)).toContain('limits')
+  })
+
+  it('refuses a drop bigger than the whole cap with 422 and a smaller-total hint', async () => {
+    await setCaps({ capLuna: 400_000n }) // 4 NIM, against a 5 NIM drop
+    const res = await post('/api/drops', {
+      idemKey: randomUUID(),
+      body: { sponsorLabel: 'S', amountEach: AMOUNT_EACH_NIM, claimCount: CLAIM_COUNT },
+    })
+    const message = await expectEnvelope(res, 422, 'drop_too_large')
+    expect(message).toContain('4 NIM')
+    expect(message, 'retrying will never help, so do not suggest it').not.toMatch(/try again/i)
+
+    const { rows } = await pool.query<{ count: string }>('SELECT count(*)::text FROM drops')
+    expect(rows[0].count, 'a refused draft holds no room of its own').toBe('0')
+  })
+
+  it('refuses a drop that does not fit right now with 503 and a retry hint', async () => {
+    await setCaps({ capLuna: 500_000n }) // room for exactly one 5 NIM drop
+    await createDrop()
+
+    const res = await post('/api/drops', {
+      idemKey: randomUUID(),
+      body: { sponsorLabel: 'S', amountEach: AMOUNT_EACH_NIM, claimCount: CLAIM_COUNT },
+    })
+    const message = await expectEnvelope(res, 503, 'no_capacity')
+    expect(message).toContain('0 NIM is free')
+    expect(Number(res.headers.get('retry-after'))).toBeGreaterThan(0)
+  })
+
+  it('says so plainly when the pilot runs one drop at a time', async () => {
+    await setCaps({ capLuna: 10_000_000n, maxLiveDrops: 1 })
+    await createDrop()
+
+    const res = await post('/api/drops', {
+      idemKey: randomUUID(),
+      body: { sponsorLabel: 'S', amountEach: AMOUNT_EACH_NIM, claimCount: CLAIM_COUNT },
+    })
+    const message = await expectEnvelope(res, 503, 'no_capacity')
+    expect(message).toMatch(/one at a time/i)
+
+    const disclosure = await json<DisclosureBody>(await get('/api/custody'))
+    expect(disclosure.limits.maxLiveDrops).toBe(1)
+    expect(disclosure.limits.remainingDrops).toBe(0)
+    expect(disclosure.points.find((p) => p.id === 'limits')?.text).toMatch(
+      /Only one drop can run at a time/,
+    )
   })
 
   // ---- idempotency -----------------------------------------------------------

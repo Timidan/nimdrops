@@ -338,6 +338,23 @@ describe('recover CLI help', () => {
 describe.skipIf(!hasDb)('recover CLI process lifetime', () => {
   const CLI_TIMEOUT_MS = 90_000
 
+  // The child is the REAL CLI, so it reads `DATABASE_URL` as an operator's
+  // shell would: no `search_path` override, and therefore the default schema
+  // rather than any of this suite's private ones. That schema has to be
+  // migrated by somebody, and until now it was migrated by nobody — the test
+  // passed only because a previous run or a hand-run of `migrate-cli` had left
+  // tables behind, and failed on the first run against a genuinely empty
+  // database or after a new migration was added. Migrating it here makes the
+  // test independent of what ran before it.
+  beforeAll(async () => {
+    const ambient = new pg.Pool({ connectionString: process.env.DATABASE_URL })
+    try {
+      await migrate(ambient)
+    } finally {
+      await ambient.end()
+    }
+  }, CLI_TIMEOUT_MS)
+
   function runCli(args: string[]): Promise<{ code: number | null; stdout: string }> {
     return new Promise((resolve, reject) => {
       const child = spawn('npx', ['tsx', 'src/recover.ts', ...args], {

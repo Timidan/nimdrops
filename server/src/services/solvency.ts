@@ -82,9 +82,36 @@ export class IndeterminateBroadcastError extends InsolventError {}
 /** The requested addition would push live principal past `max_live_principal_luna`. */
 export class CapExceededError extends SolvencyError {}
 
+/**
+ * A draft was refused because issuing its funding instructions would commit
+ * more capacity than the deployment allows (migration 014).
+ *
+ * Deliberately a subclass of {@link CapExceededError}: every handler that
+ * already reads that as "do not create a new liability" is right here too. What
+ * the distinct types add is a refusal the SPONSOR can act on, before they pay,
+ * carrying the numbers the HTTP layer needs to say what happened.
+ */
+export class CapacityError extends CapExceededError {
+  constructor(
+    readonly capacity: CapacitySnapshot,
+    readonly requestedLuna: bigint,
+    message: string,
+  ) {
+    super(message)
+  }
+}
+
+/** No amount of waiting makes this drop fit: it is bigger than the whole cap. */
+export class DropTooLargeError extends CapacityError {}
+
+/** The cap could hold this drop, but other live drops and drafts hold the room. */
+export class NoHeadroomError extends CapacityError {}
+
 export interface Controls {
   paused: boolean
   maxLivePrincipalLuna: bigint
+  /** Ceiling on live + reserved drops, or `null` for "principal cap only". */
+  maxLiveDrops: number | null
   configuredFeeReserveLuna: bigint
   /**
    * Operator-attested custody money that is not any drop's funding — the
@@ -115,6 +142,7 @@ export interface Controls {
 interface ControlsRow {
   paused: boolean
   max_live_principal_luna: string
+  max_live_drops: number | null
   configured_fee_reserve_luna: string
   operator_float_luna: string
   last_reconciled_height: string | null
@@ -129,6 +157,7 @@ function toControls(row: ControlsRow): Controls {
   return {
     paused: row.paused,
     maxLivePrincipalLuna: BigInt(row.max_live_principal_luna),
+    maxLiveDrops: row.max_live_drops,
     configuredFeeReserveLuna: BigInt(row.configured_fee_reserve_luna),
     operatorFloatLuna: BigInt(row.operator_float_luna),
     lastReconciledHeight: row.last_reconciled_height === null ? null : Number(row.last_reconciled_height),
@@ -145,6 +174,7 @@ function toControls(row: ControlsRow): Controls {
 const SELECT_CONTROLS = `
   SELECT paused,
          max_live_principal_luna,
+         max_live_drops,
          configured_fee_reserve_luna,
          operator_float_luna,
          last_reconciled_height,
@@ -173,12 +203,7 @@ const SELECT_CONTROLS = `
  * do NOT go through here, otherwise the system could never unstick itself.
  */
 export async function lockControls(client: PoolClient): Promise<Controls> {
-  const { rows } = await client.query<ControlsRow>(`${SELECT_CONTROLS} FOR UPDATE`, [
-    RECONCILIATION_MAX_AGE_MS,
-  ])
-  const row = rows[0]
-  if (!row) throw new SolvencyError('custody_controls singleton row is missing')
-  if (row.paused) throw new PausedError()
+  const row = await lockControlsRow(client)
   if (row.stale) {
     throw new StaleReconciliationError(
       row.last_reconciled_at === null
@@ -187,6 +212,36 @@ export async function lockControls(client: PoolClient): Promise<Controls> {
     )
   }
   return toControls(row)
+}
+
+async function lockControlsRow(client: PoolClient): Promise<ControlsRow> {
+  const { rows } = await client.query<ControlsRow>(`${SELECT_CONTROLS} FOR UPDATE`, [
+    RECONCILIATION_MAX_AGE_MS,
+  ])
+  const row = rows[0]
+  if (!row) throw new SolvencyError('custody_controls singleton row is missing')
+  if (row.paused) throw new PausedError()
+  return row
+}
+
+/**
+ * Take the same singleton lock for a decision that COMMITS CAPACITY but moves
+ * no money: issuing funding instructions (migration 014).
+ *
+ * Identical to {@link lockControls} except that it does not require a fresh
+ * reconciliation, and the difference is deliberate. Staleness means "the
+ * balance is not trustworthy enough to spend"; a reservation spends nothing —
+ * it only writes down that a sponsor has been promised room. Refusing every
+ * draft during a reconciliation gap would take the create screen down for a
+ * condition the create screen does not depend on, and the activation that DOES
+ * spend still goes through `lockControls` and still refuses.
+ *
+ * The pause switch is honoured, because it is exactly the condition where a
+ * sponsor must not be sent to their wallet: nothing paused can be activated, so
+ * the money would sit in custody waiting for an operator.
+ */
+export async function lockControlsForCapacity(client: PoolClient): Promise<Controls> {
+  return toControls(await lockControlsRow(client))
 }
 
 /** Read the controls without locking. Reporting and health checks only. */
@@ -244,6 +299,165 @@ export async function outstandingPrincipalLuna(db: Queryable): Promise<bigint> {
     )::BIGINT AS outstanding_luna
   `)
   return BigInt(rows[0].outstanding_luna)
+}
+
+// ---- aggregate capacity (migration 014) --------------------------------------
+//
+// `outstandingPrincipalLuna` above answers "how much do we owe". These answer
+// the question that has to be settled BEFORE a sponsor is told where to send
+// money: "how much more may we promise". The two are separate because the cap
+// used to be checked only against the first one, at activation, i.e. after the
+// sponsor had already paid.
+
+/**
+ * Principal held by drafts that were issued funding instructions and have not
+ * activated yet.
+ *
+ * A draft counts while it is un-activated and not terminal AND either
+ *
+ *   * a funding hash has been recorded against it — the sponsor's money is
+ *     already pointed at this drop, so its room is not negotiable and must not
+ *     expire; or
+ *   * its reservation window is still open.
+ *
+ * Everything else has released its room: an activated drop is counted by
+ * `outstandingPrincipalLuna` instead, a cancelled draft is garbage, and a draft
+ * whose window ran out is a sponsor who walked away.
+ */
+export async function reservedPrincipalLuna(
+  db: Queryable,
+): Promise<{ luna: bigint; drafts: number }> {
+  const { rows } = await db.query<{ luna: string; drafts: number }>(`
+    SELECT COALESCE(SUM(expected_funding_luna), 0)::BIGINT AS luna,
+           count(*)::int AS drafts
+    FROM drops
+    WHERE activated_height IS NULL
+      AND state IN ('awaiting_funding', 'funding_pending')
+      AND (
+        funding_tx_hash IS NOT NULL
+        OR (funding_reservation_expires_at IS NOT NULL
+            AND funding_reservation_expires_at > now())
+      )
+  `)
+  return { luna: BigInt(rows[0].luna), drafts: rows[0].drafts }
+}
+
+/**
+ * Drops whose funding was accepted and that have not reached a terminal state:
+ * exactly the set `outstandingPrincipalLuna` sums over, counted instead of
+ * added up, for `max_live_drops`.
+ */
+export async function liveDropCount(db: Queryable): Promise<number> {
+  const { rows } = await db.query<{ n: number }>(`
+    SELECT count(*)::int AS n
+    FROM drops
+    WHERE activated_height IS NOT NULL
+      AND state NOT IN ('settled', 'refunded', 'cancelled')
+  `)
+  return rows[0].n
+}
+
+/** Everything a create screen needs to say what will and will not fit. */
+export interface CapacitySnapshot {
+  maxLivePrincipalLuna: bigint
+  /** Principal of drops whose funding was accepted and is not yet settled. */
+  outstandingLuna: bigint
+  /** Principal promised to drafts that have not activated. */
+  reservedLuna: bigint
+  /** `max − outstanding − reserved`, floored at zero. */
+  remainingLuna: bigint
+  maxLiveDrops: number | null
+  liveDrops: number
+  reservedDrafts: number
+  /** Slots left under `max_live_drops`, or `null` when there is no count limit. */
+  remainingDrops: number | null
+}
+
+/**
+ * Read the whole capacity picture under whatever lock the caller holds.
+ *
+ * `controls` must come from `lockControlsForCapacity` or `lockControls` on the
+ * SAME client for the answer to be a decision rather than an observation: the
+ * singleton lock is what stops two concurrent drafts from each being told there
+ * is room for one.
+ */
+export async function readCapacity(
+  db: Queryable,
+  controls: Controls,
+): Promise<CapacitySnapshot> {
+  const outstandingLuna = await outstandingPrincipalLuna(db)
+  const reserved = await reservedPrincipalLuna(db)
+  const liveDrops = await liveDropCount(db)
+  const committedLuna = outstandingLuna + reserved.luna
+  const remainingLuna = controls.maxLivePrincipalLuna - committedLuna
+  const committedDrops = liveDrops + reserved.drafts
+  return {
+    maxLivePrincipalLuna: controls.maxLivePrincipalLuna,
+    outstandingLuna,
+    reservedLuna: reserved.luna,
+    remainingLuna: remainingLuna > 0n ? remainingLuna : 0n,
+    maxLiveDrops: controls.maxLiveDrops,
+    liveDrops,
+    reservedDrafts: reserved.drafts,
+    remainingDrops:
+      controls.maxLiveDrops === null ? null : Math.max(0, controls.maxLiveDrops - committedDrops),
+  }
+}
+
+/**
+ * Refuse now, or let the caller write a reservation for `addLuna`.
+ *
+ * Two refusals, because they mean different things to a sponsor:
+ *
+ *  - {@link DropTooLargeError} — the drop is bigger than the entire cap, so
+ *    waiting will never help. The answer is a smaller drop.
+ *  - {@link NoHeadroomError} — it would fit, but live drops and open drafts are
+ *    holding the room. The answer is to come back.
+ *
+ * Both carry the snapshot they were decided from, so the HTTP layer can state
+ * the actual numbers instead of "temporarily unavailable".
+ */
+export async function assertCapacityFor(
+  db: Queryable,
+  controls: Controls,
+  addLuna: bigint,
+): Promise<CapacitySnapshot> {
+  if (addLuna <= 0n) throw new SolvencyError('addLuna must be positive')
+  const capacity = await readCapacity(db, controls)
+
+  if (addLuna > capacity.maxLivePrincipalLuna) {
+    throw new DropTooLargeError(
+      capacity,
+      addLuna,
+      `a drop of ${addLuna} luna cannot run here: the whole deployment is capped at ` +
+        `${capacity.maxLivePrincipalLuna} luna of live principal`,
+    )
+  }
+  if (capacity.maxLiveDrops !== null && capacity.maxLiveDrops < 1) {
+    throw new DropTooLargeError(
+      capacity,
+      addLuna,
+      'this deployment is configured to hold no live drops at all (max_live_drops = 0)',
+    )
+  }
+  if (addLuna > capacity.remainingLuna) {
+    throw new NoHeadroomError(
+      capacity,
+      addLuna,
+      `a drop of ${addLuna} luna does not fit: ${capacity.remainingLuna} luna of the ` +
+        `${capacity.maxLivePrincipalLuna} luna cap is free (${capacity.outstandingLuna} live, ` +
+        `${capacity.reservedLuna} reserved by drafts)`,
+    )
+  }
+  if (capacity.remainingDrops !== null && capacity.remainingDrops < 1) {
+    throw new NoHeadroomError(
+      capacity,
+      addLuna,
+      `no drop slot is free: ${capacity.liveDrops} live and ${capacity.reservedDrafts} reserved, ` +
+        `against a limit of ${capacity.maxLiveDrops}`,
+    )
+  }
+  return capacity
 }
 
 /**
@@ -605,6 +819,14 @@ export async function resolveIndeterminateBroadcasts(
  *
  * `controls` must come from `lockControls` on the SAME client/transaction —
  * the lock is what stops two callers from each passing a cap that fits one.
+ *
+ * DRAFT RESERVATIONS ARE DELIBERATELY ABSENT from the cap comparison here
+ * (migration 014). `assertCapacityFor` counts them because it decides whether
+ * to make a promise; this function decides whether to honour money that has
+ * ALREADY ARRIVED, and refusing that because some other sponsor's draft is
+ * holding room would strand a finalized deposit in the custody wallet. The two
+ * checks are asymmetric on purpose, and the asymmetry is what makes a promise
+ * worth something: whoever reserved first is the one who cannot be crowded out.
  */
 export async function assertSolvent(
   client: Queryable,
@@ -1173,6 +1395,7 @@ async function bindNetwork(pool: Pool, chain: ChainClient): Promise<NetworkName>
     )
     if (stamped[0]) {
       logWarn('network_bound', { network: running })
+      await applyPilotDefaults(pool, running)
       return stamped[0].network
     }
     return bindNetwork(pool, chain)
@@ -1185,6 +1408,138 @@ async function bindNetwork(pool: Pool, chain: ChainClient): Promise<NetworkName>
     )
   }
   return row.network
+}
+
+// ---- mainnet pilot defaults ---------------------------------------------------
+
+/**
+ * The controls a database gets the first time it is bound to MainAlbatross.
+ *
+ * These are DEFAULTS, not limits an operator cannot change — `recover.ts` and
+ * plain SQL can raise them afterwards. What they are is the values a mainnet
+ * deployment starts with when nobody remembers to set anything, and the whole
+ * point is the direction of that forgetting. Migration 001 seeds a 100 NIM cap,
+ * no drop-count limit and `paused = false`, which is a reasonable testnet
+ * sandbox and an unreasonable first day with real money.
+ *
+ *  - `maxLivePrincipalLuna` 200000 luna = 2 NIM. The largest total this pilot
+ *    can owe claimants at any moment.
+ *  - `maxLiveDrops` 1. Two 1 NIM drops fit inside a 2 NIM cap, and the first
+ *    run is meant to be one drop watched by a human.
+ *  - `configuredFeeReserveLuna` 100000 luna = 1 NIM, unchanged from 001. It has
+ *    to be covered by an attested operator float before anything can activate.
+ *  - `paused` true. Opening the deployment is then a deliberate `unpause` after
+ *    the operator has checked the address, the float and the health endpoint —
+ *    rather than the default state of a container that just started.
+ */
+export const MAINNET_PILOT_DEFAULTS = {
+  maxLivePrincipalLuna: 200_000n,
+  maxLiveDrops: 1,
+  configuredFeeReserveLuna: 100_000n,
+  paused: true,
+} as const
+
+/**
+ * Apply {@link MAINNET_PILOT_DEFAULTS} the once, at the moment a fresh database
+ * is stamped MainAlbatross.
+ *
+ * Only in the stamping branch of `bindNetwork`, so it can never overwrite a
+ * value an operator has since chosen: at that instant the row still holds
+ * migration 001's seed values and there is nothing to lose. TestAlbatross is
+ * left exactly as 001 seeded it, which is what keeps the harness and the test
+ * suite unaffected by any of this.
+ */
+async function applyPilotDefaults(pool: Pool, network: NetworkName): Promise<void> {
+  if (network !== 'MainAlbatross') return
+  await pool.query(
+    `UPDATE custody_controls
+     SET paused = $1,
+         max_live_principal_luna = $2,
+         max_live_drops = $3,
+         configured_fee_reserve_luna = $4
+     WHERE singleton`,
+    [
+      MAINNET_PILOT_DEFAULTS.paused,
+      MAINNET_PILOT_DEFAULTS.maxLivePrincipalLuna.toString(),
+      MAINNET_PILOT_DEFAULTS.maxLiveDrops,
+      MAINNET_PILOT_DEFAULTS.configuredFeeReserveLuna.toString(),
+    ],
+  )
+  logWarn('mainnet_pilot_defaults_applied', {
+    maxLivePrincipalLuna: MAINNET_PILOT_DEFAULTS.maxLivePrincipalLuna.toString(),
+    maxLiveDrops: MAINNET_PILOT_DEFAULTS.maxLiveDrops,
+    configuredFeeReserveLuna: MAINNET_PILOT_DEFAULTS.configuredFeeReserveLuna.toString(),
+    paused: MAINNET_PILOT_DEFAULTS.paused,
+  })
+}
+
+/** The float on record is not backed by deposits proven on the bound chain. */
+export class FloatAttestationError extends Error {}
+
+/**
+ * Refuse to serve on a float attestation that does not belong to this chain.
+ *
+ * The float is the one ledger credit no drop supplies, and `float set` proves
+ * each luna of it against a finalized deposit hash — on whichever chain was
+ * bound at the time. Nothing in `attestedFloatDepositsLuna` filters by network,
+ * so a database carried from testnet to mainnet would keep counting testnet
+ * deposits as mainnet custody money, and the solvency invariant would authorise
+ * real payouts against them.
+ *
+ * The intended cutover does not create this state at all — a mainnet run starts
+ * on a fresh database (see `docs/HACKATHON.md`, "Mainnet cutover runbook"), and
+ * `bindNetwork` refuses to move an existing one anyway. This is the guard for
+ * the paths that go around both: a hand-edited `network` column, a restored
+ * dump, a database copied for a rehearsal. It is checked at boot, before the
+ * socket opens and before the worker signs anything.
+ *
+ * Two conditions, both fail-closed:
+ *
+ *  1. every attested deposit must name the chain this process is bound to; and
+ *  2. `operator_float_luna` must equal the sum of those deposits — otherwise the
+ *     books credit float that no deposit backs, which is what deleting the
+ *     foreign rows and forgetting the number would leave behind.
+ *
+ * Deliberately NOT inside `ensureChainBinding`: `recover.ts` binds through that
+ * path, and the recovery CLI is the tool an operator fixes this with. A guard
+ * that blocked the fix would be a trap.
+ */
+export async function assertFloatAttestationIntact(
+  pool: Pool,
+  network: NetworkName,
+): Promise<void> {
+  const { rows: foreign } = await pool.query<{ n: number; networks: string | null }>(
+    `SELECT count(*)::int AS n, string_agg(DISTINCT network, ', ') AS networks
+     FROM operator_float_deposits
+     WHERE network <> $1`,
+    [network],
+  )
+  if (foreign[0].n > 0) {
+    throw new FloatAttestationError(
+      `${foreign[0].n} operator float deposit(s) on this database were proven on ` +
+        `${foreign[0].networks} but this process is bound to ${network}. Refusing to start: that ` +
+        'money is not in this custody wallet, and the solvency invariant would authorise real ' +
+        'payouts against it. A mainnet run starts on a fresh database. If this database is being ' +
+        'reused on purpose, delete the foreign rows from operator_float_deposits, set ' +
+        'operator_float_luna to 0, and re-attest with "float set <luna> --tx <hash>" against a ' +
+        'deposit on this chain.',
+    )
+  }
+
+  const { rows } = await pool.query<{ attested: string; declared: string }>(
+    `SELECT (SELECT COALESCE(SUM(value_luna), 0) FROM operator_float_deposits)::text AS attested,
+            (SELECT operator_float_luna FROM custody_controls WHERE singleton)::text AS declared`,
+  )
+  const attested = BigInt(rows[0].attested)
+  const declared = BigInt(rows[0].declared)
+  if (attested !== declared) {
+    throw new FloatAttestationError(
+      `custody_controls.operator_float_luna is ${declared} luna but the deposits backing it total ` +
+        `${attested} luna. Refusing to start: the difference is float the books credit and no ` +
+        'transaction proves. Run "float show" to see what is counted, then "float set <luna> ' +
+        '--tx <hash>" to restate it against real deposits.',
+    )
+  }
 }
 
 /**

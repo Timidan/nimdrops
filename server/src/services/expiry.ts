@@ -256,8 +256,11 @@ export async function settleTerminal(pool: Pool): Promise<number> {
  */
 export async function gcDrafts(pool: Pool, afterHours = DRAFT_GC_AFTER_HOURS): Promise<number> {
   const { rowCount } = await pool.query(
+    // The reservation is cleared with the state: `cancelled` already leaves
+    // `reservedPrincipalLuna`, and a collected draft holding a live-looking
+    // promise would only mislead whoever reads the row next.
     `UPDATE drops
-     SET state = 'cancelled'
+     SET state = 'cancelled', funding_reservation_expires_at = NULL
      WHERE state = 'awaiting_funding'
        AND funding_tx_hash IS NULL
        AND activated_height IS NULL

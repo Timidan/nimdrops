@@ -25,14 +25,19 @@ import {
   type FundingRejectionCode,
 } from '../services/drops'
 import {
+  type CapacitySnapshot,
   CapExceededError,
+  DropTooLargeError,
   InsolventError,
+  NoHeadroomError,
   PausedError,
   RECONCILIATION_MAX_AGE_MS,
   StaleReconciliationError,
+  readCapacity,
   readControls,
 } from '../services/solvency'
 import { SHARED_BUCKET, type ClientIpResolver } from './client-ip'
+import { type CustodyDisclosure, buildDisclosure } from './disclosure'
 import { ConflictError, bindIdem, idemKeyHash, lookupIdem } from './idempotency'
 import { logError } from './redact'
 import { registerSsr } from './ssr'
@@ -329,6 +334,17 @@ interface DraftBody {
   /** The same amount in luna, as a string: what the wallet call needs, exactly. */
   expectedFundingLuna: string
   shareUrl: string
+  /**
+   * When this draft stops holding room in the aggregate cap. After it passes,
+   * funding may still work — it just is not promised any more.
+   */
+  reservationExpiresAt: string | null
+  /**
+   * Everything the sponsor must see before the wallet prompt. Carried on the
+   * draft as well as on `GET /api/custody` so the confirmation screen shows the
+   * numbers that applied to THIS drop, not a second fetch's.
+   */
+  disclosure: CustodyDisclosure
 }
 
 function draftBody(o: {
@@ -336,6 +352,8 @@ function draftBody(o: {
   fundingAddress: string
   fundingMemo: string
   expectedFundingLuna: bigint
+  reservationExpiresAt: Date | null
+  disclosure: CustodyDisclosure
 }): DraftBody {
   return {
     publicId: o.publicId,
@@ -344,7 +362,31 @@ function draftBody(o: {
     expectedFunding: formatNim(o.expectedFundingLuna),
     expectedFundingLuna: o.expectedFundingLuna.toString(),
     shareUrl: shareUrlFor(o.publicId),
+    reservationExpiresAt:
+      o.reservationExpiresAt === null ? null : o.reservationExpiresAt.toISOString(),
+    disclosure: o.disclosure,
   }
+}
+
+/**
+ * Build the custody disclosure from live controls.
+ *
+ * `capacity` is passed in by the create route, which already read it inside the
+ * reservation transaction — that snapshot includes the sponsor's own drop and
+ * is the one their screen must show. Everything else reads it fresh.
+ */
+async function currentDisclosure(
+  pool: Pool,
+  chain: ChainClient,
+  capacity?: CapacitySnapshot,
+): Promise<CustodyDisclosure> {
+  const controls = await readControls(pool)
+  return buildDisclosure({
+    network: chain.network(),
+    custodyAddress: chain.custodyAddress(),
+    paused: controls.paused,
+    capacity: capacity ?? (await readCapacity(pool, controls)),
+  })
 }
 
 // ---- app -----------------------------------------------------------------------------
@@ -485,7 +527,25 @@ export function makeApp(deps: AppDeps): Hono {
       if (winner) return c.json(winner, bound.record.responseStatus as ContentfulStatusCode)
     }
 
-    return c.json(draftBody(draft), 201)
+    return c.json(
+      draftBody({
+        ...draft,
+        reservationExpiresAt: draft.reservationExpiresAt,
+        disclosure: await currentDisclosure(pool, chain, draft.capacity),
+      }),
+      201,
+    )
+  })
+
+  // ---- GET /api/custody -------------------------------------------------------------
+  //
+  // What a sponsor must be able to read BEFORE they start a drop, let alone
+  // before their wallet asks them to approve anything: that this is a custodial
+  // hot wallet, who holds the key, which chain and address the money goes to,
+  // and exactly how much room is left. Unauthenticated and cheap, so the create
+  // screen can render it on first paint.
+  app.get('/api/custody', async (c) => {
+    return c.json(await currentDisclosure(pool, chain))
   })
 
   // ---- POST /api/drops/:publicId/funding ------------------------------------------
@@ -640,11 +700,21 @@ async function dropRowId(pool: Pool, publicId: string): Promise<string> {
   return rows[0].id
 }
 
-/** Rebuild the create-drop response for an idempotent replay. */
+/**
+ * Rebuild the create-drop response for an idempotent replay.
+ *
+ * The reservation timestamp comes off the row, so a replay reports the room the
+ * original request took rather than a fresh window: retrying a request must
+ * never quietly extend a promise.
+ */
 async function draftById(pool: Pool, chain: ChainClient, dropId: string): Promise<DraftBody | null> {
   if (!UUID_RE.test(dropId)) return null
-  const { rows } = await pool.query<{ public_id: string; expected_funding_luna: string }>(
-    'SELECT public_id, expected_funding_luna FROM drops WHERE id = $1',
+  const { rows } = await pool.query<{
+    public_id: string
+    expected_funding_luna: string
+    funding_reservation_expires_at: Date | null
+  }>(
+    'SELECT public_id, expected_funding_luna, funding_reservation_expires_at FROM drops WHERE id = $1',
     [dropId],
   )
   const row = rows[0]
@@ -654,6 +724,8 @@ async function draftById(pool: Pool, chain: ChainClient, dropId: string): Promis
     fundingAddress: chain.custodyAddress(),
     fundingMemo: fundingMemoFor(row.public_id),
     expectedFundingLuna: BigInt(row.expected_funding_luna),
+    reservationExpiresAt: row.funding_reservation_expires_at,
+    disclosure: await currentDisclosure(pool, chain),
   })
 }
 
@@ -678,6 +750,32 @@ function mapError(err: unknown): HttpError {
     return new HttpError(409, err.code, CLAIM_MESSAGES[err.code] ?? 'this claim cannot be completed')
   }
   if (err instanceof CapError) return invalidRequest(err.message)
+  // Capacity refusals come BEFORE the generic `CapExceededError` line below, on
+  // purpose. They are the only money-shaped refusal a sponsor meets before they
+  // have paid anything, and "temporarily unavailable" would be both vaguer and,
+  // for a drop that is simply too big, wrong: no amount of retrying helps.
+  // The numbers are read off the error rather than forwarded as prose, so the
+  // client copy stays this file's to choose (see the CLAIM_MESSAGES note).
+  if (err instanceof DropTooLargeError) {
+    const max = formatNim(err.capacity.maxLivePrincipalLuna)
+    return new HttpError(
+      422,
+      'drop_too_large',
+      `this pilot holds up to ${max} NIM across all live drops — try a smaller total`,
+    )
+  }
+  if (err instanceof NoHeadroomError) {
+    const free = formatNim(err.capacity.remainingLuna)
+    const needed = formatNim(err.requestedLuna)
+    return new HttpError(
+      503,
+      'no_capacity',
+      err.capacity.remainingDrops === 0
+        ? 'a drop is already running and this pilot runs one at a time — try again when it finishes'
+        : `this drop needs ${needed} NIM and ${free} NIM is free right now — try a smaller total, or try again later`,
+      DEGRADED_RETRY_SECONDS,
+    )
+  }
   if (err instanceof PausedError) {
     return new HttpError(503, 'paused', 'payouts are paused — try again shortly', DEGRADED_RETRY_SECONDS)
   }
