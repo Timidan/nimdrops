@@ -141,6 +141,11 @@ async function main(): Promise<void> {
       // Same reason: behind Caddy this must be true, or every claimant is
       // sharing the socket peer's single 60/min bucket.
       trustedProxy: proxySecret !== undefined,
+      // Which code is actually running. There is no .git in the image, so an
+      // operator otherwise cannot tell a fresh deploy from a stale one — a
+      // failure this deployment has hit three times. `unknown` means the build
+      // did not pass GIT_COMMIT, which is itself worth noticing.
+      commit: process.env.NIMDROPS_COMMIT ?? 'unknown',
     })
   })
 

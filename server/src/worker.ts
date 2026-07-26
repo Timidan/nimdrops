@@ -52,7 +52,10 @@ export async function runWorker(chain: ChainClient, alerts: Alerts): Promise<voi
     lockClient.release()
     throw new Error('another transfer worker holds advisory lock 42 — refusing to start a second')
   }
-  log('worker_lock_acquired')
+  // Stamped into the image at build time (server/Dockerfile ARG GIT_COMMIT).
+  // The worker is the only process that signs, so "which code is signing" is
+  // the single most important thing to be able to read off a log line.
+  log('worker_lock_acquired', { commit: process.env.NIMDROPS_COMMIT ?? 'unknown' })
 
   let stopping = false
   const stop = (signal: string): void => {

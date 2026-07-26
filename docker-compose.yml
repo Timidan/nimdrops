@@ -12,6 +12,12 @@ x-app: &app
   build:
     context: .
     dockerfile: server/Dockerfile
+    args:
+      # Stamps the running image with the commit it was built from, so the boot
+      # log and /health can prove which code is live. Build with
+      # `GIT_COMMIT=$(git rev-parse HEAD) docker compose build` — unset, it
+      # reads `unknown`, which is itself the signal that a build skipped this.
+      GIT_COMMIT: ${GIT_COMMIT:-unknown}
   restart: unless-stopped
   depends_on:
     postgres:

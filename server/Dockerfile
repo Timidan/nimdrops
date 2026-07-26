@@ -44,6 +44,15 @@ ENV NODE_ENV=production
 # (`<repo>/web/dist`, resolved relative to server/src/http/ssr.ts).
 ENV SPA_DIST=/app/web/dist
 
+# The commit this image was built from, stamped at build time and logged at
+# boot. There is no .git inside the image, so without this an operator cannot
+# tell which code is running — and "the image is older than the checkout" has
+# already caused three separate confusing failures on this deployment
+# (migrations that silently did not apply, a worker running four-hour-old money
+# code). Pass it from the deploy host: `GIT_COMMIT=$(git rev-parse HEAD)`.
+ARG GIT_COMMIT=unknown
+ENV NIMDROPS_COMMIT=$GIT_COMMIT
+
 WORKDIR /app/server
 USER node
 EXPOSE 8080
