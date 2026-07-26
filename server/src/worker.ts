@@ -3,6 +3,7 @@ import { nimiqChainFromEnv } from './chain/nimiq'
 import type { ChainClient } from './chain/types'
 import { closePool, getPool } from './db/pool'
 import { errorMessage } from './config'
+import { exitAfterFlush, exitAfterTeardown } from './exit'
 import { type Alerts, createAlerts, throttled } from './services/alerts'
 import { gcDrafts, settleTerminal, sweepExpiry } from './services/expiry'
 import { ensureNetworkBinding, reconcile } from './services/solvency'
@@ -157,6 +158,26 @@ export async function runWorker(chain: ChainClient, alerts: Alerts): Promise<voi
   }
 }
 
+/**
+ * Run the loop, then END — deliberately, with a code that reports the RUN.
+ *
+ * Both halves of that are the `@nimiq/core` teardown hazard `src/exit.ts`
+ * documents, and this process had both:
+ *
+ *  - it never exited. `runWorker` returns as soon as SIGTERM stops the loop and
+ *    the advisory lock is released, and then nothing happened: the consensus
+ *    worker thread keeps the event loop alive, so `docker compose stop` waited
+ *    out its whole grace period and SIGKILLed the container. A graceful stop
+ *    that always degrades into a kill is not a graceful stop, and the log line
+ *    that says so (`worker_stopped`) was the last honest thing about it;
+ *  - and if the WASM layer raised during `chain.close()`, that uncaught
+ *    exception ended the process at 1 — before `closePool()` — turning an
+ *    ordinary deploy restart into something an operator has to read as a crash.
+ *
+ * The loop itself is NOT guarded. A fault while the worker is working must
+ * still kill it non-zero so the restart policy picks the money back up from the
+ * database; only the stop is protected, and only after the stop is decided.
+ */
 async function main(): Promise<void> {
   // Production entrypoint: only the real chain client is ever constructed here.
   // FakeChain is a displaced path and must stay unreachable from this file.
@@ -164,12 +185,23 @@ async function main(): Promise<void> {
   // Throttled so a paused system cannot page the operator every two seconds.
   const alerts = throttled(createAlerts({ source: 'nimdrops-worker' }))
 
+  let code = 0
   try {
     await runWorker(chain, alerts)
-  } finally {
-    await chain.close().catch(() => {})
-    await closePool().catch(() => {})
+  } catch (err) {
+    console.error(JSON.stringify({ event: 'worker_fatal', error: errorMessage(err) }))
+    code = 1
   }
+
+  // The verdict on this run is now fixed. Everything after it is cleanup.
+  exitAfterTeardown(
+    code,
+    async () => {
+      await chain.close()
+      await closePool()
+    },
+    (message) => console.warn(JSON.stringify({ event: 'worker_teardown_fault', message })),
+  )
 }
 
 // Exact-path comparison, matching `recover.ts`: `endsWith('worker.ts')` also
@@ -178,8 +210,10 @@ const invokedDirectly =
   process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href
 
 if (invokedDirectly) {
+  // Reached only when the worker could not be BUILT (bad configuration): once
+  // `main` is running, it ends the process itself.
   main().catch((err: unknown) => {
     console.error(JSON.stringify({ event: 'worker_fatal', error: errorMessage(err) }))
-    process.exitCode = 1
+    exitAfterFlush(1)
   })
 }

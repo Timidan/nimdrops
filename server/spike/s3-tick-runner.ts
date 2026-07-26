@@ -39,15 +39,32 @@
  * microtask gets to run. That is the difference between this and a
  * `process.exit(1)` — an exit is still the program deciding to stop.
  *
+ * EXIT CODE = THE WORK, NOT THE TEARDOWN. The parent requires a clean exit from
+ * the `finish` child, and mirroring `worker.ts`'s startup (above) gave this
+ * process a live `@nimiq/core` client to dispose of at the end of a mode that
+ * production never disposes of one in — `worker.ts` runs forever. Gate run
+ * `s3_20260726052025` is what that costs: the child confirmed its transfer,
+ * then the WASM layer raised `Result::unwrap_throw()` on the way down, Node's
+ * default handler ended it at 1, and the parent failed the whole run over the
+ * shutdown of a process that had already done its job. `src/exit.ts` explains
+ * the mechanism; the rule here is that the outcome is decided BEFORE anything
+ * is closed, and teardown may only be logged after that, never obeyed.
+ *
  * TestAlbatross only.
  */
 
 import { writeSync } from 'node:fs'
 import pg from 'pg'
 import { NimiqChain, type NimiqNetwork } from '../src/chain/nimiq'
+import { exitAfterTeardown } from '../src/exit'
 import { consoleAlerts } from '../src/services/alerts'
 import { ensureNetworkBinding, reconcile } from '../src/services/solvency'
-import { acquireWorkerLock, reconcileOnStartup, runWorkerTick } from '../src/services/transfers'
+import {
+  acquireWorkerLock,
+  reconcileOnStartup,
+  releaseWorkerLock,
+  runWorkerTick,
+} from '../src/services/transfers'
 // Side-effect import: int8-as-string, so BIGINT luna never becomes a JS number.
 import '../src/db/pool'
 
@@ -60,6 +77,8 @@ const CRASH_DEADLINE_MS = 5 * 60_000
 const FINISH_DEADLINE_MS = 15 * 60_000
 const TICK_SLEEP_MS = 3_000
 
+/** The mode did what it says on the tin. Nothing else may produce this code. */
+const EXIT_OK = 0
 /** Distinct exit codes so the parent can say WHICH way the child went wrong. */
 const EXIT_USAGE = 2
 const EXIT_NO_CRASH = 3
@@ -119,17 +138,52 @@ if (!SCHEMA || !/^[a-z0-9_]+$/.test(SCHEMA)) {
 const CUSTODY_KEY = process.env.CUSTODY_PRIVATE_KEY_HEX
 if (!CUSTODY_KEY) bail(EXIT_USAGE, 'CUSTODY_PRIVATE_KEY_HEX is not set')
 
-async function main(): Promise<void> {
+/**
+ * Held at module scope so {@link teardown} can reach them: the outcome of a run
+ * is decided inside `main`, but the disposal happens strictly after `main` has
+ * returned that outcome, where nothing it does can change the exit code.
+ */
+let openPool: pg.Pool | null = null
+let openChain: NimiqChain | null = null
+let openLockClient: pg.PoolClient | null = null
+
+/**
+ * Release everything, best effort, AFTER the exit code is already fixed.
+ *
+ * The advisory-lock connection goes back FIRST, in `worker.ts`'s order and for
+ * a reason R7 missed when it copied the acquisition without the release:
+ * `pool.end()` waits for every checked-out client, and this one is checked out
+ * for the whole life of the process. Ending the pool while still holding it is
+ * a deadlock, and the only thing that used to break it was the WASM rethrow
+ * this file now refuses to obey.
+ *
+ * `chain.close()` can still raise from the `@nimiq/core` worker thread — that
+ * is why none of this is in a `finally` inside `main` any more.
+ */
+async function teardown(): Promise<void> {
+  if (openLockClient) {
+    await releaseWorkerLock(openLockClient)
+    openLockClient.release()
+    openLockClient = null
+  }
+  await openPool?.end()
+  await openChain?.close()
+}
+
+/** @returns the exit code THIS RUN earned. Hard preconditions still `bail`. */
+async function main(): Promise<number> {
   const pool = new pg.Pool({
     connectionString: DATABASE_URL,
     options: `-c search_path=${SCHEMA},public`,
     max: 4,
   })
+  openPool = pool
   const chain = new NimiqChain({
     network: NETWORK,
     custodyPrivateKeyHex: CUSTODY_KEY as string,
     logLevel: 'warn',
   })
+  openChain = chain
   const alerts = consoleAlerts()
 
   // ---- preconditions -------------------------------------------------------
@@ -198,6 +252,7 @@ async function main(): Promise<void> {
   //    next child can take it — which is precisely the recovery property the
   //    kill legs are supposed to demonstrate.
   const lockClient = await pool.connect()
+  openLockClient = lockClient
   if (!(await acquireWorkerLock(lockClient))) {
     bail(
       EXIT_NOT_THE_WORKER,
@@ -234,10 +289,12 @@ async function main(): Promise<void> {
         [transferId],
       )
       if (rows[0]?.done) {
+        // THE OUTCOME. Nothing after this line — not `pool.end()`, not
+        // `chain.close()`, not a WASM rethrow on the next tick — is allowed to
+        // change it, so the disposal happens outside `main` (see the bottom of
+        // this file) rather than in front of the return.
         say(`transfer ${transferId} CONFIRMED after ${ticks} ticks`)
-        await pool.end()
-        await chain.close()
-        process.exit(0)
+        return EXIT_OK
       }
     }
     const outcome = await runWorkerTick(pool, chain, alerts)
@@ -252,7 +309,25 @@ async function main(): Promise<void> {
   bail(EXIT_NO_CRASH, `crash point for mode ${mode} was never reached — nothing was proven`)
 }
 
-main().catch((err: unknown) => {
-  console.error(err)
-  bail(1, String(err))
-})
+/**
+ * The one place this process ends by choice rather than by signal.
+ *
+ * `bail` still exits immediately and synchronously — a precondition failure or
+ * a missed deadline has nothing to dispose of that is worth risking a second
+ * failure over, and its distinct codes (2..6, including R7's exit 6 for "lock
+ * not acquired") are exactly what the parent reads to say WHICH way a child
+ * went wrong. The SIGKILL modes never reach here at all: `sigkillSelf` is
+ * uncatchable by construction, so the parent's `signal === 'SIGKILL'`
+ * assertions are untouched by any of this.
+ *
+ * What is new is that the two ORDINARY endings — the mode succeeded, or it
+ * threw — now fix their code first and dispose second.
+ */
+main().then(
+  (code) => exitAfterTeardown(code, teardown, say),
+  (err: unknown) => {
+    console.error(err)
+    writeSync(2, `\n✗ s3-tick-runner: ${String(err)}\n`)
+    exitAfterTeardown(1, teardown, say)
+  },
+)

@@ -4,6 +4,7 @@ import { type NimiqChain, nimiqChainFromEnv } from './chain/nimiq'
 import type { ChainClient, ChainTx } from './chain/types'
 import { type Queryable, closePool, getPool } from './db/pool'
 import { type NetworkName, errorMessage } from './config'
+import { exitAfterFlush } from './exit'
 import { type Alerts, consoleAlerts } from './services/alerts'
 import { MEMO_PREFIX } from './services/drops'
 import {
@@ -1783,31 +1784,6 @@ export async function main(argv: string[]): Promise<number> {
 
 const invokedDirectly =
   process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href
-
-/**
- * End the process with `code`, once stdout has actually gone out.
- *
- * Setting `process.exitCode` and letting Node drain the loop is the tidy way to
- * end a CLI and it does not work here: `@nimiq/core` spawns a consensus worker
- * whose threads and timers keep the loop alive forever, so
- * `pnpm tsx src/recover.ts status` printed its report in full and then HUNG
- * until something killed it (observed on the VPS: correct output, exit 124 from
- * `timeout`). `chain.close()` disconnects the network but does not tear those
- * handles down, and there is nothing further this process wants to do — so it
- * says so explicitly.
- *
- * The flush matters: when stdout is a pipe (`| jq`, a log collector, CI) writes
- * are asynchronous, and `process.exit` discards whatever is still queued. A
- * report that exits promptly but truncates its own JSON would be a worse bug
- * than the hang.
- */
-function exitAfterFlush(code: number): void {
-  process.exitCode = code
-  if (process.stdout.writableLength === 0) {
-    process.exit(code)
-  }
-  process.stdout.write('', () => process.exit(code))
-}
 
 if (invokedDirectly) {
   main(process.argv.slice(2)).then(
