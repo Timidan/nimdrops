@@ -100,6 +100,11 @@ services:
     restart: unless-stopped
     depends_on:
       - server
+    environment:
+      # Caddy substitutes this into the site block in ./Caddyfile. Required —
+      # compose fails fast rather than serving on a placeholder hostname and
+      # burning ACME rate limits on a name nobody controls.
+      PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME:?set PUBLIC_HOSTNAME to the public DNS name, e.g. drops.example.com}
     ports:
       - "80:80"
       - "443:443"

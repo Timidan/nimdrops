@@ -5,10 +5,15 @@
 # the SPA's static assets all come from it (design §4.1). Nothing here routes by
 # path, because splitting the origin would put CORS on the money path.
 #
-# REPLACE `drops.example.com` with the real hostname before deploying. Caddy
-# provisions the TLS certificate from this name and nothing else; the automatic
-# HTTP→HTTPS redirect comes with it.
-drops.example.com {
+# The hostname comes from PUBLIC_HOSTNAME in .env — no edit to this file is
+# needed to go live. Caddy provisions the TLS certificate from that name and
+# nothing else; the automatic HTTP→HTTPS redirect comes with it.
+#
+# Going live is three things: point an A/AAAA record at this host, set
+# PUBLIC_HOSTNAME (and PUBLIC_ORIGIN=https://<same host>) in .env, then
+# `docker compose up -d caddy`. Ports 80 and 443 must be reachable or the
+# ACME challenge cannot complete.
+{$PUBLIC_HOSTNAME} {
 	encode zstd gzip
 
 	# `server` is the compose service name (docker-compose.yml). Running Caddy on
