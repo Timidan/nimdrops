@@ -1,6 +1,7 @@
 import type { Pool, PoolClient } from 'pg'
 import { MEMO_MAX_BYTES, type ChainClient } from '../chain/types'
 import { errorMessage, validityWindowBlocks } from '../config'
+import type { Queryable } from '../db/pool'
 import type { Alerts } from './alerts'
 import {
   PausedError,
@@ -265,9 +266,19 @@ async function recordAbsence(pool: Pool, attemptId: string): Promise<void> {
  * The chain showed us the transaction: the absence series is broken and must
  * start over. Without this a transaction that was invisible for a while and
  * then appeared would keep its stale absence evidence and stay replaceable.
+ *
+ * Exported because EVERY code path that sees a transaction on chain owes this
+ * write, not just the worker's (round-2 review F2). `recover.ts replace` looks
+ * the hash up itself and used to refuse without recording what it had just
+ * learned, so the stale series survived its own refutation and one later
+ * transient not-found answer was enough to reach the observation threshold and
+ * authorise a replacement for a transaction that was on chain all along.
+ *
+ * Takes a {@link Queryable} so a caller already holding the attempt row lock can
+ * do it inside that transaction.
  */
-async function clearAbsence(pool: Pool, attemptId: string): Promise<void> {
-  await pool.query(
+export async function clearAbsenceSeries(db: Queryable, attemptId: string): Promise<void> {
+  await db.query(
     `UPDATE transaction_attempts
      SET absent_checks = 0, first_absent_at = NULL
      WHERE id = $1 AND (absent_checks <> 0 OR first_absent_at IS NOT NULL)`,
@@ -536,7 +547,7 @@ export async function progressAttempt(
     // other branch on purpose: even an execution-failed or not-yet-final
     // sighting is proof the hash reached the chain, and stale absence evidence
     // is exactly what would let `replace` build a second payment.
-    await clearAbsence(pool, attempt.attemptId)
+    await clearAbsenceSeries(pool, attempt.attemptId)
 
     if (!tx.executionOk) {
       // On chain and failed: no amount of waiting changes this.

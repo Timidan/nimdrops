@@ -183,7 +183,7 @@ describe.skipIf(!hasDb)('drop drafts and exact funding activation (real Postgres
     process.env.NIMIQ_NETWORK = 'TestAlbatross'
     await pool.query(
       `TRUNCATE transaction_attempts, outgoing_transfers, wallet_challenges, claims, drops,
-       http_idempotency RESTART IDENTITY CASCADE`,
+       operator_float_deposits, http_idempotency RESTART IDENTITY CASCADE`,
     )
     // Deliberately leave custody_controls unreconciled (last_reconciled_at NULL):
     // activation may only succeed because submitFunding reconciles first.

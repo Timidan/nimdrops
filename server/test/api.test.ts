@@ -250,7 +250,7 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
     setEnv()
     await pool.query(
       `TRUNCATE transaction_attempts, outgoing_transfers, wallet_challenges, claims, drops,
-       http_idempotency RESTART IDENTITY CASCADE`,
+       operator_float_deposits, http_idempotency RESTART IDENTITY CASCADE`,
     )
     await pool.query(
       `UPDATE custody_controls
@@ -720,6 +720,112 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
     // Another drop is unaffected.
     const other = await liveDrop()
     expect((await claim(other.publicId, newWallet(), { ip: '192.0.2.201' })).status).toBe(202)
+  })
+
+  /**
+   * round-2 review F8. Charging the per-drop bucket on every AUTHENTICATED
+   * request was the same denial of service one signature deeper: the
+   * idempotency contract invites a client to retry, and each retry — answered
+   * from a record, allocating nothing — still spent one of the drop's ten
+   * tokens. Two wallets and ten signatures closed a twenty-slot drop to
+   * everybody else. A signature proves who is asking, not that they are asking
+   * for anything new.
+   */
+  it('authenticated retries do not spend a drop’s claim budget — only new reservations do', async () => {
+    // 20 slots, so the per-drop limiter and not the drop's capacity is what
+    // ends the run.
+    const draft = await liveDrop({ claimCount: 20 })
+
+    // Two wallets, five EXACT retries each: same challenge, same idempotency
+    // key, same bytes. Ten authenticated requests, two real reservations.
+    for (const octet of [11, 12]) {
+      const wallet = newWallet()
+      const issued = await challenge(draft.publicId, `203.0.113.${octet}`)
+      const body = {
+        challengeId: issued.challengeId,
+        publicKey: wallet.publicKeyHex,
+        signature: wallet.sign(issued.message),
+      }
+      const idemKey = randomUUID()
+      const seen = new Set<string>()
+      for (let i = 0; i < 5; i++) {
+        const res = await post(`/api/drops/${draft.publicId}/claims`, {
+          ip: `203.0.113.${octet}`,
+          idemKey,
+          body,
+        })
+        expect(res.status, `wallet ${octet} retry ${i + 1} status ${res.status}`).toBe(202)
+        seen.add(((await res.json()) as { claimId: string }).claimId)
+      }
+      expect(seen.size, 'a retry must return the SAME claim, not another one').toBe(1)
+    }
+
+    // Two tokens spent, not ten. Eight more genuinely new claimants fit.
+    for (let i = 0; i < 8; i++) {
+      const res = await claim(draft.publicId, newWallet(), { ip: `192.0.2.${i + 1}` })
+      expect(res.status, `new claimant ${i + 1} status ${res.status}`).toBe(202)
+    }
+
+    // And the bucket is a real bucket: ten NEW reservations do exhaust it.
+    await expectEnvelope(
+      await claim(draft.publicId, newWallet(), { ip: '192.0.2.99' }),
+      429,
+      'rate_limited',
+    )
+  })
+
+  /**
+   * The other half of F8: a replayed challenge cannot allocate, so it must not
+   * be charged either. Anyone can lift a challenge id out of a shared link and
+   * sign the same message with their own key — that request is refused on the
+   * consumed nonce, and refusing it must cost the drop nothing.
+   */
+  it('a replayed challenge is refused without spending the drop’s claim budget', async () => {
+    const draft = await liveDrop({ claimCount: 20 })
+
+    const issued = await challenge(draft.publicId, '198.51.100.10')
+    const first = await post(`/api/drops/${draft.publicId}/claims`, {
+      ip: '198.51.100.10',
+      idemKey: randomUUID(),
+      body: {
+        challengeId: issued.challengeId,
+        publicKey: newWallet().publicKeyHex,
+        signature: 'not-checked-yet',
+      },
+    })
+    // (a malformed signature is refused before anything is consumed)
+    expect(first.status).toBe(400)
+
+    const owner = newWallet()
+    const claimed = await post(`/api/drops/${draft.publicId}/claims`, {
+      ip: '198.51.100.10',
+      idemKey: randomUUID(),
+      body: {
+        challengeId: issued.challengeId,
+        publicKey: owner.publicKeyHex,
+        signature: owner.sign(issued.message),
+      },
+    })
+    expect(claimed.status).toBe(202)
+
+    // Nine other wallets sign the SAME already-spent message. Every one of them
+    // verifies, and every one of them is refused on the consumed challenge.
+    for (let i = 0; i < 9; i++) {
+      const thief = newWallet()
+      const res = await post(`/api/drops/${draft.publicId}/claims`, {
+        ip: `198.51.100.${20 + i}`,
+        idemKey: randomUUID(),
+        body: {
+          challengeId: issued.challengeId,
+          publicKey: thief.publicKeyHex,
+          signature: thief.sign(issued.message),
+        },
+      })
+      await expectEnvelope(res, 409, 'challenge_consumed')
+    }
+
+    // One token spent by the one real reservation; the drop is still open.
+    expect((await claim(draft.publicId, newWallet(), { ip: '192.0.2.51' })).status).toBe(202)
   })
 
   /**

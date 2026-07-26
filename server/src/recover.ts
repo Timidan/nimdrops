@@ -2,7 +2,7 @@ import { pathToFileURL } from 'node:url'
 import type { Pool, PoolClient } from 'pg'
 import { type NimiqChain, nimiqChainFromEnv } from './chain/nimiq'
 import type { ChainClient, ChainTx } from './chain/types'
-import { closePool, getPool } from './db/pool'
+import { type Queryable, closePool, getPool } from './db/pool'
 import { type NetworkName, errorMessage } from './config'
 import { type Alerts, consoleAlerts } from './services/alerts'
 import { MEMO_PREFIX } from './services/drops'
@@ -24,6 +24,7 @@ import {
   type TransferIntent,
   type WindowOptions,
   broadcastStored,
+  clearAbsenceSeries,
   evaluateProvenDead,
   loadOpenAttempts,
   progressAttempt,
@@ -155,8 +156,9 @@ async function loadLatestAttempt(
  * Network of a stored signed transaction, when the chain client can tell us
  * (finding 6). Not part of the frozen `ChainClient` interface: `NimiqChain`
  * reads it off the deserialized transaction and `FakeChain` off its payload,
- * but a client that cannot answer must not block recovery — the primary guard
- * is `custody_controls.network`, which every command checks unconditionally.
+ * but a client that cannot answer at all must not block recovery — the primary
+ * guard is `custody_controls.network`, which every command checks
+ * unconditionally.
  */
 interface NetworkDecoder {
   rawTxNetwork(rawTxHex: string): NetworkName | null
@@ -165,6 +167,43 @@ interface NetworkDecoder {
 function asNetworkDecoder(chain: ChainClient): NetworkDecoder | null {
   const candidate = chain as ChainClient & Partial<NetworkDecoder>
   return typeof candidate.rawTxNetwork === 'function' ? (candidate as NetworkDecoder) : null
+}
+
+/**
+ * Refuse unless the bytes we are about to declare dead were signed for the
+ * chain we are looking at. Returns the refusal rather than throwing it, so the
+ * caller can decide what else to persist first.
+ *
+ * **Round-2 F6.** A decoder that answers `null` — bytes that do not parse, or
+ * that carry a network id this build does not map — used to be treated as
+ * "carry on". That is fail-OPEN on the exact question this check exists to
+ * answer: if we cannot tell which chain the bytes belong to, we cannot claim
+ * their absence from this one means anything. A corrupted or foreign attempt
+ * row now blocks the replacement instead of waving it through, and the
+ * operator's next move is to look the hash up on an explorer, not to sign.
+ *
+ * A client with no decoder AT ALL is different and still allowed through: that
+ * is a capability the client never claimed, not an answer it failed to give.
+ */
+function refuseForeignBytes(chain: ChainClient, attempt: LatestAttempt): ReplaceRefusedError | null {
+  const decoder = asNetworkDecoder(chain)
+  if (!decoder) return null
+
+  const signedFor = decoder.rawTxNetwork(attempt.rawTxHex)
+  if (signedFor === null) {
+    return new ReplaceRefusedError(
+      `cannot decode which network attempt ${attempt.txHash} was signed for. Its absence here ` +
+        'proves nothing unless the bytes belong here, so this refuses rather than assumes. ' +
+        'Check the hash on a block explorer for both networks before doing anything else.',
+    )
+  }
+  if (signedFor !== chain.network()) {
+    return new ReplaceRefusedError(
+      `attempt ${attempt.txHash} was signed for ${signedFor} but this process runs against ` +
+        `${chain.network()}: its absence here proves nothing.`,
+    )
+  }
+  return null
 }
 
 // ---- resume -----------------------------------------------------------------------
@@ -264,7 +303,8 @@ export interface ReplaceResult {
  * re-checked against the chain rather than trusted from an earlier reconcile:
  *
  *   - the database is bound to the network this process is talking to, and the
- *     dead attempt's own bytes were signed for that same network (finding 6),
+ *     dead attempt's own bytes were signed for that same network — and are
+ *     decodable enough to say so (finding 6, round-2 F6),
  *   - the head is strictly past `validity_start_height + window`, so the signed
  *     bytes can never be included by anyone, ever again,
  *   - the worker recorded a SUSTAINED absence — at least
@@ -277,6 +317,31 @@ export interface ReplaceResult {
  * give: one node behind by a block, or one pico-client that lost consensus
  * mid-call, answers "not found" about a transaction that is on chain. Acting on
  * one such answer pays twice.
+ *
+ * **Round-2 F2 — the whole proof is evaluated UNDER THE ROW LOCKS.** Two things
+ * were wrong with proving first and locking second:
+ *
+ *  1. *The sighting was thrown away.* When the fresh lookup found the
+ *     transaction, this refused and returned — leaving the recorded absence
+ *     series exactly as it was. The series had just been refuted by the chain
+ *     itself and survived anyway, so it kept counting toward the observation
+ *     threshold, and ONE later transient not-found answer was enough to
+ *     authorise a replacement for a transaction that had been on chain the
+ *     whole time. Every path here that SEES the transaction now clears the
+ *     series and commits that, refusal or not.
+ *  2. *The race went the wrong way.* Proof outside the lock and a re-read
+ *     inside it meant a worker tick that sighted the transaction could be
+ *     blocked on the very row lock this transaction held, land its
+ *     `clearAbsence` immediately after the commit, and leave a landed payment
+ *     marked `proven_dead` with a replacement already signed. Taking the locks
+ *     BEFORE the chain lookup inverts that: a concurrent sighting either
+ *     commits before we take the lock (and we read the cleared series) or waits
+ *     behind us (and our own lookup, made under the lock, sees the same
+ *     transaction it did).
+ *
+ * The cost is one chain round trip while the singleton lock is held. `replace`
+ * is a rare, hand-run operator command and this is the one place in the system
+ * where being wrong means paying a claimant twice, so the trade is not close.
  *
  * `signed`, `broadcast`, ambiguous, or already-confirmed prior attempts are all
  * refused. Both attempts stay in the table afterwards: the audit trail keeps
@@ -293,134 +358,31 @@ export async function replaceTransfer(
   // mainnet money (finding 6). Throws NetworkMismatchError.
   await ensureNetworkBinding(pool, chain)
 
+  // Unlocked pre-checks. These only ever produce a REFUSAL — nothing here is
+  // trusted by the decision below, which re-reads everything under the locks.
   const intent = await loadIntent(pool, transferId)
   if (intent.state === 'confirmed') {
     throw new ReplaceRefusedError(`transfer ${transferId} is already confirmed`)
   }
-
-  const latest = await loadLatestAttempt(pool, transferId)
-  if (!latest) {
+  if (!(await loadLatestAttempt(pool, transferId))) {
     throw new ReplaceRefusedError(
       `transfer ${transferId} has no attempt to replace — use "resume" to queue a first one`,
     )
   }
-  if (latest.state === 'confirmed') {
-    throw new ReplaceRefusedError(
-      `attempt ${latest.txHash} is confirmed on chain — replacing it would pay twice`,
-    )
-  }
 
-  // The bytes we are about to declare dead must themselves belong to this
-  // network. A stored attempt signed with another network id could never have
-  // been included here, so "absent" would be trivially and misleadingly true.
-  const decoder = asNetworkDecoder(chain)
-  const signedFor = decoder ? decoder.rawTxNetwork(latest.rawTxHex) : null
-  if (signedFor !== null && signedFor !== chain.network()) {
-    throw new ReplaceRefusedError(
-      `attempt ${latest.txHash} was signed for ${signedFor} but this process runs against ` +
-        `${chain.network()}: its absence here proves nothing.`,
-    )
-  }
-
+  // Read outside the transaction: holding the singleton lock across this is
+  // avoidable, and a head one or two blocks stale only SHORTENS a 7200-block
+  // window, which is the safe direction.
   const head = await chain.headHeight()
-  let evidence: Record<string, unknown> = { alreadyProvenDead: true }
-
-  if (latest.state !== 'proven_dead') {
-    const proof = await evaluateProvenDead(chain, latest, head, opts)
-    if (proof.unknown) {
-      throw new ReplaceRefusedError(
-        `cannot prove attempt ${latest.txHash} is dead: chain lookup failed (${proof.lookupError}). ` +
-          'An inconclusive lookup is not permission to replace.',
-      )
-    }
-    if (!proof.absent) {
-      throw new ReplaceRefusedError(
-        `attempt ${latest.txHash} is on chain — wait for finality or use "resume"`,
-      )
-    }
-    if (!proof.windowPast) {
-      throw new ReplaceRefusedError(
-        `attempt ${latest.txHash} can still be included: head ${proof.head} has not passed ` +
-          `validity deadline ${proof.deadlineHeight}. Absence alone is never proof of death.`,
-      )
-    }
-
-    // Sustained absence (finding 2). `proof.absent` above is ONE lookup, taken
-    // just now; these two checks are the recorded series behind it.
-    const absenceAgeMs =
-      latest.firstAbsentAt === null ? 0 : Date.now() - latest.firstAbsentAt.getTime()
-    if (latest.absentChecks < ABSENCE_MIN_OBSERVATIONS || latest.firstAbsentAt === null) {
-      throw new ReplaceRefusedError(
-        `attempt ${latest.txHash} has only ${latest.absentChecks} recorded absence observation(s); ` +
-          `${ABSENCE_MIN_OBSERVATIONS} are required. One not-found answer is one node's opinion, ` +
-          'not proof. Let the worker keep reconciling and re-run.',
-      )
-    }
-    if (absenceAgeMs < ABSENCE_MIN_SPAN_MS) {
-      throw new ReplaceRefusedError(
-        `attempt ${latest.txHash} has been absent for only ${Math.round(absenceAgeMs / 1000)}s; ` +
-          `${ABSENCE_MIN_SPAN_MS / 1000}s of unbroken absence are required before it may be replaced.`,
-      )
-    }
-
-    evidence = {
-      ...proof,
-      absentChecks: latest.absentChecks,
-      firstAbsentAt: latest.firstAbsentAt.toISOString(),
-      absenceAgeMs,
-    }
-  }
 
   const client = await pool.connect()
-  let stored: StoredAttempt
+  let outcome: PreparedReplacement
   try {
     await client.query('BEGIN')
-
-    // Same lock order as every money path (custody_controls first), so an
-    // operator command can never interleave with a worker signature. This
-    // deliberately does NOT use `lockControls`: pause and stale reconciliation
-    // must not block recovery — they are exactly when it is needed.
-    await client.query('SELECT 1 FROM custody_controls WHERE singleton FOR UPDATE')
-
-    const { rows } = await client.query<IntentRow>(
-      `SELECT ${INTENT_COLUMNS} FROM outgoing_transfers WHERE id = $1 FOR UPDATE`,
-      [transferId],
-    )
-    if (!rows[0]) throw new TransferNotFoundError(transferId)
-    // Recipient and amount come from THIS row and nowhere else.
-    const locked = toIntent(rows[0])
-    if (locked.state === 'confirmed') {
-      throw new ReplaceRefusedError(`transfer ${transferId} was confirmed while we prepared`)
-    }
-
-    const current = await loadLatestAttempt(client, transferId, true)
-    if (!current || current.id !== latest.id) {
-      throw new ReplaceRefusedError('a newer attempt appeared while we prepared — re-run')
-    }
-    // Re-read under the lock: a worker tick that SAW the transaction between our
-    // proof and this transaction resets the absence series, and that sighting
-    // outranks everything we decided a moment ago.
-    if (
-      current.state !== 'proven_dead' &&
-      (current.absentChecks < ABSENCE_MIN_OBSERVATIONS || current.firstAbsentAt === null)
-    ) {
-      throw new ReplaceRefusedError(
-        'the absence series was reset while we prepared — the chain has seen this attempt. Re-run.',
-      )
-    }
-    if (current.state === 'signed' || current.state === 'broadcast') {
-      const updated = await client.query(
-        `UPDATE transaction_attempts
-         SET state = 'proven_dead', last_error = $2
-         WHERE id = $1 AND state IN ('signed', 'broadcast')`,
-        [current.id, JSON.stringify({ provenDeadBy: 'recover.ts replace', ...evidence })],
-      )
-      if (updated.rowCount === 0) {
-        throw new ReplaceRefusedError('attempt state changed while we prepared — re-run')
-      }
-    }
-
-    stored = await signAndPersistAttempt(client, chain, locked, head)
+    outcome = await prepareReplacement(client, chain, transferId, head, opts)
+    // Committed even when the answer is "no": a refusal that watched the chain
+    // show us the transaction has LEARNED something, and rolling that back is
+    // how the stale absence series used to survive its own refutation (F2).
     await client.query('COMMIT')
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {})
@@ -429,16 +391,189 @@ export async function replaceTransfer(
     client.release()
   }
 
-  await broadcastStored(pool, chain, stored)
+  if (outcome.kind === 'refuse') throw outcome.error
+
+  // COMMITTED. Only now do the bytes leave the process.
+  await broadcastStored(pool, chain, outcome.stored)
 
   return {
     transferId,
-    sequence: stored.sequence,
-    txHash: stored.txHash,
-    deadAttemptHash: latest.txHash,
-    recipientAddress: intent.recipientAddress,
-    amountLuna: intent.amountLuna.toString(),
+    sequence: outcome.stored.sequence,
+    txHash: outcome.stored.txHash,
+    deadAttemptHash: outcome.deadAttemptHash,
+    recipientAddress: outcome.intent.recipientAddress,
+    amountLuna: outcome.intent.amountLuna.toString(),
   }
+}
+
+type PreparedReplacement =
+  | { kind: 'replace'; stored: StoredAttempt; deadAttemptHash: string; intent: TransferIntent }
+  | { kind: 'refuse'; error: ReplaceRefusedError }
+
+/**
+ * The locked half of {@link replaceTransfer}: everything from taking the custody
+ * lock to persisting the replacement, inside the caller's transaction.
+ *
+ * Returns refusals instead of throwing them, because a refusal may still have
+ * writes worth keeping (the cleared absence series). Genuine faults — a missing
+ * intent, a database error — still throw and roll the transaction back.
+ */
+async function prepareReplacement(
+  client: PoolClient,
+  chain: ChainClient,
+  transferId: string,
+  head: number,
+  opts?: WindowOptions,
+): Promise<PreparedReplacement> {
+  // LOCK ORDER: custody_controls → transaction_attempts → outgoing_transfers.
+  //
+  // custody_controls first, like every money path, so an operator command can
+  // never interleave with a worker SIGNATURE (`signNextQueued` holds the same
+  // row). This deliberately does NOT use `lockControls`: pause and stale
+  // reconciliation must not block recovery — they are exactly when it is needed.
+  //
+  // Then the ATTEMPT before the INTENT, which is the order the worker's
+  // reconciliation path uses (`markBroadcast`, `confirmAttempt`: attempt row,
+  // then transfer row, then claim). Recovery used to take them the other way
+  // round, and once F2 made it hold both across a chain lookup that inversion
+  // became a reproducible `deadlock detected` between a worker tick confirming
+  // a payment and an operator running `replace` — caught by the race test
+  // below. Postgres resolves a deadlock by killing one side at random, which on
+  // this path is a coin flip over whether the operator or the payment survives.
+  // Same order everywhere, no deadlock to resolve.
+  await client.query('SELECT 1 FROM custody_controls WHERE singleton FOR UPDATE')
+
+  // FOR UPDATE on the attempt row. From here a concurrent worker cannot write
+  // to it — not its state, not its absence series — until this transaction ends.
+  // Nothing can insert a NEWER attempt meanwhile either: the only two writers
+  // that do (`signNextQueued` and this function) both hold custody_controls.
+  const attempt = await loadLatestAttempt(client, transferId, true)
+  if (!attempt) {
+    return {
+      kind: 'refuse',
+      error: new ReplaceRefusedError(
+        `transfer ${transferId} has no attempt to replace — use "resume" to queue a first one`,
+      ),
+    }
+  }
+
+  const { rows } = await client.query<IntentRow>(
+    `SELECT ${INTENT_COLUMNS} FROM outgoing_transfers WHERE id = $1 FOR UPDATE`,
+    [transferId],
+  )
+  if (!rows[0]) throw new TransferNotFoundError(transferId)
+  // Recipient and amount come from THIS row and nowhere else.
+  const intent = toIntent(rows[0])
+  if (intent.state === 'confirmed') {
+    return {
+      kind: 'refuse',
+      error: new ReplaceRefusedError(`transfer ${transferId} was confirmed while we prepared`),
+    }
+  }
+  if (attempt.state === 'confirmed') {
+    // Confirmed IS a sighting: whatever absence was recorded before it is void.
+    await clearAbsenceSeries(client, attempt.id)
+    return {
+      kind: 'refuse',
+      error: new ReplaceRefusedError(
+        `attempt ${attempt.txHash} is confirmed on chain — replacing it would pay twice`,
+      ),
+    }
+  }
+
+  // The bytes we are about to declare dead must themselves belong to this
+  // network, and must be decodable enough to prove it (round-2 F6).
+  const foreign = refuseForeignBytes(chain, attempt)
+  if (foreign) return { kind: 'refuse', error: foreign }
+
+  let evidence: Record<string, unknown> = { alreadyProvenDead: true }
+
+  if (attempt.state !== 'proven_dead') {
+    // The fresh live lookup, made while we hold the row lock (F2).
+    const proof = await evaluateProvenDead(chain, attempt, head, opts)
+
+    if (proof.unknown) {
+      return {
+        kind: 'refuse',
+        error: new ReplaceRefusedError(
+          `cannot prove attempt ${attempt.txHash} is dead: chain lookup failed (${proof.lookupError}). ` +
+            'An inconclusive lookup is not permission to replace.',
+        ),
+      }
+    }
+    if (!proof.absent) {
+      // We just watched the chain hand us this transaction. Record it: the
+      // series is refuted and must start again from zero (F2).
+      await clearAbsenceSeries(client, attempt.id)
+      return {
+        kind: 'refuse',
+        error: new ReplaceRefusedError(
+          `attempt ${attempt.txHash} is on chain — wait for finality or use "resume"`,
+        ),
+      }
+    }
+    if (!proof.windowPast) {
+      return {
+        kind: 'refuse',
+        error: new ReplaceRefusedError(
+          `attempt ${attempt.txHash} can still be included: head ${proof.head} has not passed ` +
+            `validity deadline ${proof.deadlineHeight}. Absence alone is never proof of death.`,
+        ),
+      }
+    }
+
+    // Sustained absence (finding 2). `proof.absent` above is ONE lookup, taken
+    // just now under the lock; these two checks are the recorded series behind
+    // it, read from the row this transaction has pinned.
+    const absenceAgeMs =
+      attempt.firstAbsentAt === null ? 0 : Date.now() - attempt.firstAbsentAt.getTime()
+    if (attempt.absentChecks < ABSENCE_MIN_OBSERVATIONS || attempt.firstAbsentAt === null) {
+      return {
+        kind: 'refuse',
+        error: new ReplaceRefusedError(
+          `attempt ${attempt.txHash} has only ${attempt.absentChecks} recorded absence observation(s); ` +
+            `${ABSENCE_MIN_OBSERVATIONS} are required. One not-found answer is one node's opinion, ` +
+            'not proof. Let the worker keep reconciling and re-run.',
+        ),
+      }
+    }
+    if (absenceAgeMs < ABSENCE_MIN_SPAN_MS) {
+      return {
+        kind: 'refuse',
+        error: new ReplaceRefusedError(
+          `attempt ${attempt.txHash} has been absent for only ${Math.round(absenceAgeMs / 1000)}s; ` +
+            `${ABSENCE_MIN_SPAN_MS / 1000}s of unbroken absence are required before it may be replaced.`,
+        ),
+      }
+    }
+
+    evidence = {
+      ...proof,
+      absentChecks: attempt.absentChecks,
+      firstAbsentAt: attempt.firstAbsentAt.toISOString(),
+      absenceAgeMs,
+    }
+  }
+
+  if (attempt.state === 'signed' || attempt.state === 'broadcast') {
+    const updated = await client.query(
+      `UPDATE transaction_attempts
+       SET state = 'proven_dead', last_error = $2
+       WHERE id = $1 AND state IN ('signed', 'broadcast')`,
+      [attempt.id, JSON.stringify({ provenDeadBy: 'recover.ts replace', ...evidence })],
+    )
+    if (updated.rowCount === 0) {
+      // Unreachable while we hold FOR UPDATE on the row; kept because the cost
+      // of being wrong about that is a second payment.
+      return {
+        kind: 'refuse',
+        error: new ReplaceRefusedError('attempt state changed while we prepared — re-run'),
+      }
+    }
+  }
+
+  const stored = await signAndPersistAttempt(client, chain, intent, head)
+  return { kind: 'replace', stored, deadAttemptHash: attempt.txHash, intent }
 }
 
 // ---- pause / unpause -----------------------------------------------------------------
@@ -669,6 +804,24 @@ export interface SolvencyView {
   lastReconciledChainBalanceLuna: string | null
   /** True when `lockControls` would refuse on staleness right now. */
   reconciliationStale: boolean
+  /**
+   * Sum of the finalized deposits the float is attributed to (round-2 F4).
+   * `float set` keeps this equal to `operatorFloatLuna`.
+   */
+  attestedFloatDepositsLuna: string
+  /**
+   * False when the float does not equal the deposits backing it — money the
+   * books credit that nothing on chain has been pointed at. Only a
+   * hand-written UPDATE, or migration 006's fail-closed zeroing of a float
+   * attested under the old unattributable rule, can produce it.
+   */
+  floatAttributed: boolean
+  /**
+   * When the chain was last seen holding less than the ledger, `null` once a
+   * reconciliation has succeeded since (round-2 N3). Non-null means every money
+   * path is failing closed and `unpause` will NOT change that.
+   */
+  shortfallDetectedAt: string | null
 }
 
 interface LedgerSnapshot {
@@ -708,6 +861,7 @@ function toSolvencyView(o: {
   movementsLuna: bigint
   outstandingLuna: bigint
   inFlightLuna: bigint
+  attestedDepositsLuna: bigint
 }): SolvencyView {
   const { controls } = o
   const ledgerLuna = controls.operatorFloatLuna + o.movementsLuna
@@ -733,7 +887,18 @@ function toSolvencyView(o: {
     reconciliationStale:
       controls.lastReconciledAt === null ||
       Date.now() - controls.lastReconciledAt.getTime() > RECONCILIATION_MAX_AGE_MS,
+    attestedFloatDepositsLuna: o.attestedDepositsLuna.toString(),
+    floatAttributed: o.attestedDepositsLuna === controls.operatorFloatLuna,
+    shortfallDetectedAt: controls.shortfallDetectedAt?.toISOString() ?? null,
   }
+}
+
+/** Total of the finalized deposits `float set` has attributed the float to. */
+export async function attestedFloatDepositsLuna(db: Queryable): Promise<bigint> {
+  const { rows } = await db.query<{ luna: string }>(
+    'SELECT COALESCE(SUM(value_luna), 0)::BIGINT AS luna FROM operator_float_deposits',
+  )
+  return BigInt(rows[0].luna)
 }
 
 async function readSolvency(db: PoolClient): Promise<LedgerSnapshot> {
@@ -741,10 +906,17 @@ async function readSolvency(db: PoolClient): Promise<LedgerSnapshot> {
   const movementsLuna = await ledgerMovementsLuna(db)
   const outstandingLuna = await outstandingPrincipalLuna(db)
   const inFlightLuna = await inFlightOutgoingLuna(db)
+  const attestedDepositsLuna = await attestedFloatDepositsLuna(db)
   return {
     controls,
     ledgerLuna: controls.operatorFloatLuna + movementsLuna,
-    view: toSolvencyView({ controls, movementsLuna, outstandingLuna, inFlightLuna }),
+    view: toSolvencyView({
+      controls,
+      movementsLuna,
+      outstandingLuna,
+      inFlightLuna,
+      attestedDepositsLuna,
+    }),
   }
 }
 
@@ -812,6 +984,43 @@ export class OverAttestationError extends RecoverError {}
 /** The float may not be written from a guess about the chain. */
 export class ChainUnavailableError extends RecoverError {}
 
+/** Why a `--tx` hash cannot back the operator float (round-2 F4). */
+export type DepositRejectionCode =
+  /** No `--tx <hash>` was supplied at all. */
+  | 'missing_tx'
+  /** The chain does not have that hash as an included transaction. */
+  | 'not_found'
+  /** Included, but not yet behind this deployment's finality depth. */
+  | 'not_final'
+  /** Included and failed: it moved nothing. */
+  | 'execution_failed'
+  /** Paid to somewhere other than the custody address. */
+  | 'wrong_recipient'
+  /** Custody paying itself is a fee, not an inbound float. */
+  | 'self_transfer'
+  /** Already counted as some drop's funding: that money belongs to claimants. */
+  | 'drop_funding'
+  /** Already backs the float: counting it twice would double the attestation. */
+  | 'already_attested'
+  /** The requested float is not the sum of the deposits backing it. */
+  | 'float_mismatch'
+
+/**
+ * The float may not be attested against this transaction.
+ *
+ * Every rejection below is a way of saying the same thing: the operator asked
+ * the books to credit money that this specific transaction does not put into
+ * custody, and an attestation that cannot be refused is not an attestation.
+ */
+export class DepositAttestationError extends RecoverError {
+  constructor(
+    readonly code: DepositRejectionCode,
+    message: string,
+  ) {
+    super(message)
+  }
+}
+
 /**
  * Parse an operator-supplied luna amount.
  *
@@ -862,10 +1071,20 @@ export async function floatShow(
   }
 }
 
+export interface AttestedDeposit {
+  txHash: string
+  valueLuna: string
+  includedHeight: number
+}
+
 export interface FloatSetResult {
   command: 'float set'
   network: NetworkName
   headHeight: number
+  /** The deposit this run attributed the float to. */
+  deposit: AttestedDeposit
+  /** Sum of every deposit backing the float afterwards; equals `operatorFloatLuna.after`. */
+  attestedFloatDepositsLuna: string
   operatorFloatLuna: { before: string; after: string }
   ledgerBalanceLuna: { before: string; after: string }
   /** `ledger − outstanding − fee reserve`: negative means money paths stay closed. */
@@ -877,30 +1096,112 @@ export interface FloatSetResult {
 }
 
 /**
+ * Prove that `txHash` is a finalized deposit that really put money into custody.
+ *
+ * Every predicate here is one way the old, hash-less attestation could be
+ * wrong. `getAccount`'s head-state balance — the only thing the float used to
+ * be checked against — answers "custody holds this much RIGHT NOW", which
+ * includes credits that are not final, credits a reorg can remove, and the
+ * drops' own funding sitting in the same wallet. None of those are the
+ * operator's float, and all of them made a larger float look honest.
+ *
+ * A lookup that ERRORS is a `ChainUnavailableError`, not a rejection: "we could
+ * not ask" must never reach a money decision as "the answer is no" — nor, more
+ * dangerously, as "the answer is yes".
+ */
+async function proveFloatDeposit(
+  chain: ChainClient,
+  txHash: string,
+  head: number,
+): Promise<ChainTx> {
+  let tx: ChainTx | null
+  try {
+    tx = await chain.getTransaction(txHash)
+  } catch (err) {
+    throw new ChainUnavailableError(
+      `refusing to attest the operator float: could not look up deposit ${txHash} ` +
+        `(${errorMessage(err)}). An inconclusive lookup is not evidence of a deposit.`,
+    )
+  }
+
+  if (!tx) {
+    throw new DepositAttestationError(
+      'not_found',
+      `no included transaction ${txHash} on ${chain.network()}. A deposit that the chain cannot ` +
+        'show us is not money in custody — wait for it to be included, then re-run.',
+    )
+  }
+  if (!tx.executionOk) {
+    throw new DepositAttestationError(
+      'execution_failed',
+      `transaction ${txHash} is on chain but did not execute: it moved nothing into custody.`,
+    )
+  }
+  if (tx.recipient !== chain.custodyAddress()) {
+    throw new DepositAttestationError(
+      'wrong_recipient',
+      `transaction ${txHash} paid ${tx.recipient}, not the custody address ` +
+        `${chain.custodyAddress()}. The float may only be attested against money paid INTO custody.`,
+    )
+  }
+  if (tx.sender === chain.custodyAddress()) {
+    throw new DepositAttestationError(
+      'self_transfer',
+      `transaction ${txHash} was sent BY custody: it moves no new money in, it only spends fees.`,
+    )
+  }
+  if (!chain.isFinal(tx, head)) {
+    throw new DepositAttestationError(
+      'not_final',
+      `deposit ${txHash} was included at height ${tx.includedHeight} and is not yet final at head ` +
+        `${head}. A credit that a reorg can still remove must not become spendable capacity.`,
+    )
+  }
+  return tx
+}
+
+/**
  * Re-attest the operator float — the one ledger credit the drops cannot supply
- * (migration 004, G1 review finding 4). A fresh database fails closed as
+ * (migration 004, G1 review finding 4) — and ATTRIBUTE it to a named, finalized
+ * deposit (migration 006, round-2 review F4). A fresh database fails closed as
  * insolvent until this runs, because the fee reserve is spent out of money no
  * drop ever deposited.
  *
  * The float is an ATTESTATION, and the only thing that makes an attestation
  * worth anything is that it can be refused. So:
  *
- *  - a chain client is mandatory, and an unreachable node is a refusal rather
- *    than a guess. Writing a float against a balance we could not read is
- *    exactly the failure the attestation exists to prevent;
- *  - the resulting LEDGER balance may not exceed the chain's confirmed custody
- *    balance. Over-attesting invents spendable capacity, and the invariant
- *    would then authorise payouts against money that is not there — a stranded
- *    campaign whose claimants cannot be paid;
- *  - the write happens under the singleton `custody_controls` lock, in the same
- *    lock order as every money path, so it cannot interleave with an activation
- *    or a signature that is reading the float it is about to change.
+ *  - **a deposit hash is mandatory.** Round 1 checked the requested float only
+ *    against `getAccount`'s head-state balance, which is not finality-proven,
+ *    is not attributable to anything, and contains the drops' own funding.
+ *    Every luna of the float now points at a transaction an auditor can open on
+ *    a block explorer, and `operator_float_luna` must equal the sum of those
+ *    transactions — see {@link proveFloatDeposit} for what each one must prove;
+ *  - **a chain client is mandatory**, and an unreachable node is a refusal
+ *    rather than a guess. Writing a float against a balance we could not read
+ *    is exactly the failure the attestation exists to prevent;
+ *  - **the resulting LEDGER balance may not exceed the chain's confirmed
+ *    custody balance.** Over-attesting invents spendable capacity, and the
+ *    invariant would then authorise payouts against money that is not there — a
+ *    stranded campaign whose claimants cannot be paid;
+ *  - **the write happens under the singleton `custody_controls` lock**, in the
+ *    same lock order as every money path, so it cannot interleave with an
+ *    activation or a signature that is reading the float it is about to change.
  *
- * This bound is deliberately STRICTER than `reconcile()`'s cross-check, which
- * tolerates `chain >= ledger − in-flight`. In-flight money is money already
- * committed to leaving; treating it as headroom for a fresh attestation would
- * let the float ratchet up on payments that have not settled. An operator who
- * genuinely has more in custody can re-run this once the transfers confirm.
+ * The over-attestation bound is deliberately STRICTER than `reconcile()`'s
+ * cross-check, which tolerates `chain >= ledger − in-flight`. In-flight money is
+ * money already committed to leaving; treating it as headroom for a fresh
+ * attestation would let the float ratchet up on payments that have not settled.
+ * An operator who genuinely has more in custody can re-run once they confirm.
+ *
+ * **Round-2 N2 — the bound is applied to a balance read INSIDE the lock.** The
+ * chain balance used to be read before the lock was taken, and the comment
+ * arguing that was safe was wrong: between the read and the write, an in-flight
+ * payout could CONFIRM, dropping the real custody balance below the number the
+ * bound was checked against, and the over-attestation the bound exists to
+ * refuse went through. There are now two reads and they do different jobs. The
+ * first is a probe: it fails fast on an unreachable node so a dead RPC cannot
+ * stall every payout behind the singleton lock for a timeout. The second, taken
+ * after the lock is held, is the only one the money decision uses.
  *
  * Deliberately NOT via `lockControls`: attesting the float is precisely what an
  * operator does while the system is paused, insolvent or stale, so a
@@ -910,20 +1211,25 @@ export async function setOperatorFloat(
   pool: Pool,
   chain: ChainClient,
   lunaArgument: string,
+  depositTxHash?: string,
 ): Promise<FloatSetResult> {
   await ensureNetworkBinding(pool, chain)
   const nextFloatLuna = parsePositiveLuna(lunaArgument)
 
-  // Chain reads happen BEFORE the lock, like `reconcile()`: holding the
-  // singleton row across an RPC would stall every payout for as long as the
-  // node takes to answer. The staleness that buys is one-sided — a balance read
-  // a moment ago can only have been reduced by our own in-flight spending,
-  // which the stricter-than-reconcile bound above already refuses to count.
-  let headHeight: number
-  let chainConfirmedLuna: bigint
+  const txHash = depositTxHash?.trim()
+  if (!txHash) {
+    throw new DepositAttestationError(
+      'missing_tx',
+      'refusing to set the operator float without --tx <deposit hash>. The float is a claim that ' +
+        'specific money is in custody; it may only be attested against a finalized deposit this ' +
+        'system can verify for itself. Usage: float set <luna> --tx <hash>.',
+    )
+  }
+
+  // Probe, OUTSIDE the lock: an unreachable node must not be discovered while
+  // holding the row every payout needs. Nothing decided here is trusted below.
   try {
-    headHeight = await chain.headHeight()
-    chainConfirmedLuna = await chain.confirmedBalanceLuna(chain.custodyAddress())
+    await chain.headHeight()
   } catch (err) {
     throw new ChainUnavailableError(
       `refusing to set the operator float: the chain is unreachable (${errorMessage(err)}). ` +
@@ -937,6 +1243,37 @@ export async function setOperatorFloat(
     // custody_controls first — the mandated lock order for every money path.
     await client.query('SELECT 1 FROM custody_controls WHERE singleton FOR UPDATE')
 
+    // N2: the authoritative chain reads, taken with the lock held. A payout that
+    // confirms from here on cannot land between them and the write.
+    let headHeight: number
+    let chainConfirmedLuna: bigint
+    try {
+      headHeight = await chain.headHeight()
+      chainConfirmedLuna = await chain.confirmedBalanceLuna(chain.custodyAddress())
+    } catch (err) {
+      throw new ChainUnavailableError(
+        `refusing to set the operator float: the chain is unreachable (${errorMessage(err)}). ` +
+          'The float attests to money that is really in custody; it may not be written from a guess.',
+      )
+    }
+
+    const deposit = await proveFloatDeposit(chain, txHash, headHeight)
+
+    // That money must not already be spoken for. A drop's funding belongs to
+    // its claimants and is already credited to the ledger by `activate()`;
+    // counting it again as float would credit the same luna twice.
+    const { rows: funding } = await client.query<{ public_id: string }>(
+      'SELECT public_id FROM drops WHERE funding_tx_hash = $1',
+      [txHash],
+    )
+    if (funding[0]) {
+      throw new DepositAttestationError(
+        'drop_funding',
+        `transaction ${txHash} is the accepted funding of drop ${funding[0].public_id}: that money ` +
+          'is owed to its claimants and is already in the ledger. It cannot also be operator float.',
+      )
+    }
+
     const before = await readControls(client)
     const movementsLuna = await ledgerMovementsLuna(client)
     const outstandingLuna = await outstandingPrincipalLuna(client)
@@ -944,6 +1281,10 @@ export async function setOperatorFloat(
     const beforeLedgerLuna = before.operatorFloatLuna + movementsLuna
     const afterLedgerLuna = nextFloatLuna + movementsLuna
 
+    // The money bound comes FIRST, on the in-lock chain balance (N2). A verified
+    // deposit is not by itself proof the money is still there: custody may have
+    // spent it since, and it is the current balance — not the deposit's history
+    // — that decides what may be treated as spendable capacity.
     if (afterLedgerLuna > chainConfirmedLuna) {
       throw new OverAttestationError(
         `refusing to attest an operator float of ${nextFloatLuna} luna: it would put the ledger ` +
@@ -952,6 +1293,32 @@ export async function setOperatorFloat(
           `float right now is ${
             chainConfirmedLuna - movementsLuna > 0n ? chainConfirmedLuna - movementsLuna : 0n
           } luna. Deposit the money first, then attest it.`,
+      )
+    }
+
+    // One row per hash (migration 006's primary key). `ON CONFLICT DO NOTHING`
+    // makes "already counted" a rowCount, not a race.
+    const inserted = await client.query(
+      `INSERT INTO operator_float_deposits (tx_hash, value_luna, included_height, network)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (tx_hash) DO NOTHING`,
+      [txHash, deposit.valueLuna.toString(), deposit.includedHeight.toString(), chain.network()],
+    )
+    if (inserted.rowCount === 0) {
+      throw new DepositAttestationError(
+        'already_attested',
+        `deposit ${txHash} already backs the operator float. Attesting it twice would credit the ` +
+          'same luna twice. Run "float show" to see the deposits currently counted.',
+      )
+    }
+
+    const attestedLuna = await attestedFloatDepositsLuna(client)
+    if (nextFloatLuna !== attestedLuna) {
+      throw new DepositAttestationError(
+        'float_mismatch',
+        `refusing a float of ${nextFloatLuna} luna: the deposits backing it total ${attestedLuna} ` +
+          `luna (this deposit contributes ${deposit.valueLuna}). The float must be exactly the sum ` +
+          'of the deposits it is attributed to — attest each deposit and pass the running total.',
       )
     }
 
@@ -967,6 +1334,12 @@ export async function setOperatorFloat(
       command: 'float set',
       network: chain.network(),
       headHeight,
+      deposit: {
+        txHash,
+        valueLuna: deposit.valueLuna.toString(),
+        includedHeight: deposit.includedHeight,
+      },
+      attestedFloatDepositsLuna: attestedLuna.toString(),
       operatorFloatLuna: {
         before: before.operatorFloatLuna.toString(),
         after: nextFloatLuna.toString(),
@@ -1188,11 +1561,14 @@ commands:
       balance. Read-only.
       example: pnpm tsx src/recover.ts float show
 
-  float set <luna>
-      Re-attest the operator float, in whole positive luna. Refuses any value
-      that would push the ledger balance above the on-chain custody balance, and
-      refuses outright when the chain cannot be read.
-      example: pnpm tsx src/recover.ts float set 100000
+  float set <luna> --tx <hash>
+      Re-attest the operator float, in whole positive luna, ATTRIBUTED to a
+      finalized custody deposit. --tx is mandatory: the hash must be final, paid
+      to custody, not any drop's funding and not already attested, and <luna>
+      must equal the sum of every deposit backing the float. Also refuses any
+      value that would push the ledger balance above the on-chain custody
+      balance, and refuses outright when the chain cannot be read.
+      example: pnpm tsx src/recover.ts float set 100000 --tx 9f3c...e1
 
   pause <reason>
       Engage the global kill switch: every new money path fails closed. Needs no
@@ -1227,6 +1603,22 @@ const NEEDS_CHAIN = new Set<string>(['resume', 'replace', 'deposits'])
  */
 const OPTIONAL_CHAIN = new Set<string>(['status'])
 
+/**
+ * Value of a `--flag value` / `--flag=value` pair, or `undefined`.
+ *
+ * Positional-only parsing would have been enough for round 1, but `float set`
+ * now carries a deposit hash whose omission must be a REFUSAL rather than a
+ * shifted positional argument silently read as an amount.
+ */
+export function flagValue(argv: string[], flag: string): string | undefined {
+  for (let i = 0; i < argv.length; i += 1) {
+    const token = argv[i]
+    if (token === flag) return argv[i + 1]
+    if (token.startsWith(`${flag}=`)) return token.slice(flag.length + 1)
+  }
+  return undefined
+}
+
 export async function main(argv: string[]): Promise<number> {
   const [command, argument, third] = argv
 
@@ -1246,7 +1638,9 @@ export async function main(argv: string[]): Promise<number> {
     console.error(USAGE)
     return 2
   }
-  if (command === 'float' && argument === 'set' && third === undefined) {
+  // The amount is positional and must not be a flag: `float set --tx <hash>`
+  // with no amount would otherwise read "--tx" as the luna value.
+  if (command === 'float' && argument === 'set' && (third === undefined || third.startsWith('-'))) {
     console.error(USAGE)
     return 2
   }
@@ -1287,7 +1681,7 @@ export async function main(argv: string[]): Promise<number> {
       print(
         argument === 'show'
           ? await floatShow(pool, chain, chainUnavailableReason)
-          : await setOperatorFloat(pool, needChain(), third as string),
+          : await setOperatorFloat(pool, needChain(), third as string, flagValue(argv, '--tx')),
       )
     } else if (command === 'resume') {
       print(await resumeTransfer(pool, needChain(), alerts, argument))
@@ -1313,14 +1707,37 @@ export async function main(argv: string[]): Promise<number> {
 const invokedDirectly =
   process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href
 
+/**
+ * End the process with `code`, once stdout has actually gone out.
+ *
+ * Setting `process.exitCode` and letting Node drain the loop is the tidy way to
+ * end a CLI and it does not work here: `@nimiq/core` spawns a consensus worker
+ * whose threads and timers keep the loop alive forever, so
+ * `pnpm tsx src/recover.ts status` printed its report in full and then HUNG
+ * until something killed it (observed on the VPS: correct output, exit 124 from
+ * `timeout`). `chain.close()` disconnects the network but does not tear those
+ * handles down, and there is nothing further this process wants to do — so it
+ * says so explicitly.
+ *
+ * The flush matters: when stdout is a pipe (`| jq`, a log collector, CI) writes
+ * are asynchronous, and `process.exit` discards whatever is still queued. A
+ * report that exits promptly but truncates its own JSON would be a worse bug
+ * than the hang.
+ */
+function exitAfterFlush(code: number): void {
+  process.exitCode = code
+  if (process.stdout.writableLength === 0) {
+    process.exit(code)
+  }
+  process.stdout.write('', () => process.exit(code))
+}
+
 if (invokedDirectly) {
   main(process.argv.slice(2)).then(
-    (code) => {
-      process.exitCode = code
-    },
+    (code) => exitAfterFlush(code),
     (err: unknown) => {
       console.error(errorMessage(err))
-      process.exitCode = 1
+      exitAfterFlush(1)
     },
   )
 }

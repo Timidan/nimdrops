@@ -1,6 +1,6 @@
 import type { Pool, PoolClient } from 'pg'
 import type { ChainClient } from '../chain/types'
-import type { NetworkName } from '../config'
+import { BLOCK_SEPARATION_MS, type NetworkName, validityWindowBlocks } from '../config'
 import type { Queryable } from '../db/pool'
 import { type Alerts, consoleAlerts } from './alerts'
 
@@ -43,6 +43,18 @@ export class StaleReconciliationError extends SolvencyError {}
 /** Ledger balance cannot cover outstanding principal plus the fee reserve. */
 export class InsolventError extends SolvencyError {}
 
+/**
+ * A reconciliation observed the chain holding LESS than the books claim, and no
+ * reconciliation has succeeded since (round-2 review N3).
+ *
+ * Deliberately a subclass of {@link InsolventError}: every existing handler —
+ * the worker's deferral path, the HTTP 503 mapping — already treats an
+ * insolvency as "money is owed and we will not sign for it", which is exactly
+ * the right behaviour here. What the distinct type adds is an operator-facing
+ * name for a condition `unpause` cannot clear.
+ */
+export class UnreconciledShortfallError extends InsolventError {}
+
 /** The requested addition would push live principal past `max_live_principal_luna`. */
 export class CapExceededError extends SolvencyError {}
 
@@ -67,6 +79,13 @@ export interface Controls {
   reconciledConfirmedBalanceLuna: bigint | null
   /** `null` until the first boot stamps it (finding 6). */
   network: NetworkName | null
+  /**
+   * When `reconcile()` last saw the chain below the ledger, `null` once a
+   * reconciliation has succeeded since (N3). While this is set every money path
+   * fails closed with {@link UnreconciledShortfallError}, and `unpause` does
+   * NOT clear it — only a clean reconcile does.
+   */
+  shortfallDetectedAt: Date | null
 }
 
 interface ControlsRow {
@@ -78,6 +97,7 @@ interface ControlsRow {
   last_reconciled_at: Date | null
   reconciled_confirmed_balance_luna: string | null
   network: NetworkName | null
+  shortfall_detected_at: Date | null
   stale: boolean
 }
 
@@ -94,6 +114,7 @@ function toControls(row: ControlsRow): Controls {
         ? null
         : BigInt(row.reconciled_confirmed_balance_luna),
     network: row.network,
+    shortfallDetectedAt: row.shortfall_detected_at,
   }
 }
 
@@ -106,6 +127,7 @@ const SELECT_CONTROLS = `
          last_reconciled_at,
          reconciled_confirmed_balance_luna,
          network,
+         shortfall_detected_at,
          (last_reconciled_at IS NULL
           OR now() - last_reconciled_at > make_interval(secs => $1::float8 / 1000)) AS stale
   FROM custody_controls
@@ -268,23 +290,106 @@ export async function ledgerBalanceLuna(db: Queryable, controls: Controls): Prom
 }
 
 /**
+ * How long an attempt may still be counted as legitimately in flight.
+ *
+ * The same window the chain itself enforces (`validity_start_height + 7200`
+ * blocks at one block per second), measured in wall time because attempt rows
+ * carry a timestamp rather than a head height. Past it the transaction cannot
+ * be included by anyone, so it can no longer be the explanation for money
+ * missing from custody.
+ */
+export function inFlightMaxAgeMs(windowBlocks: number = validityWindowBlocks()): number {
+  return windowBlocks * BLOCK_SEPARATION_MS
+}
+
+/** @internal test-only override; production reads the floored config. */
+export interface InFlightOptions {
+  maxAgeMs?: number
+}
+
+/**
  * Money that has been committed to leaving custody but is not yet finalized in
- * the ledger: every intent holding an open (`signed`/`broadcast`) attempt, plus
- * that attempt's fee.
+ * the ledger, and that can still plausibly explain a chain balance below the
+ * books: an attempt that was actually BROADCAST and is still inside its
+ * validity window, plus that attempt's fee.
  *
  * Used ONLY by the chain cross-check. The chain debits a payment the moment it
  * lands, while the ledger waits for our own finality depth, so during that
  * window the chain legitimately shows LESS than the books do. Without this term
  * every in-flight payout would look like a shortfall and pause custody.
+ *
+ * Two exclusions, both from round-2 review N1. The offset used to cover every
+ * `signed`/`broadcast` attempt with no age bound, which turned it into a
+ * permanent alibi: ONE stale attempt sitting open forever subtracted its amount
+ * from the cross-check for as long as it existed, so a real custody shortfall
+ * of the same size never showed up at all.
+ *
+ *  - **`signed` but never broadcast.** The bytes never left this process, so
+ *    the chain cannot possibly have debited them. Counting them as an
+ *    explanation for missing money is counting a payment that was never made.
+ *  - **Older than the validity window.** Past its deadline a transaction is
+ *    unincludable, so custody will never be debited for it either.
+ *
+ * Anything excluded here is money the books think is leaving and the chain will
+ * never take. That is an operator condition in its own right — see
+ * {@link staleInFlightOutgoing}, which `reconcile()` alerts on.
  */
-export async function inFlightOutgoingLuna(db: Queryable): Promise<bigint> {
-  const { rows } = await db.query<{ in_flight_luna: string }>(`
-    SELECT COALESCE(SUM(t.amount_luna + a.fee_luna), 0)::BIGINT AS in_flight_luna
-    FROM transaction_attempts a
-    JOIN outgoing_transfers t ON t.id = a.transfer_id
-    WHERE a.state IN ('signed', 'broadcast')
-  `)
+export async function inFlightOutgoingLuna(
+  db: Queryable,
+  opts?: InFlightOptions,
+): Promise<bigint> {
+  const { rows } = await db.query<{ in_flight_luna: string }>(
+    `SELECT COALESCE(SUM(t.amount_luna + a.fee_luna), 0)::BIGINT AS in_flight_luna
+     FROM transaction_attempts a
+     JOIN outgoing_transfers t ON t.id = a.transfer_id
+     WHERE a.state = 'broadcast'
+       AND a.created_at > now() - make_interval(secs => $1::float8 / 1000)`,
+    [opts?.maxAgeMs ?? inFlightMaxAgeMs()],
+  )
   return BigInt(rows[0].in_flight_luna)
+}
+
+export interface StaleInFlight {
+  /** Open attempts that no longer offset the cross-check. */
+  count: number
+  /** Their principal plus fees — money the books expect to leave and the chain will not take. */
+  lunaTotal: bigint
+  /** Never handed to the network at all: `signed`, no acknowledged broadcast. */
+  neverBroadcastCount: number
+}
+
+/**
+ * Open attempts that {@link inFlightOutgoingLuna} deliberately refuses to count
+ * (N1). Non-empty means an intent is stuck in a state only a human resolves:
+ * either the worker never got its bytes out, or they aged out of the chain's
+ * validity window without landing.
+ */
+export async function staleInFlightOutgoing(
+  db: Queryable,
+  opts?: InFlightOptions,
+): Promise<StaleInFlight> {
+  const { rows } = await db.query<{
+    n: number
+    luna_total: string
+    never_broadcast: number
+  }>(
+    `SELECT count(*)::int AS n,
+            COALESCE(SUM(t.amount_luna + a.fee_luna), 0)::BIGINT AS luna_total,
+            count(*) FILTER (WHERE a.state = 'signed')::int AS never_broadcast
+     FROM transaction_attempts a
+     JOIN outgoing_transfers t ON t.id = a.transfer_id
+     WHERE a.state IN ('signed', 'broadcast')
+       AND NOT (
+         a.state = 'broadcast'
+         AND a.created_at > now() - make_interval(secs => $1::float8 / 1000)
+       )`,
+    [opts?.maxAgeMs ?? inFlightMaxAgeMs()],
+  )
+  return {
+    count: rows[0].n,
+    lunaTotal: BigInt(rows[0].luna_total),
+    neverBroadcastCount: rows[0].never_broadcast,
+  }
 }
 
 /**
@@ -323,6 +428,19 @@ export async function assertSolvent(
   // the chain has no business creating new liabilities.
   if (controls.reconciledConfirmedBalanceLuna === null) {
     throw new StaleReconciliationError('custody balance has never been reconciled')
+  }
+
+  // N3: a reconciliation saw the chain below the books and no reconciliation
+  // has succeeded since. `paused` may well have been cleared by an operator —
+  // that is permission to resume, not evidence that custody holds the money.
+  // Only a clean `reconcile()` clears this, which forces the right order:
+  // re-establish that the books are true, THEN sign against them.
+  if (controls.shortfallDetectedAt !== null) {
+    throw new UnreconciledShortfallError(
+      `custody was observed holding less than the ledger at ` +
+        `${controls.shortfallDetectedAt.toISOString()} and no reconciliation has succeeded since. ` +
+        'Unpausing does not clear this: a clean reconcile must.',
+    )
   }
 
   const outstanding = await outstandingPrincipalLuna(client)
@@ -367,26 +485,61 @@ export const CROSS_CHECK_EPSILON_LUNA = 0n
  * Chain reads happen outside any transaction, then one UPDATE stamps the row.
  * This intentionally bypasses `lockControls`: reconciliation is exactly the
  * operation that must still work while the system is paused or stale.
+ *
+ * The three database reads run inside ONE `REPEATABLE READ, READ ONLY` snapshot
+ * (round-2 review N4). Taken in autocommit they came from three different
+ * instants, and a confirmation committing between the ledger read and the
+ * in-flight read produced a pair that no single instant could have produced —
+ * a payout still counted as unpaid by the ledger AND already gone from the
+ * in-flight offset. That difference is not a shortfall, it is a seam, and it
+ * false-paused custody. One snapshot, one instant, no seam. READ ONLY makes
+ * that structural, and no lock is taken: reconciliation must never block a
+ * payout it is trying to account for.
  */
 export async function reconcile(pool: Pool, chain: ChainClient, alerts?: Alerts): Promise<void> {
   const height = await chain.headHeight()
   const chainBalanceLuna = await chain.confirmedBalanceLuna(chain.custodyAddress())
 
-  const controls = await readControls(pool)
-  const ledgerLuna = await ledgerBalanceLuna(pool, controls)
-  const inFlightLuna = await inFlightOutgoingLuna(pool)
-  const explainableMinimumLuna = ledgerLuna - inFlightLuna
+  const client = await pool.connect()
+  let ledgerLuna: bigint
+  let inFlightLuna: bigint
+  let stale: StaleInFlight
+  try {
+    await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY')
+    const controls = await readControls(client)
+    ledgerLuna = await ledgerBalanceLuna(client, controls)
+    inFlightLuna = await inFlightOutgoingLuna(client)
+    stale = await staleInFlightOutgoing(client)
+    await client.query('COMMIT')
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw err
+  } finally {
+    client.release()
+  }
 
+  const explainableMinimumLuna = ledgerLuna - inFlightLuna
+  const short = chainBalanceLuna < explainableMinimumLuna - CROSS_CHECK_EPSILON_LUNA
+
+  // One statement stamps the cross-check AND the durable shortfall verdict (N3).
+  // `COALESCE` keeps the FIRST time the condition was seen across repeated
+  // failing passes; a clean pass is the only thing that writes NULL back.
   await pool.query(
     `UPDATE custody_controls
      SET reconciled_confirmed_balance_luna = $1,
          last_reconciled_height = $2,
-         last_reconciled_at = now()
+         last_reconciled_at = now(),
+         shortfall_detected_at = CASE
+           WHEN $3::bool THEN COALESCE(shortfall_detected_at, now())
+           ELSE NULL
+         END
      WHERE singleton`,
-    [chainBalanceLuna.toString(), height.toString()],
+    [chainBalanceLuna.toString(), height.toString(), short],
   )
 
-  if (chainBalanceLuna < explainableMinimumLuna - CROSS_CHECK_EPSILON_LUNA) {
+  const notify = alerts ?? consoleAlerts()
+
+  if (short) {
     const detail = {
       stage: 'reconcile',
       reason: 'chain_below_ledger',
@@ -397,12 +550,35 @@ export async function reconcile(pool: Pool, chain: ChainClient, alerts?: Alerts)
       height,
     }
     await pause(pool, `chain balance ${chainBalanceLuna} below ledger balance ${ledgerLuna}`)
-    await (alerts ?? consoleAlerts()).notify('insolvent', detail)
+    await notify.notify('insolvent', detail)
+  }
+
+  // N1: attempts excluded from the offset above. Money the books have committed
+  // to sending that the chain will never take — silent until now, because the
+  // old unbounded offset made each one look like an ordinary payment in flight.
+  if (stale.count > 0) {
+    await notify.notify('manual_review', {
+      stage: 'reconcile',
+      reason: 'stale_in_flight_attempt',
+      staleAttempts: stale.count,
+      neverBroadcast: stale.neverBroadcastCount,
+      lunaTotal: stale.lunaTotal.toString(),
+      height,
+    })
   }
 }
 
 /** The database is bound to a different chain than this process is talking to. */
 export class NetworkMismatchError extends Error {}
+
+/**
+ * An unbound database that already holds money history: the operator must say
+ * which chain it belongs to before anything is stamped (round-2 review F6).
+ */
+export class NetworkBindingUnconfirmedError extends Error {}
+
+/** Env var an operator sets to confirm the network of a pre-existing database. */
+export const CONFIRM_NETWORK_ENV = 'NIMDROPS_CONFIRM_NETWORK'
 
 /**
  * Bind this database to a chain, or refuse to run (G1 review finding 6).
@@ -417,6 +593,17 @@ export class NetworkMismatchError extends Error {}
  * Deliberately not idempotent in the loose sense: the stamp is written once and
  * never updated. Moving a custody database between networks is not an operation
  * this system supports.
+ *
+ * **Round-2 F6.** "Stamp whatever the first process says" is only safe on a
+ * database with no money in it. Migration 004 added the column NULL to
+ * databases that already had a payment history, so the very deployment the
+ * guard was written for — a live mainnet database, an operator with a stale
+ * testnet shell — would have had its binding invented by the wrong process and
+ * the guard would then have agreed with itself forever. So an unbound database
+ * that ALREADY HAS attempt rows fails closed: the operator must state the
+ * network in `NIMDROPS_CONFIRM_NETWORK`, and it must match what this process is
+ * actually talking to. A genuinely fresh database (no attempts) still stamps on
+ * first boot, because there is no history for a wrong guess to endanger.
  */
 export async function ensureNetworkBinding(pool: Pool, chain: ChainClient): Promise<NetworkName> {
   const running = chain.network()
@@ -427,6 +614,23 @@ export async function ensureNetworkBinding(pool: Pool, chain: ChainClient): Prom
   if (!row) throw new SolvencyError('custody_controls singleton row is missing')
 
   if (row.network === null) {
+    const { rows: counted } = await pool.query<{ n: number }>(
+      'SELECT count(*)::int AS n FROM transaction_attempts',
+    )
+    const attempts = counted[0].n
+    if (attempts > 0) {
+      const confirmed = process.env[CONFIRM_NETWORK_ENV]
+      if (confirmed !== running) {
+        throw new NetworkBindingUnconfirmedError(
+          `this custody database has ${attempts} transaction attempt(s) but no recorded network, ` +
+            `and this process is running against ${running}. Refusing to stamp it: if that guess ` +
+            'is wrong, every payment in here can be proven "absent" on the wrong chain and paid ' +
+            `again. Confirm the network the money actually lives on with ${CONFIRM_NETWORK_ENV}=` +
+            `<TestAlbatross|MainAlbatross> (got ${confirmed ?? 'unset'}); it must match this ` +
+            'process. Verify one of the stored tx hashes on a block explorer first.',
+        )
+      }
+    }
     // Conditional UPDATE: two processes booting at once must not disagree, and
     // the loser of the race re-reads rather than overwrites.
     const { rows: stamped } = await pool.query<{ network: NetworkName }>(
@@ -471,6 +675,11 @@ export async function pause(pool: Pool, reason: string): Promise<void> {
  * balance to go stale must still fail closed on staleness until the worker's
  * next `reconcile()`, which is the correct order (know the balance, then move
  * money). Idempotent: unpausing a running system is a no-op.
+ *
+ * In particular it does NOT clear `shortfall_detected_at` (N3). A pause the
+ * system engaged on itself because the chain held less than the books claim is
+ * not an operator's to overrule; only a reconciliation that finds the two in
+ * agreement again reopens the money paths.
  */
 export async function unpause(pool: Pool): Promise<void> {
   await pool.query('UPDATE custody_controls SET paused = false WHERE singleton')

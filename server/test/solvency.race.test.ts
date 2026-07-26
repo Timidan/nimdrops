@@ -3,18 +3,23 @@ import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { FakeChain } from '../src/chain/fake'
 import { migrate } from '../src/db/migrate'
+import type { Alerts } from '../src/services/alerts'
 import {
   CapExceededError,
   InsolventError,
   PausedError,
   StaleReconciliationError,
+  UnreconciledShortfallError,
   assertSolvent,
+  inFlightOutgoingLuna,
   ledgerBalanceLuna,
   ledgerMovementsLuna,
   lockControls,
   outstandingPrincipalLuna,
   pause,
+  readControls,
   reconcile,
+  unpause,
 } from '../src/services/solvency'
 // Side-effect import: installs the int8-as-string type parser so BIGINT luna
 // never passes through a lossy JS number. This test builds its own pool, so it
@@ -120,20 +125,26 @@ async function insertAttempt(
     transferId: string
     state: 'signed' | 'broadcast' | 'confirmed' | 'proven_dead'
     feeLuna?: bigint
+    /** How long ago the attempt was created; the in-flight offset is age-bounded (N1). */
+    createdAgoSeconds?: number
   },
-): Promise<void> {
-  await db.query(
+): Promise<string> {
+  const { rows } = await db.query<{ id: string }>(
     `INSERT INTO transaction_attempts (
-       transfer_id, sequence, state, raw_signed_tx, tx_hash, fee_luna, validity_start_height
-     ) VALUES ($1, 1, $2, $3, $4, $5, 1)`,
+       transfer_id, sequence, state, raw_signed_tx, tx_hash, fee_luna, validity_start_height,
+       created_at
+     ) VALUES ($1, 1, $2, $3, $4, $5, 1, now() - make_interval(secs => $6::float8))
+     RETURNING id`,
     [
       o.transferId,
       o.state,
       Buffer.from('00ff', 'hex'),
       randomUUID(),
       (o.feeLuna ?? 0n).toString(),
+      o.createdAgoSeconds ?? 0,
     ],
   )
+  return rows[0].id
 }
 
 async function setControls(o: {
@@ -214,7 +225,7 @@ describe.skipIf(!hasDb)('solvency and custody controls (real Postgres)', () => {
   beforeEach(async () => {
     await pool.query(
       `TRUNCATE transaction_attempts, outgoing_transfers, wallet_challenges, claims, drops,
-       http_idempotency RESTART IDENTITY CASCADE`,
+       operator_float_deposits, http_idempotency RESTART IDENTITY CASCADE`,
     )
     await setControls({})
   })
@@ -637,6 +648,338 @@ describe.skipIf(!hasDb)('solvency and custody controls (real Postgres)', () => {
       expect(controls.reconciledConfirmedBalanceLuna).toBe(750n)
       expect(controls.lastReconciledHeight).toBe(42)
       await client.query('ROLLBACK')
+    } finally {
+      client.release()
+    }
+  })
+
+  // ---- N1: a stale attempt is not an alibi for a missing balance -----------------
+
+  /**
+   * Recording alerts so a test can assert not only that custody paused but that
+   * an operator was told why.
+   */
+  function spyAlerts(): { alerts: Alerts; seen: { alert: string; detail: Record<string, unknown> }[] } {
+    const seen: { alert: string; detail: Record<string, unknown> }[] = []
+    return {
+      seen,
+      alerts: {
+        async notify(alert, detail) {
+          seen.push({ alert, detail })
+        },
+      },
+    }
+  }
+
+  it('an ancient signed-but-never-broadcast attempt no longer hides a chain shortfall', async () => {
+    // Books: 5000 luna of operator float and nothing else (the drop is a draft,
+    // so it contributes no funding movement and no outstanding principal).
+    await setControls({ operatorFloatLuna: 5_000n })
+    const drop = await insertDrop(pool, { claimCount: 5, amountEachLuna: 100n, activated: false })
+    const claim = await insertClaim(pool, drop.id, 0)
+    const transfer = await insertTransfer(pool, {
+      purpose: 'payout',
+      dropId: drop.id,
+      claimId: claim.id,
+      amountLuna: 4_395n,
+      state: 'in_progress',
+    })
+    // Signed three hours ago and never acknowledged by the network: the bytes
+    // never left this process, and their validity window is long past.
+    await insertAttempt(pool, {
+      transferId: transfer.id,
+      state: 'signed',
+      feeLuna: 5n,
+      createdAgoSeconds: 3 * 3600,
+    })
+
+    // The chain holds 600. Under the old unbounded offset this attempt's 4400
+    // "explained" the gap exactly (5000 − 4400 = 600) and the shortfall was
+    // invisible for as long as the attempt stayed open — forever, in practice.
+    const chain = new FakeChain({ custody: CUSTODY, finalityDepth: 5 })
+    chain.deposit({
+      hash: 'short-with-stale-attempt',
+      sender: 'NQ07 OPERATOR',
+      recipient: CUSTODY,
+      valueLuna: 600n,
+      includedHeight: 1,
+    })
+    chain.setHead(20)
+
+    const spy = spyAlerts()
+    await reconcile(pool, chain, spy.alerts)
+
+    const { rows } = await pool.query<{ paused: boolean; shortfall_at: Date | null }>(
+      'SELECT paused, shortfall_detected_at AS shortfall_at FROM custody_controls',
+    )
+    expect(rows[0].paused, 'the shortfall is real and must fail every money path closed').toBe(true)
+    expect(rows[0].shortfall_at).not.toBeNull()
+
+    const insolvent = spy.seen.filter((a) => a.alert === 'insolvent')
+    expect(insolvent).toHaveLength(1)
+    expect(insolvent[0].detail).toMatchObject({
+      reason: 'chain_below_ledger',
+      chainBalanceLuna: '600',
+      ledgerBalanceLuna: '5000',
+      inFlightOutgoingLuna: '0',
+      shortfallLuna: '4400',
+    })
+
+    // And the excluded attempt is itself reported: money the books have
+    // committed to sending that the chain will never take.
+    const flagged = spy.seen.filter((a) => a.detail.reason === 'stale_in_flight_attempt')
+    expect(flagged).toHaveLength(1)
+    expect(flagged[0].alert).toBe('manual_review')
+    expect(flagged[0].detail).toMatchObject({
+      staleAttempts: 1,
+      neverBroadcast: 1,
+      lunaTotal: '4400',
+    })
+  })
+
+  it('still counts a freshly broadcast attempt as the explanation it is', async () => {
+    await setControls({ operatorFloatLuna: 5_000n })
+    const drop = await insertDrop(pool, { claimCount: 5, amountEachLuna: 100n, activated: false })
+    const claim = await insertClaim(pool, drop.id, 0)
+    const transfer = await insertTransfer(pool, {
+      purpose: 'payout',
+      dropId: drop.id,
+      claimId: claim.id,
+      amountLuna: 4_395n,
+      state: 'in_progress',
+    })
+    await insertAttempt(pool, { transferId: transfer.id, state: 'broadcast', feeLuna: 5n })
+
+    const chain = new FakeChain({ custody: CUSTODY, finalityDepth: 5 })
+    chain.deposit({
+      hash: 'in-flight-explains-it',
+      sender: 'NQ07 OPERATOR',
+      recipient: CUSTODY,
+      valueLuna: 600n,
+      includedHeight: 1,
+    })
+    chain.setHead(20)
+
+    const spy = spyAlerts()
+    await reconcile(pool, chain, spy.alerts)
+
+    const { rows } = await pool.query<{ paused: boolean }>('SELECT paused FROM custody_controls')
+    expect(rows[0].paused, 'a payment the chain has genuinely taken is not a shortfall').toBe(false)
+    expect(spy.seen).toHaveLength(0)
+  })
+
+  // ---- N3: a shortfall outlives `unpause` -----------------------------------------
+
+  /** Take the controls and run the invariant, exactly as every money path does. */
+  async function moneyPathWouldPass(): Promise<void> {
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      const controls = await lockControls(client)
+      await assertSolvent(client, controls, 0n)
+      await client.query('COMMIT')
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {})
+      throw err
+    } finally {
+      client.release()
+    }
+  }
+
+  it('unpause alone cannot resume signing after a shortfall — only a clean reconcile can', async () => {
+    await setControls({ operatorFloatLuna: 5_000n, feeReserveLuna: 0n })
+    const chain = new FakeChain({ custody: CUSTODY, finalityDepth: 5 })
+    chain.deposit({
+      hash: 'not-enough',
+      sender: 'NQ07 OPERATOR',
+      recipient: CUSTODY,
+      valueLuna: 600n,
+      includedHeight: 1,
+    })
+    chain.setHead(20)
+
+    await reconcile(pool, chain)
+    expect((await readControls(pool)).paused).toBe(true)
+    expect((await readControls(pool)).shortfallDetectedAt).not.toBeNull()
+
+    // The operator clears the switch. The reconciliation behind the pause was
+    // FAILED but it is also FRESH, so staleness will not save us here — this is
+    // exactly the window in which signing used to resume.
+    await unpause(pool)
+    expect((await readControls(pool)).paused).toBe(false)
+    await expect(moneyPathWouldPass()).rejects.toBeInstanceOf(UnreconciledShortfallError)
+    // …and it is still an insolvency to every existing handler.
+    await expect(moneyPathWouldPass()).rejects.toBeInstanceOf(InsolventError)
+
+    // Reconciling while the hole is still there keeps it closed AND re-pauses.
+    await reconcile(pool, chain)
+    expect((await readControls(pool)).paused).toBe(true)
+    await unpause(pool)
+    await expect(moneyPathWouldPass()).rejects.toBeInstanceOf(UnreconciledShortfallError)
+
+    // The operator tops custody up for real. Now — and only now — a clean
+    // reconcile clears the flag and the money paths reopen.
+    chain.deposit({
+      hash: 'topped-up',
+      sender: 'NQ07 OPERATOR',
+      recipient: CUSTODY,
+      valueLuna: 4_400n,
+      includedHeight: 2,
+    })
+    await reconcile(pool, chain)
+
+    expect((await readControls(pool)).shortfallDetectedAt).toBeNull()
+    await expect(moneyPathWouldPass()).resolves.toBeUndefined()
+  })
+
+  it('keeps the first sighting time across repeated failing reconciles', async () => {
+    await setControls({ operatorFloatLuna: 5_000n })
+    const chain = new FakeChain({ custody: CUSTODY, finalityDepth: 5 })
+    chain.setHead(20)
+
+    await reconcile(pool, chain)
+    const first = (await readControls(pool)).shortfallDetectedAt
+    expect(first).not.toBeNull()
+
+    await reconcile(pool, chain)
+    expect((await readControls(pool)).shortfallDetectedAt?.getTime()).toBe(first?.getTime())
+  })
+
+  // ---- N4: one snapshot, one instant ------------------------------------------------
+
+  /**
+   * A `Pool` that runs `after(sql)` once, immediately after the first query on a
+   * pooled client whose text matches `marker`.
+   *
+   * Used to commit a confirmation from a SECOND connection in the middle of
+   * `reconcile()`'s reads. The patch is removed when the client goes back to the
+   * pool, so no other caller ever sees it.
+   */
+  function poolInterleaving(marker: string, after: () => Promise<void>): pg.Pool {
+    let fired = false
+    const wrapper = {
+      connect: async () => {
+        const client = await pool.connect()
+        const query = client.query.bind(client)
+        const release = client.release.bind(client)
+        const patched = {
+          query: async (...args: unknown[]) => {
+            const result = await (query as (...a: unknown[]) => Promise<unknown>)(...args)
+            const sql = typeof args[0] === 'string' ? args[0] : ''
+            if (!fired && sql.includes(marker)) {
+              fired = true
+              await after()
+            }
+            return result
+          },
+          release: (...args: unknown[]) => {
+            Object.assign(client, { query, release })
+            return (release as (...a: unknown[]) => unknown)(...args)
+          },
+        }
+        Object.assign(client, patched)
+        return client
+      },
+      query: (...args: unknown[]) => (pool.query as (...a: unknown[]) => unknown)(...args),
+    }
+    return wrapper as unknown as pg.Pool
+  }
+
+  /**
+   * Float 5000, one activated 500-luna drop, one 400-luna payout with a 5-luna
+   * fee that the chain has already taken. Whatever instant you look at, the
+   * smallest balance the books can explain is 5000 + 500 − 400 − 5 = 5095, and
+   * the chain holds exactly that. Nothing here is a shortfall.
+   */
+  async function aboutToConfirm(): Promise<{ chain: FakeChain; transferId: string; attemptId: string }> {
+    await setControls({ operatorFloatLuna: 5_000n })
+    const drop = await insertDrop(pool, { claimCount: 5, amountEachLuna: 100n })
+    const claim = await insertClaim(pool, drop.id, 0)
+    const transfer = await insertTransfer(pool, {
+      purpose: 'payout',
+      dropId: drop.id,
+      claimId: claim.id,
+      amountLuna: 400n,
+      state: 'in_progress',
+    })
+    const attemptId = await insertAttempt(pool, {
+      transferId: transfer.id,
+      state: 'broadcast',
+      feeLuna: 5n,
+    })
+
+    const chain = new FakeChain({ custody: CUSTODY, finalityDepth: 5 })
+    chain.deposit({
+      hash: 'custody-holdings',
+      sender: 'NQ07 OPERATOR',
+      recipient: CUSTODY,
+      valueLuna: 5_095n,
+      includedHeight: 1,
+    })
+    chain.setHead(20)
+    return { chain, transferId: transfer.id, attemptId }
+  }
+
+  /** The worker's confirmation, committed atomically from another connection. */
+  async function confirmPayment(transferId: string, attemptId: string): Promise<void> {
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      await client.query(
+        `UPDATE transaction_attempts SET state = 'confirmed', confirmed_height = 10 WHERE id = $1`,
+        [attemptId],
+      )
+      await client.query(`UPDATE outgoing_transfers SET state = 'confirmed' WHERE id = $1`, [
+        transferId,
+      ])
+      await client.query('COMMIT')
+    } finally {
+      client.release()
+    }
+  }
+
+  it('a confirmation landing between the reads is a seam, not a shortfall', async () => {
+    const { chain, transferId, attemptId } = await aboutToConfirm()
+
+    // The confirmation commits after the ledger read and before the in-flight
+    // read. In autocommit that pair says: 5500 of ledger (the payout not yet
+    // deducted) and 0 in flight (the attempt no longer open) — an explainable
+    // minimum of 5500 against a chain holding 5095, i.e. a 405-luna hole that
+    // never existed at any single instant.
+    const interleaved = poolInterleaving('movements_luna', () =>
+      confirmPayment(transferId, attemptId),
+    )
+    await reconcile(interleaved, chain)
+
+    const controls = await readControls(pool)
+    expect(controls.paused, 'an interleaved confirmation must not invent a shortfall').toBe(false)
+    expect(controls.shortfallDetectedAt).toBeNull()
+  })
+
+  it('the interleaving the snapshot defends against is real', async () => {
+    // The control for the test above: taken as three autocommit reads, the same
+    // interleaving genuinely does produce a pair no instant could produce.
+    const { transferId, attemptId } = await aboutToConfirm()
+
+    const controls = await readControls(pool)
+    const ledgerBefore = await ledgerBalanceLuna(pool, controls)
+    await confirmPayment(transferId, attemptId)
+    const inFlightAfter = await inFlightOutgoingLuna(pool)
+
+    expect(ledgerBefore).toBe(5_500n)
+    expect(inFlightAfter).toBe(0n)
+    // 5500 − 0 = 5500 > 5095: the false shortfall, reproduced.
+    expect(ledgerBefore - inFlightAfter).toBeGreaterThan(5_095n)
+
+    // Read as one snapshot instead, the same two numbers agree.
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY')
+      const snapControls = await readControls(client)
+      const ledger = await ledgerBalanceLuna(client, snapControls)
+      const inFlight = await inFlightOutgoingLuna(client)
+      await client.query('COMMIT')
+      expect(ledger - inFlight).toBe(5_095n)
     } finally {
       client.release()
     }

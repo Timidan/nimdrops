@@ -98,12 +98,23 @@ export interface ReserveClaimInput {
   /** Canonical hash of the request the key was used for. */
   requestHash: string
   /**
-   * Called once the wallet signature has VERIFIED, before any reservation work
-   * (G1 review finding 8). The HTTP layer charges its per-drop rate-limit bucket
-   * here, so an unauthenticated flood — malformed bodies, unknown challenges,
-   * forged signatures — cannot spend a drop's claim budget and lock out its
-   * real claimants. Throwing from this hook aborts the reservation before
-   * anything is written.
+   * Called once this request is known to be a GENUINELY NEW slot reservation:
+   * the wallet signature has verified, no idempotency record or existing claim
+   * answers it, and its challenge has not already been spent. The HTTP layer
+   * charges its per-drop rate-limit bucket here. Throwing from this hook aborts
+   * the reservation before anything is written.
+   *
+   * G1 review finding 8 moved this behind signature verification, so an
+   * unauthenticated flood — malformed bodies, unknown challenges, forged
+   * signatures — could not spend a drop's claim budget. Round-2 F8 moved it
+   * behind the retry checks as well: a signature proves who is asking, not that
+   * they are asking for anything NEW, so a claimant retrying their own request
+   * (the exact thing the idempotency contract invites them to do) was still
+   * charged. Two wallets retrying five times each exhausted a ten-claim drop
+   * and locked out its real claimants — the same denial of service, now
+   * costing the attacker two valid signatures. Retries, already-claimed
+   * wallets and replayed challenges are all free; only a request that will
+   * attempt to take a slot pays.
    */
   onAuthenticated?: () => void | Promise<void>
 }
@@ -218,12 +229,13 @@ interface ChallengeRow {
   id: string
   drop_id: string
   canonical_message: string
+  consumed_at: Date | null
 }
 
 async function loadChallenge(db: Queryable, challengeId: string): Promise<ChallengeRow | null> {
   if (!UUID_RE.test(challengeId)) return null
   const { rows } = await db.query<ChallengeRow>(
-    'SELECT id, drop_id, canonical_message FROM wallet_challenges WHERE id = $1',
+    'SELECT id, drop_id, canonical_message, consumed_at FROM wallet_challenges WHERE id = $1',
     [challengeId],
   )
   return rows[0] ?? null
@@ -345,12 +357,6 @@ export async function reserveClaim(pool: Pool, o: ReserveClaimInput): Promise<Cl
     throw new ClaimRejectedError('invalid_signature', 'public key is not usable')
   }
 
-  // The request is now proven to come from the wallet that will be paid. Only
-  // authenticated requests may consume the per-drop claim budget (finding 8);
-  // everything above this line is charged to the per-IP and per-wallet limiters
-  // instead, which are the ones an attacker cannot aim at someone else's drop.
-  if (o.onAuthenticated) await o.onAuthenticated()
-
   const scope = claimIdemScope(o.publicId)
   const keyHash = idemKeyHash(scope, o.idemKey)
   const lookup = { scope, keyHash, requestHash: o.requestHash, dropId: drop.id, recipient }
@@ -359,6 +365,20 @@ export async function reserveClaim(pool: Pool, o: ReserveClaimInput): Promise<Cl
 
   const alreadyClaimed = await findExistingClaim(pool, lookup)
   if (alreadyClaimed) return alreadyClaimed
+
+  // A challenge that has already been spent cannot become a reservation, so a
+  // replay of one is not a new claim attempt either. The atomic consume inside
+  // the transaction remains the authority — this read only decides whether the
+  // request is worth charging for (round-2 F8), and answering it here is also
+  // the difference between a replay costing a drop's budget and costing nothing.
+  if (challenge.consumed_at !== null) {
+    throw new ClaimRejectedError('challenge_consumed', 'challenge already used')
+  }
+
+  // Everything above answers "does this wallet already have what it is asking
+  // for". Only past this line does the request actually try to TAKE a slot, so
+  // only past this line may it spend the drop's claim budget (findings 8, F8).
+  if (o.onAuthenticated) await o.onAuthenticated()
 
   // ---- allocation: one transaction, locks in the mandated order ---------------
 

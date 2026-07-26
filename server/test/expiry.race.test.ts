@@ -289,7 +289,7 @@ describe.skipIf(!hasDb)('expiry, exact refunds, settlement and draft GC (real Po
     setEnv()
     await pool.query(
       `TRUNCATE transaction_attempts, outgoing_transfers, wallet_challenges, claims, drops,
-       http_idempotency RESTART IDENTITY CASCADE`,
+       operator_float_deposits, http_idempotency RESTART IDENTITY CASCADE`,
     )
     await pool.query(
       `UPDATE custody_controls

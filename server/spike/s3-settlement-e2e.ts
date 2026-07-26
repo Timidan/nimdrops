@@ -195,6 +195,15 @@ async function createRunSchema(): Promise<pg.Pool> {
   // first activation — correct production behaviour, and the same step a real
   // deployment performs once after provisioning. Sized to cover the seeded fee
   // reserve plus headroom for this run's payout/refund fees.
+  //
+  // NOTE (round-2 F4): a real deployment does this with
+  // `recover.ts float set <luna> --tx <deposit hash>`, which proves the hash is
+  // a finalized custody deposit and records it in `operator_float_deposits`.
+  // This harness writes the number directly because its throwaway wallet is
+  // funded out of band and the run has no deposit hash to attribute. The float
+  // is therefore UNATTRIBUTED here — `float show` would report
+  // `floatAttributed: false` — which is fine for a harness and is not what a
+  // deployment should do.
   const { rows } = await pool.query<{ configured_fee_reserve_luna: string }>(
     `UPDATE custody_controls
         SET operator_float_luna = configured_fee_reserve_luna * 10

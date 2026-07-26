@@ -91,7 +91,7 @@ describe.skipIf(!hasDb)('schema invariants (real Postgres)', () => {
     pool = getPool()
     await migrate(pool)
     await pool.query(
-      `TRUNCATE transaction_attempts, outgoing_transfers, wallet_challenges, claims, drops, http_idempotency RESTART IDENTITY CASCADE`,
+      `TRUNCATE transaction_attempts, outgoing_transfers, wallet_challenges, claims, drops, operator_float_deposits, http_idempotency RESTART IDENTITY CASCADE`,
     )
   })
 
@@ -236,6 +236,175 @@ describe.skipIf(!hasDb)('schema invariants (real Postgres)', () => {
       } finally {
         await scoped.end()
         await dropGuardSchema()
+      }
+    })
+  })
+
+  /**
+   * round-2 review F9. The guard above is correct and, on the databases it was
+   * written for, unreachable: `db/migrate.ts` skips by FILENAME, so a
+   * deployment that had already applied 002 never ran the amended version of it
+   * and never will. `005` ships the check as a migration of its own, where it
+   * does execute — and it looks for the DAMAGE (a `validity_start_height` of 0)
+   * rather than the precondition, so a healthy populated database is not
+   * refused along with the broken ones.
+   */
+  describe('migration 005 catches a backfill that 002 already committed', () => {
+    const GUARD_SCHEMA = 'schema_guard_005_test'
+    const MIGRATIONS = fileURLToPath(new URL('../src/db/migrations/', import.meta.url))
+    const APPLIED = [
+      '001_core.sql',
+      '002_attempt_validity_window.sql',
+      '003_annotations.sql',
+      '004_absence_tracking_and_network.sql',
+    ]
+
+    async function sql(name: string): Promise<string> {
+      return readFile(join(MIGRATIONS, name), 'utf8')
+    }
+
+    async function dropSchema(): Promise<void> {
+      const admin = new pg.Pool({ connectionString: process.env.DATABASE_URL })
+      await admin.query(`DROP SCHEMA IF EXISTS ${GUARD_SCHEMA} CASCADE`)
+      await admin.end()
+    }
+
+    /**
+     * A database in the state a real deployment is in: 001–004 applied and
+     * RECORDED as applied, so the runner will never look at any of them again.
+     */
+    async function alreadyMigratedTo004(): Promise<pg.Pool> {
+      await dropSchema()
+      const admin = new pg.Pool({ connectionString: process.env.DATABASE_URL })
+      await admin.query(`CREATE SCHEMA ${GUARD_SCHEMA}`)
+      await admin.end()
+
+      const scoped = new pg.Pool({
+        connectionString: process.env.DATABASE_URL,
+        options: `-c search_path=${GUARD_SCHEMA},public`,
+      })
+      for (const name of APPLIED) await scoped.query(await sql(name))
+      await scoped.query(
+        `CREATE TABLE schema_migrations (
+           name TEXT PRIMARY KEY,
+           applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+         )`,
+      )
+      for (const name of APPLIED) {
+        await scoped.query('INSERT INTO schema_migrations (name) VALUES ($1)', [name])
+      }
+      return scoped
+    }
+
+    /** One attempt row carrying `validityStartHeight`, with its intent and claim. */
+    async function attemptAtHeight(db: Pool, validityStartHeight: number): Promise<void> {
+      const d = await insertDrop(db, ok())
+      const c = await insertClaim(db, d.id, 0, `NQ07 LEGACY ${randomUUID()}`)
+      const { rows } = await db.query<{ id: string }>(
+        `INSERT INTO outgoing_transfers (idempotency_key, purpose, drop_id, claim_id,
+           recipient_address, amount_luna, state)
+         VALUES ($1, 'payout', $2, $3, 'NQ07 RECIPIENT', 100, 'in_progress')
+         RETURNING id`,
+        [`payout:${randomUUID()}`, d.id, c.id],
+      )
+      await db.query(
+        `INSERT INTO transaction_attempts (transfer_id, sequence, state, raw_signed_tx, tx_hash,
+           fee_luna, validity_start_height)
+         VALUES ($1, 1, 'broadcast', $2, $3, 0, $4)`,
+        [rows[0].id, Buffer.from('00ff', 'hex'), randomUUID(), validityStartHeight],
+      )
+    }
+
+    it('refuses to migrate a database whose attempts were backfilled to height 0', async () => {
+      const scoped = await alreadyMigratedTo004()
+      try {
+        // The damage 002 did before it grew a guard: a live payment whose
+        // validity window (0 + 7200) is past at any real head, which
+        // `recover.ts replace` would read as permission to pay again.
+        await attemptAtHeight(scoped, 0)
+
+        await expect(migrate(scoped)).rejects.toThrow(/validity_start_height = 0/i)
+
+        // 002 is recorded as applied and stays that way; 005 is NOT recorded,
+        // so the operator gets the same refusal on every retry until they fix it.
+        const { rows } = await scoped.query<{ name: string }>(
+          'SELECT name FROM schema_migrations ORDER BY name',
+        )
+        expect(rows.map((r) => r.name)).toEqual(APPLIED)
+      } finally {
+        await scoped.end()
+        await dropSchema()
+      }
+    })
+
+    it('migrates a populated database whose attempts carry real heights', async () => {
+      const scoped = await alreadyMigratedTo004()
+      try {
+        await attemptAtHeight(scoped, 6_999_043)
+
+        await expect(migrate(scoped)).resolves.toBeUndefined()
+
+        // The later migrations landed: the float attribution table and the
+        // durable shortfall flag.
+        const { rows } = await scoped.query<{ name: string }>(
+          'SELECT name FROM schema_migrations ORDER BY name',
+        )
+        expect(rows.map((r) => r.name)).toContain('005_attempt_validity_backfill_guard.sql')
+        expect(rows.map((r) => r.name)).toContain('006_float_attestation.sql')
+        expect(rows.map((r) => r.name)).toContain('007_reconcile_shortfall_flag.sql')
+      } finally {
+        await scoped.end()
+        await dropSchema()
+      }
+    })
+
+    it('locks the table before counting, so a concurrent writer cannot slip past it', async () => {
+      const scoped = await alreadyMigratedTo004()
+      const writer = await scoped.connect()
+      try {
+        // An in-flight insert that has NOT committed. A bare `count(*)` in READ
+        // COMMITTED cannot see it, so a guard that only counts would report a
+        // clean table and let the migration through — and the row would land
+        // moments later, backfilled and invisible.
+        await writer.query('BEGIN')
+        const d = await insertDrop(scoped, ok())
+        const c = await insertClaim(scoped, d.id, 0, `NQ07 RACER ${randomUUID()}`)
+        const { rows } = await writer.query<{ id: string }>(
+          `INSERT INTO outgoing_transfers (idempotency_key, purpose, drop_id, claim_id,
+             recipient_address, amount_luna, state)
+           VALUES ($1, 'payout', $2, $3, 'NQ07 RECIPIENT', 100, 'in_progress')
+           RETURNING id`,
+          [`payout:${randomUUID()}`, d.id, c.id],
+        )
+        await writer.query(
+          `INSERT INTO transaction_attempts (transfer_id, sequence, state, raw_signed_tx, tx_hash,
+             fee_luna, validity_start_height)
+           VALUES ($1, 1, 'broadcast', $2, $3, 0, 0)`,
+          [rows[0].id, Buffer.from('00ff', 'hex'), randomUUID()],
+        )
+
+        let settled: 'pending' | 'resolved' | 'rejected' = 'pending'
+        const guard = scoped
+          .query(await sql('005_attempt_validity_backfill_guard.sql'))
+          .then(
+            () => {
+              settled = 'resolved'
+            },
+            () => {
+              settled = 'rejected'
+            },
+          )
+
+        await new Promise((resolve) => setTimeout(resolve, 500))
+        expect(settled, 'the guard must wait for the writer, not read around it').toBe('pending')
+
+        await writer.query('COMMIT')
+        await guard
+        expect(settled, 'and then refuse on the row it was made to wait for').toBe('rejected')
+      } finally {
+        writer.release()
+        await scoped.end()
+        await dropSchema()
       }
     })
   })

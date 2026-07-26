@@ -10,7 +10,12 @@ import { migrate } from '../src/db/migrate'
 import type { AlertKind, Alerts } from '../src/services/alerts'
 import { issueChallenge, reserveClaim } from '../src/services/claims'
 import { createDraft, submitFunding } from '../src/services/drops'
-import { NetworkMismatchError, ensureNetworkBinding } from '../src/services/solvency'
+import {
+  CONFIRM_NETWORK_ENV,
+  NetworkBindingUnconfirmedError,
+  NetworkMismatchError,
+  ensureNetworkBinding,
+} from '../src/services/solvency'
 import {
   CLAIM_MEMO,
   WORKER_LOCK_ID,
@@ -356,7 +361,7 @@ describe.skipIf(!hasDb)('transfer worker crash windows (real Postgres)', () => {
     setEnv()
     await pool.query(
       `TRUNCATE transaction_attempts, outgoing_transfers, wallet_challenges, claims, drops,
-       http_idempotency RESTART IDENTITY CASCADE`,
+       operator_float_deposits, http_idempotency RESTART IDENTITY CASCADE`,
     )
     await pool.query(
       `UPDATE custody_controls
@@ -367,7 +372,7 @@ describe.skipIf(!hasDb)('transfer worker crash windows (real Postgres)', () => {
            reconciled_confirmed_balance_luna = NULL,
            last_reconciled_height = NULL,
            last_reconciled_at = NULL,
-           network = NULL
+           network = 'TestAlbatross'
        WHERE singleton`,
     )
     chain = newChain()
@@ -987,6 +992,11 @@ describe.skipIf(!hasDb)('transfer worker crash windows (real Postgres)', () => {
   }
 
   it('stamps the network at first use and never restamps it', async () => {
+    // A genuinely fresh database: unbound AND with no payment history. That
+    // combination is the only one `ensureNetworkBinding` may stamp on its own
+    // (round-2 F6) — every test above starts already bound, as a booted
+    // process would have left it.
+    await pool.query('UPDATE custody_controls SET network = NULL WHERE singleton')
     expect(await readBoundNetwork(), 'a fresh database is unbound').toBeNull()
 
     expect(await ensureNetworkBinding(pool, chain)).toBe('TestAlbatross')
@@ -1036,6 +1046,144 @@ describe.skipIf(!hasDb)('transfer worker crash windows (real Postgres)', () => {
     expect(await readBoundNetwork()).toBe('TestAlbatross')
     expect(await readAttempts(payout.transferId)).toHaveLength(0)
     expect((await readTransfer(payout.transferId)).state).toBe('queued')
+  })
+
+  // ---- F2: a sighting during recovery must be RECORDED, not discarded ---------
+
+  it("recovery's own sighting clears the series, so a later transient null cannot replace", async () => {
+    const { payout, attempt } = await deadLookingAttempt()
+
+    // Two absences, aged past the five-minute span: the full series.
+    await reconcileOnStartup(pool, chain, alerts)
+    await reconcileOnStartup(pool, chain, alerts)
+    await ageAbsenceSeries(payout.transferId, '10 minutes')
+    expect((await readAttempts(payout.transferId))[0].absent_checks).toBe(2)
+
+    // …and then the transaction turns out to have been in an invisible mempool
+    // all along. `replace` looks, finds it, and refuses.
+    await chain.broadcast(attempt.raw_hex)
+    await expect(replaceTransfer(pool, chain, alerts, payout.transferId)).rejects.toBeInstanceOf(
+      ReplaceRefusedError,
+    )
+
+    // The refusal must have RECORDED what it saw. Round-2 F2: this used to
+    // return without writing, leaving a series the chain had just refuted.
+    const [seen] = await readAttempts(payout.transferId)
+    expect(seen.absent_checks, "recovery's sighting must void the series it just disproved").toBe(0)
+    expect(seen.first_absent_at).toBeNull()
+    expect(seen.state).toBe('signed')
+
+    // A reorg takes it away again and ONE transient not-found answer follows.
+    // With the series correctly reset that is one observation, not three, and
+    // it must not authorize a replacement.
+    expect(chain.removeTx(attempt.tx_hash)).toBe(true)
+    await reconcileOnStartup(pool, chain, alerts)
+    expect((await readAttempts(payout.transferId))[0].absent_checks).toBe(1)
+    await expect(replaceTransfer(pool, chain, alerts, payout.transferId)).rejects.toBeInstanceOf(
+      ReplaceRefusedError,
+    )
+
+    expect(await readAttempts(payout.transferId)).toHaveLength(1)
+    expect(custodyPayments(), 'nothing may have been paid twice').toHaveLength(0)
+  })
+
+  it('a worker sighting racing recovery can never leave a landed payment proven_dead', async () => {
+    const { payout, attempt } = await deadLookingAttempt()
+
+    // A complete, aged absence series: everything `replace` asks for is in place
+    // and an operator is about to act on it.
+    await reconcileOnStartup(pool, chain, alerts)
+    await reconcileOnStartup(pool, chain, alerts)
+    await ageAbsenceSeries(payout.transferId, '10 minutes')
+
+    // The transaction lands at the same moment. The worker tick and the
+    // operator command now run concurrently, in whichever order the scheduler
+    // and the row lock decide.
+    await chain.broadcast(attempt.raw_hex)
+    const [worker, operator] = await Promise.allSettled([
+      reconcileOnStartup(pool, chain, alerts),
+      replaceTransfer(pool, chain, alerts, payout.transferId),
+    ])
+
+    expect(worker.status, 'the worker tick must not fail').toBe('fulfilled')
+    // Whatever the interleaving, the operator command must have refused: the
+    // chain has the transaction, and both racers were looking at the same chain.
+    expect(operator.status).toBe('rejected')
+    if (operator.status === 'rejected') {
+      expect(operator.reason).toBeInstanceOf(ReplaceRefusedError)
+    }
+
+    const attempts = await readAttempts(payout.transferId)
+    expect(attempts, 'no replacement may have been signed').toHaveLength(1)
+    expect(attempts[0].state, 'a landed transaction is never proven_dead').not.toBe('proven_dead')
+    expect(attempts[0].absent_checks).toBe(0)
+    expect(custodyPayments()).toHaveLength(1)
+  })
+
+  // ---- F6: fail closed, not open --------------------------------------------------
+
+  it('refuses to replace an attempt whose stored bytes cannot be decoded at all', async () => {
+    const { payout } = await deadLookingAttempt()
+    await reconcileOnStartup(pool, chain, alerts)
+    await reconcileOnStartup(pool, chain, alerts)
+    await ageAbsenceSeries(payout.transferId, '6 minutes')
+
+    // Bytes the decoder cannot read. Round-2 F6: `rawTxNetwork` returning null
+    // used to mean "carry on", which is fail-OPEN on the one question the check
+    // exists to answer — so a corrupted row was a free pass to sign again.
+    await pool.query(
+      `UPDATE transaction_attempts SET raw_signed_tx = decode('deadbeef', 'hex')
+       WHERE transfer_id = $1`,
+      [payout.transferId],
+    )
+
+    const err = await replaceTransfer(pool, chain, alerts, payout.transferId).then(
+      () => null,
+      (e: unknown) => e,
+    )
+    expect(err).toBeInstanceOf(ReplaceRefusedError)
+    expect((err as Error).message).toMatch(/cannot decode which network/)
+    expect(await readAttempts(payout.transferId)).toHaveLength(1)
+    expect(custodyPayments()).toHaveLength(0)
+  })
+
+  it('refuses to stamp a network onto an unbound database that already holds attempts', async () => {
+    const payout = await queuedPayout()
+    await runWorkerTick(pool, chain, alerts)
+    expect(await readAttempts(payout.transferId)).toHaveLength(1)
+
+    // Migration 004 added `network` as NULL to databases that already had a
+    // payment history, so "the first process to boot stamps whatever it is" is
+    // a guess about real money. It must be confirmed, not assumed.
+    await pool.query('UPDATE custody_controls SET network = NULL WHERE singleton')
+    const saved = process.env[CONFIRM_NETWORK_ENV]
+    try {
+      delete process.env[CONFIRM_NETWORK_ENV]
+      await expect(ensureNetworkBinding(pool, chain)).rejects.toBeInstanceOf(
+        NetworkBindingUnconfirmedError,
+      )
+      expect(await readBoundNetwork(), 'nothing may have been stamped').toBeNull()
+
+      // A confirmation for the WRONG network is not a confirmation.
+      process.env[CONFIRM_NETWORK_ENV] = 'MainAlbatross'
+      await expect(ensureNetworkBinding(pool, chain)).rejects.toBeInstanceOf(
+        NetworkBindingUnconfirmedError,
+      )
+      expect(await readBoundNetwork()).toBeNull()
+
+      // Every chain-touching recovery command inherits the refusal.
+      await expect(
+        replaceTransfer(pool, chain, alerts, payout.transferId),
+      ).rejects.toBeInstanceOf(NetworkBindingUnconfirmedError)
+
+      // An operator who has checked a stored hash on an explorer says so.
+      process.env[CONFIRM_NETWORK_ENV] = 'TestAlbatross'
+      expect(await ensureNetworkBinding(pool, chain)).toBe('TestAlbatross')
+      expect(await readBoundNetwork()).toBe('TestAlbatross')
+    } finally {
+      if (saved === undefined) delete process.env[CONFIRM_NETWORK_ENV]
+      else process.env[CONFIRM_NETWORK_ENV] = saved
+    }
   })
 
   it('refuses to replace an attempt whose stored bytes were signed for another network', async () => {

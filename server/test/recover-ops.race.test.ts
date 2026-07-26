@@ -1,4 +1,6 @@
+import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { fileURLToPath } from 'node:url'
 import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { FakeChain } from '../src/chain/fake'
@@ -6,15 +8,24 @@ import type { ChainClient } from '../src/chain/types'
 import { migrate } from '../src/db/migrate'
 import {
   ChainUnavailableError,
+  DepositAttestationError,
   InvalidLunaError,
   OverAttestationError,
   USAGE,
+  attestedFloatDepositsLuna,
+  flagValue,
   floatShow,
   main,
   setOperatorFloat,
   statusReport,
 } from '../src/recover'
-import { InsolventError, assertSolvent, lockControls, readControls } from '../src/services/solvency'
+import {
+  InsolventError,
+  assertSolvent,
+  ensureNetworkBinding,
+  lockControls,
+  readControls,
+} from '../src/services/solvency'
 // Side-effect import: installs the int8-as-string parser so BIGINT luna never
 // passes through a lossy JS number. This suite builds its own pool, so it still
 // depends on that global parser being registered.
@@ -62,15 +73,24 @@ function chainWith(base: FakeChain, over: Partial<ChainClient>): ChainClient {
   return { ...delegate, ...over }
 }
 
-/** Put `luna` into custody on the fake chain (an operator top-up). */
-function topUpCustody(luna: bigint): void {
+/**
+ * Put `luna` into custody on the fake chain (an operator top-up) and move the
+ * head well past it, so the deposit is FINAL — which is what `float set` now
+ * requires of the hash it attests against (round-2 F4).
+ *
+ * Returns the hash so a test can pass it as `--tx`.
+ */
+function topUpCustody(luna: bigint, o: { final?: boolean } = {}): string {
+  const hash = `topup-${randomUUID()}`
   chain.deposit({
-    hash: `topup-${randomUUID()}`,
+    hash,
     sender: 'NQ07 OPERATOR',
     recipient: CUSTODY,
     valueLuna: luna,
     includedHeight: 1,
   })
+  if (o.final !== false) chain.setHead(1_000)
+  return hash
 }
 
 // ---- fixtures ------------------------------------------------------------------
@@ -271,6 +291,12 @@ describe('recover CLI help', () => {
     for (const name of SUBCOMMANDS) expect(out).toContain(name)
   })
 
+  it('reads --tx as a flag, in either spelling', () => {
+    expect(flagValue(['float', 'set', '100', '--tx', 'abc'], '--tx')).toBe('abc')
+    expect(flagValue(['float', 'set', '100', '--tx=abc'], '--tx')).toBe('abc')
+    expect(flagValue(['float', 'set', '100'], '--tx')).toBeUndefined()
+  })
+
   it('prints usage to stderr and exits 2 when given no command', async () => {
     const printed: string[] = []
     const original = console.error
@@ -282,11 +308,70 @@ describe('recover CLI help', () => {
       expect(await main(['float'])).toBe(2)
       expect(await main(['float', 'nonsense'])).toBe(2)
       expect(await main(['float', 'set'])).toBe(2)
+      // The amount is positional: `float set --tx <hash>` with no amount must
+      // not read "--tx" as a number of luna.
+      expect(await main(['float', 'set', '--tx', 'abc'])).toBe(2)
     } finally {
       console.error = original
     }
     expect(printed.join('\n')).toContain('float set <luna>')
   })
+})
+
+/**
+ * The CLI must always END.
+ *
+ * Observed on the VPS: `pnpm tsx src/recover.ts status` printed a correct,
+ * complete report and then hung until `timeout` killed it (exit 124).
+ * `@nimiq/core` spawns a consensus worker whose threads and timers keep the
+ * event loop alive, and `chain.close()` disconnects the network without tearing
+ * those handles down — so setting `process.exitCode` and waiting for the loop
+ * to drain waits forever. The fix exits explicitly, after flushing stdout.
+ *
+ * This test spawns the real CLI over a real database on the path that needs no
+ * chain client. That covers the second half of the fix — a `process.exit` that
+ * truncates a piped report would be a worse bug than the hang — and any future
+ * handle leak on the database side. The WASM half is verified by hand against
+ * TestAlbatross, because reaching consensus needs a network CI may not have.
+ */
+describe.skipIf(!hasDb)('recover CLI process lifetime', () => {
+  const CLI_TIMEOUT_MS = 90_000
+
+  function runCli(args: string[]): Promise<{ code: number | null; stdout: string }> {
+    return new Promise((resolve, reject) => {
+      const child = spawn('npx', ['tsx', 'src/recover.ts', ...args], {
+        cwd: fileURLToPath(new URL('..', import.meta.url)),
+        env: { ...process.env, NIMIQ_NETWORK: 'TestAlbatross' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      let stdout = ''
+      child.stdout.on('data', (chunk: Buffer) => {
+        stdout += chunk.toString('utf8')
+      })
+      const timer = setTimeout(() => {
+        child.kill('SIGKILL')
+        reject(new Error('the CLI did not exit on its own'))
+      }, CLI_TIMEOUT_MS - 5_000)
+      child.on('error', reject)
+      child.on('close', (code) => {
+        clearTimeout(timer)
+        resolve({ code, stdout })
+      })
+    })
+  }
+
+  it(
+    'exits on its own, with the whole report flushed to a pipe',
+    async () => {
+      const { code, stdout } = await runCli(['status'])
+      expect(code, 'the process must terminate by itself').toBe(0)
+      // Not merely "some output": the LAST byte must have made it out, which is
+      // what `process.exit` discards if the flush is skipped.
+      const report = JSON.parse(stdout.slice(stdout.indexOf('{'))) as { command: string }
+      expect(report.command).toBe('status')
+    },
+    CLI_TIMEOUT_MS,
+  )
 })
 
 // ---- database-backed suite ------------------------------------------------------
@@ -315,7 +400,7 @@ describe.skipIf(!hasDb)('operator float and status (real Postgres)', () => {
   beforeEach(async () => {
     await pool.query(
       `TRUNCATE transaction_attempts, outgoing_transfers, wallet_challenges, claims, drops,
-       http_idempotency RESTART IDENTITY CASCADE`,
+       operator_float_deposits, http_idempotency RESTART IDENTITY CASCADE`,
     )
     await pool.query('UPDATE custody_controls SET network = NULL WHERE singleton')
     await setControls({})
@@ -325,74 +410,286 @@ describe.skipIf(!hasDb)('operator float and status (real Postgres)', () => {
   // ---- float set --------------------------------------------------------------
 
   it('refuses a float that would attest more than the chain actually holds', async () => {
-    topUpCustody(200_000n)
+    const tx = topUpCustody(200_000n)
     await insertDrop(pool, { claimCount: 5, amountEachLuna: 100n }) // +500 ledger movements
 
-    await expect(setOperatorFloat(pool, chain, '300000')).rejects.toBeInstanceOf(
+    await expect(setOperatorFloat(pool, chain, '300000', tx)).rejects.toBeInstanceOf(
       OverAttestationError,
     )
 
-    // The refusal must not have written anything.
+    // The refusal must not have written anything — not the float, and not the
+    // deposit row that would have made a second attempt look already-counted.
     expect((await readControls(pool)).operatorFloatLuna).toBe(0n)
+    expect(await attestedFloatDepositsLuna(pool)).toBe(0n)
   })
 
   it('names the numbers it refused on', async () => {
-    topUpCustody(200_000n)
-    await expect(setOperatorFloat(pool, chain, '200001')).rejects.toThrow(/200001/)
-    await expect(setOperatorFloat(pool, chain, '200001')).rejects.toThrow(/200000/)
+    const tx = topUpCustody(200_000n)
+    // The deposit is real, and custody has since paid 150_000 of it out to
+    // somewhere the ledger knows nothing about. A verified deposit hash is not
+    // proof the money is still there — the in-lock balance is.
+    chain.deposit({
+      hash: `spend-${randomUUID()}`,
+      sender: CUSTODY,
+      recipient: 'NQ07 ELSEWHERE',
+      valueLuna: 150_000n,
+      includedHeight: 2,
+    })
+
+    await expect(setOperatorFloat(pool, chain, '200000', tx)).rejects.toThrow(/200000/)
+    await expect(setOperatorFloat(pool, chain, '200000', tx)).rejects.toThrow(/50000/)
+    // Refused twice: the first refusal rolled its deposit row back, so the
+    // second is the same refusal and not "already attested".
+    expect(await attestedFloatDepositsLuna(pool)).toBe(0n)
   })
 
   it('accepts a float the chain balance covers, and unblocks a stuck activation', async () => {
-    topUpCustody(200_000n)
+    const tx = topUpCustody(100_000n)
     // One activated drop: 500 luna of principal and 500 luna of ledger movement.
     await insertDrop(pool, { claimCount: 5, amountEachLuna: 100n })
+    // …whose funding is sitting in custody on chain too. That is why the ledger
+    // may legitimately exceed the float: the float is only the operator's share.
+    chain.deposit({
+      hash: `funding-${randomUUID()}`,
+      sender: 'NQ07 SPONSOR',
+      recipient: CUSTODY,
+      valueLuna: 500n,
+      includedHeight: 1,
+    })
 
     // Ledger = float(0) + 500 < outstanding(500) + fee reserve(100_000): the
     // deployment note in EXECUTION-LOG.md — a fresh database fails closed until
     // the operator attests their fee float.
     await expect(activationWouldPass(500n)).rejects.toBeInstanceOf(InsolventError)
 
-    const result = await setOperatorFloat(pool, chain, '100000')
+    const result = await setOperatorFloat(pool, chain, '100000', tx)
 
     expect(result.operatorFloatLuna).toEqual({ before: '0', after: '100000' })
     expect(result.ledgerBalanceLuna).toEqual({ before: '500', after: '100500' })
     // headroom = ledger - outstanding - fee reserve
     expect(result.solvencyHeadroomLuna).toEqual({ before: '-100000', after: '0' })
-    expect(result.chainConfirmedBalanceLuna).toBe('200000')
-    expect(result.ledgerMinusChainLuna.after).toBe('-99500')
+    expect(result.chainConfirmedBalanceLuna).toBe('100500')
+    expect(result.ledgerMinusChainLuna.after).toBe('0')
+    // Every luna of the float points at a transaction (round-2 F4).
+    expect(result.deposit).toEqual({ txHash: tx, valueLuna: '100000', includedHeight: 1 })
+    expect(result.attestedFloatDepositsLuna).toBe('100000')
 
     expect((await readControls(pool)).operatorFloatLuna).toBe(100_000n)
     await expect(activationWouldPass(500n)).resolves.toBeUndefined()
   })
 
   it('rejects a float that is not a positive integer number of luna', async () => {
-    topUpCustody(1_000_000n)
+    const tx = topUpCustody(1_000_000n)
     for (const bad of ['0', '-1', '1.5', '1e5', 'abc', '', ' ', '1_000', '+7']) {
-      await expect(setOperatorFloat(pool, chain, bad)).rejects.toBeInstanceOf(InvalidLunaError)
+      await expect(setOperatorFloat(pool, chain, bad, tx)).rejects.toBeInstanceOf(InvalidLunaError)
     }
     expect((await readControls(pool)).operatorFloatLuna).toBe(0n)
   })
 
   it('refuses to guess when the chain cannot be reached', async () => {
+    const tx = topUpCustody(1_000n)
     const down = chainWith(chain, {
       confirmedBalanceLuna: async () => {
         throw new Error('no peers')
       },
     })
-    await expect(setOperatorFloat(pool, down, '100')).rejects.toBeInstanceOf(
+    await expect(setOperatorFloat(pool, down, '100', tx)).rejects.toBeInstanceOf(
       ChainUnavailableError,
     )
     expect((await readControls(pool)).operatorFloatLuna).toBe(0n)
   })
 
   it('refuses every float command when the database is bound to another network', async () => {
+    const tx = topUpCustody(1_000n)
     await pool.query(`UPDATE custody_controls SET network = 'MainAlbatross' WHERE singleton`)
-    await expect(setOperatorFloat(pool, chain, '100')).rejects.toThrow(/MainAlbatross/)
+    await expect(setOperatorFloat(pool, chain, '100', tx)).rejects.toThrow(/MainAlbatross/)
 
     // The read-only report still renders — it just labels the chain section.
     const shown = await floatShow(pool, chain)
     expect(shown.chain.available).toBe(false)
     if (!shown.chain.available) expect(shown.chain.reason).toMatch(/MainAlbatross/)
+  })
+
+  // ---- F4: the float is attributed to a named, finalized deposit ----------------
+
+  /** The `code` of a `DepositAttestationError`, or the error itself if it is not one. */
+  async function attestationCode(promise: Promise<unknown>): Promise<unknown> {
+    return promise.then(
+      () => 'resolved',
+      (err: unknown) => (err instanceof DepositAttestationError ? err.code : err),
+    )
+  }
+
+  it('refuses to write a float that is not attributed to a deposit at all', async () => {
+    topUpCustody(200_000n)
+    expect(await attestationCode(setOperatorFloat(pool, chain, '100000'))).toBe('missing_tx')
+    expect(await attestationCode(setOperatorFloat(pool, chain, '100000', '   '))).toBe('missing_tx')
+    expect((await readControls(pool)).operatorFloatLuna).toBe(0n)
+  })
+
+  it('refuses every deposit hash that does not put final money into custody', async () => {
+    topUpCustody(500_000n) // head 1000, so height 1 is comfortably final
+
+    // Not on chain at all.
+    expect(await attestationCode(setOperatorFloat(pool, chain, '1', 'no-such-hash'))).toBe(
+      'not_found',
+    )
+
+    // Included but not yet behind the finality depth: a reorg can still take it.
+    chain.deposit({
+      hash: 'too-recent',
+      sender: 'NQ07 OPERATOR',
+      recipient: CUSTODY,
+      valueLuna: 1_000n,
+      includedHeight: 998,
+    })
+    expect(await attestationCode(setOperatorFloat(pool, chain, '1000', 'too-recent'))).toBe(
+      'not_final',
+    )
+
+    // Included and failed: it moved nothing.
+    chain.deposit({
+      hash: 'failed-tx',
+      sender: 'NQ07 OPERATOR',
+      recipient: CUSTODY,
+      valueLuna: 1_000n,
+      includedHeight: 1,
+      executionOk: false,
+    })
+    expect(await attestationCode(setOperatorFloat(pool, chain, '1000', 'failed-tx'))).toBe(
+      'execution_failed',
+    )
+
+    // Paid to someone else entirely.
+    chain.deposit({
+      hash: 'not-ours',
+      sender: 'NQ07 OPERATOR',
+      recipient: 'NQ07 SOMEONE ELSE',
+      valueLuna: 1_000n,
+      includedHeight: 1,
+    })
+    expect(await attestationCode(setOperatorFloat(pool, chain, '1000', 'not-ours'))).toBe(
+      'wrong_recipient',
+    )
+
+    // Custody paying itself moves no new money in.
+    chain.deposit({
+      hash: 'self-pay',
+      sender: CUSTODY,
+      recipient: CUSTODY,
+      valueLuna: 1_000n,
+      includedHeight: 1,
+    })
+    expect(await attestationCode(setOperatorFloat(pool, chain, '1000', 'self-pay'))).toBe(
+      'self_transfer',
+    )
+
+    expect((await readControls(pool)).operatorFloatLuna).toBe(0n)
+    expect(await attestedFloatDepositsLuna(pool)).toBe(0n)
+  })
+
+  it("refuses to count a drop's funding transaction as operator float", async () => {
+    const drop = await insertDrop(pool, { claimCount: 5, amountEachLuna: 100n })
+    const fundingHash = 'sponsor-funding'
+    await pool.query('UPDATE drops SET funding_tx_hash = $2 WHERE id = $1', [drop.id, fundingHash])
+    chain.deposit({
+      hash: fundingHash,
+      sender: 'NQ07 SPONSOR',
+      recipient: CUSTODY,
+      valueLuna: 500n,
+      includedHeight: 1,
+    })
+    chain.setHead(1_000)
+
+    // That money is owed to claimants and the ledger already counts it. Counting
+    // it again as float would credit the same 500 luna twice.
+    expect(await attestationCode(setOperatorFloat(pool, chain, '500', fundingHash))).toBe(
+      'drop_funding',
+    )
+    expect((await readControls(pool)).operatorFloatLuna).toBe(0n)
+  })
+
+  it('refuses to count the same deposit twice, and requires the float to be their sum', async () => {
+    const first = topUpCustody(100_000n)
+    const accepted = await setOperatorFloat(pool, chain, '100000', first)
+    expect(accepted.attestedFloatDepositsLuna).toBe('100000')
+
+    // The same hash again: the money is already in the books, so counting it
+    // would credit the same luna twice even though the total looks affordable.
+    expect(await attestationCode(setOperatorFloat(pool, chain, '100000', first))).toBe(
+      'already_attested',
+    )
+    expect((await readControls(pool)).operatorFloatLuna).toBe(100_000n)
+
+    // A genuinely new deposit, but attested with the wrong running total: the
+    // float must equal the SUM of the deposits behind it, not the last one.
+    const second = topUpCustody(50_000n)
+    expect(await attestationCode(setOperatorFloat(pool, chain, '50000', second))).toBe(
+      'float_mismatch',
+    )
+    expect((await readControls(pool)).operatorFloatLuna).toBe(100_000n)
+    expect(await attestedFloatDepositsLuna(pool), 'the rejected row rolled back').toBe(100_000n)
+
+    // The running total is accepted, and the float is attributable to both.
+    const total = await setOperatorFloat(pool, chain, '150000', second)
+    expect(total.attestedFloatDepositsLuna).toBe('150000')
+    expect((await readControls(pool)).operatorFloatLuna).toBe(150_000n)
+
+    const shown = await floatShow(pool, chain)
+    expect(shown.solvency.attestedFloatDepositsLuna).toBe('150000')
+    expect(shown.solvency.floatAttributed).toBe(true)
+  })
+
+  it('reports a float that nothing on chain has been pointed at', async () => {
+    topUpCustody(200_000n)
+    // A hand-written float — or one migration 006 zeroed out from under an
+    // operator who has not re-attested yet. The report must say so out loud.
+    await setControls({ operatorFloatLuna: 100_000n })
+
+    const shown = await floatShow(pool, chain)
+    expect(shown.solvency.operatorFloatLuna).toBe('100000')
+    expect(shown.solvency.attestedFloatDepositsLuna).toBe('0')
+    expect(shown.solvency.floatAttributed).toBe(false)
+  })
+
+  // ---- N2: the bound is applied to a balance read under the lock -----------------
+
+  it('a payout confirming mid-command cannot enable an over-attestation', async () => {
+    const tx = topUpCustody(200_000n)
+    // Before the command runs, a float of 200_000 is entirely honest.
+    expect(await chain.confirmedBalanceLuna(CUSTODY)).toBe(200_000n)
+
+    // `float set` reads the head twice: once as a pre-lock probe (so a dead node
+    // is discovered without stalling every payout behind the singleton row) and
+    // once as the first thing it does while HOLDING that row. Landing the payout
+    // on the second call places it in exactly the window N2 is about: the
+    // command was waiting for the lock, and the money left while it waited.
+    let headCalls = 0
+    const racing = chainWith(chain, {
+      headHeight: async () => {
+        headCalls += 1
+        if (headCalls === 2) {
+          chain.deposit({
+            hash: `payout-${randomUUID()}`,
+            sender: CUSTODY,
+            recipient: 'NQ07 CLAIMANT',
+            valueLuna: 150_000n,
+            includedHeight: 2,
+          })
+        }
+        return chain.headHeight()
+      },
+    })
+
+    // Round-2 N2: with the balance read before the lock, this passed and wrote
+    // a float of 200_000 against a wallet holding 50_000.
+    await expect(setOperatorFloat(pool, racing, '200000', tx)).rejects.toBeInstanceOf(
+      OverAttestationError,
+    )
+    expect(headCalls, 'the balance must be re-read under the lock').toBeGreaterThanOrEqual(2)
+    expect((await readControls(pool)).operatorFloatLuna).toBe(0n)
+    expect(await attestedFloatDepositsLuna(pool)).toBe(0n)
+    expect(await chain.confirmedBalanceLuna(CUSTODY)).toBe(50_000n)
   })
 
   // ---- float show -------------------------------------------------------------
@@ -442,6 +739,10 @@ describe.skipIf(!hasDb)('operator float and status (real Postgres)', () => {
   it('counts every state and lists manual_review transfers with their ages', async () => {
     topUpCustody(500_000n)
     await setControls({ operatorFloatLuna: 100_000n, paused: true })
+    // Bind before the attempt history exists, exactly as booting `index.ts` or
+    // `worker.ts` does. An UNBOUND database that already holds attempts is the
+    // fail-closed case round-2 F6 added, and it has its own test below.
+    await ensureNetworkBinding(pool, chain)
 
     const live = await insertDrop(pool, { claimCount: 5, amountEachLuna: 100n })
     await insertDrop(pool, { claimCount: 5, amountEachLuna: 100n })
@@ -505,6 +806,7 @@ describe.skipIf(!hasDb)('operator float and status (real Postgres)', () => {
 
     expect(report.paused).toBe(true)
     expect(report.network).toBe('TestAlbatross')
+    expect(report.solvency.shortfallDetectedAt).toBeNull()
     expect(report.solvency.operatorFloatLuna).toBe('100000')
     // open drops 500 + 500 + 100, less the one finalized 100-luna payout
     expect(report.solvency.outstandingPrincipalLuna).toBe('1000')

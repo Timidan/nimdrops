@@ -534,12 +534,16 @@ export function makeApp(deps: AppDeps): Hono {
       signatureHex,
       idemKey,
       requestHash: requestHash(scope, { challengeId, publicKey: publicKeyHex, signature: signatureHex }),
-      // G1 review finding 8: the per-drop bucket is charged only AFTER the
-      // wallet signature verifies, and before any reservation work. Charging it
-      // up front made a targeted lockout cost nothing — ten junk requests a
-      // minute at one drop id and its real claimants got 429s while the
-      // attacker never signed anything. The per-IP limiter (which junk requests
-      // DO pay) is what bounds the work such a flood can cause.
+      // G1 review finding 8 + round-2 F8: the per-drop bucket is charged only
+      // when the request is a genuinely NEW slot reservation — signature
+      // verified, no idempotency record or existing claim to answer it with,
+      // challenge unspent. Charging it up front made a targeted lockout cost
+      // nothing (ten junk requests a minute at one drop id and its real
+      // claimants got 429s while the attacker never signed anything); charging
+      // it on every authenticated request still let two wallets retrying five
+      // times each close a ten-claim drop. Junk and retries are charged to the
+      // per-IP limiter instead, which is the one an attacker cannot aim at
+      // someone else's drop.
       onAuthenticated: () => enforce(dropClaimBucket, publicId),
     })
 
