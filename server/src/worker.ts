@@ -7,7 +7,7 @@ import { exitAfterFlush, exitAfterTeardown } from './exit'
 import { logError, logInfo, logWarn } from './http/redact'
 import { type Alerts, createAlerts, throttled } from './services/alerts'
 import { gcDrafts, settleTerminal, sweepExpiry } from './services/expiry'
-import { ensureNetworkBinding, reconcile } from './services/solvency'
+import { ensureChainBinding, reconcile } from './services/solvency'
 import {
   acquireWorkerLock,
   reconcileOnStartup,
@@ -64,12 +64,16 @@ export async function runWorker(chain: ChainClient, alerts: Alerts): Promise<voi
   process.once('SIGTERM', () => stop('SIGTERM'))
 
   try {
-    // Before anything touches money: bind this database to this chain, or
-    // refuse to run at all (G1 review finding 6). A worker pointed at the wrong
-    // network would sign payouts with the wrong network id and reconcile
-    // against a chain that has never seen this custody wallet.
-    const network = await ensureNetworkBinding(pool, chain)
-    log('network_binding_verified', { network })
+    // Before anything touches money: bind this database to this chain AND to
+    // this custody wallet, or refuse to run at all (G1 review finding 6, round-4
+    // S1). A worker pointed at the wrong network would sign payouts with the
+    // wrong network id and reconcile against a chain that has never seen this
+    // custody wallet. A worker whose KEY derives a different address than the
+    // one the API is publishing as funding instructions is the same failure
+    // seen from the other side: sponsors pay a wallet this process cannot
+    // spend. The database is the single authority both are checked against.
+    const { network, custodyAddress } = await ensureChainBinding(pool, chain)
+    log('chain_binding_verified', { network, custodyAddress })
 
     // Order matters, and round-3 R4 REVERSED it. Attempts first:
     //

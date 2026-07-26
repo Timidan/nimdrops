@@ -56,6 +56,29 @@ export class InsolventError extends SolvencyError {}
  */
 export class UnreconciledShortfallError extends InsolventError {}
 
+/**
+ * An attempt was handed to the network — or may have been — and nobody has been
+ * able to say whether the chain took the money (round-4 review S3).
+ *
+ * `broadcast_attempted_at` is committed BEFORE `chain.broadcast` is called, so a
+ * process killed in between leaves a row that claims a broadcast was attempted
+ * for bytes that never left. Until the hash is looked up, custody's true balance
+ * is unknown by up to that attempt's principal plus its fee — so this is not
+ * "money in flight" and it is certainly not an explanation for a chain balance
+ * below the books. It is an OPEN QUESTION, and no new signature may be taken
+ * against a balance nobody can pin down.
+ *
+ * Cleared by an answer, never by time: either the chain shows the hash (the
+ * attempt becomes `broadcast` — see {@link resolveIndeterminateBroadcasts},
+ * which every `reconcile()` runs) or an operator proves it dead and replaces it
+ * (`recover.ts replace`, which makes it `proven_dead`).
+ *
+ * A subclass of {@link InsolventError} for the same reason
+ * {@link UnreconciledShortfallError} is: every existing handler already treats
+ * that as "we will not sign for this", which is exactly right here.
+ */
+export class IndeterminateBroadcastError extends InsolventError {}
+
 /** The requested addition would push live principal past `max_live_principal_luna`. */
 export class CapExceededError extends SolvencyError {}
 
@@ -306,8 +329,8 @@ export interface InFlightOptions {
  *
  * Two halves, and both are about PROVABILITY rather than about elapsed time:
  *
- *  - the bytes were handed to the network (`broadcast`, or `signed` with a
- *    recorded broadcast attempt — see below), and
+ *  - the network acknowledged the bytes (`broadcast`) — see the round-4 note
+ *    below for why an unresolved `signed` row no longer qualifies; and
  *  - the chain can still include them: `head <= validity_start_height +
  *    window`. This is the chain's own deadline, read from the height the
  *    attempt was signed against, which is why it is compared against a HEAD
@@ -315,11 +338,46 @@ export interface InFlightOptions {
  *    to age a still-includable transaction out of the offset, and the payment
  *    it then failed to explain false-paused custody.
  *
+ * **Round-4 S3 — `broadcast_attempted_at` is not evidence of anything having
+ * been broadcast.** R4 added `(signed AND broadcast_attempted_at IS NOT NULL)`
+ * to this predicate so that an ambiguous broadcast could explain the money the
+ * chain had taken. But the marker is written BEFORE the network call and
+ * committed on its own, so the state it actually names is "a broadcast was
+ * about to be attempted". A process killed in that window — or a call that
+ * never reached the socket — leaves a row that subtracts its full amount from
+ * the explainable minimum for the rest of its validity window, on behalf of
+ * bytes that never left. An unrelated custody deficit of exactly that size then
+ * reconciles CLEAN.
+ *
+ * So the marker no longer buys an offset. It marks an INDETERMINATE attempt
+ * (below), which `reconcile()` resolves by asking the chain for the hash before
+ * the cross-check is computed: an attempt the chain can show is promoted to
+ * `broadcast` and lands back in this predicate on its own merits. That
+ * resolution is exact rather than approximate, because `confirmedBalanceLuna`
+ * and `getTransaction` share one visibility horizon — the chain debits an
+ * account when the transaction is INCLUDED, which is precisely when a lookup
+ * can find it. An attempt sitting unseen in a mempool has not moved the balance
+ * either, so it needs no offset.
+ *
  * `$1` is the head, `$2` the window in blocks.
  */
 const STILL_IN_FLIGHT = `
-  (a.state = 'broadcast' OR (a.state = 'signed' AND a.broadcast_attempted_at IS NOT NULL))
+  a.state = 'broadcast'
   AND a.validity_start_height + $2::bigint >= $1::bigint
+`
+
+/**
+ * SQL predicate for "a broadcast was attempted for this attempt and nobody
+ * knows whether the chain took it" (round-4 S3). Alias `a`, no parameters.
+ *
+ * Deliberately independent of the validity window. An attempt past its deadline
+ * that the chain has never shown us is *probably* dead, but "probably" is not
+ * an answer, and the answer is cheap: look the hash up. Until something does,
+ * this attempt is a question mark over custody's balance and
+ * {@link assertSolvent} refuses to sign against it.
+ */
+const INDETERMINATE_BROADCAST = `
+  a.state = 'signed' AND a.broadcast_attempted_at IS NOT NULL
 `
 
 /**
@@ -405,7 +463,8 @@ export async function staleInFlightOutgoing(
      FROM transaction_attempts a
      JOIN outgoing_transfers t ON t.id = a.transfer_id
      WHERE a.state IN ('signed', 'broadcast')
-       AND NOT (${STILL_IN_FLIGHT})`,
+       AND NOT (${STILL_IN_FLIGHT})
+       AND NOT (${INDETERMINATE_BROADCAST})`,
     [head.toString(), (opts?.windowBlocks ?? validityWindowBlocks()).toString()],
   )
   return {
@@ -413,6 +472,114 @@ export async function staleInFlightOutgoing(
     lunaTotal: BigInt(rows[0].luna_total),
     neverBroadcastCount: rows[0].never_broadcast,
   }
+}
+
+export interface IndeterminateBroadcasts {
+  /** Attempts whose broadcast outcome is unknown. */
+  count: number
+  /** Their principal plus fees: the width of the uncertainty about custody's balance. */
+  lunaTotal: bigint
+}
+
+/**
+ * Attempts a broadcast was attempted for whose outcome nobody knows (S3).
+ *
+ * Reported by `reconcile()`, and — more importantly — checked by
+ * {@link assertSolvent}, which refuses to add any new liability while one
+ * exists. They are deliberately NOT in {@link staleInFlightOutgoing}: "the
+ * chain will never take this" and "we have not asked" are different operator
+ * conditions with different fixes.
+ */
+export async function indeterminateBroadcasts(db: Queryable): Promise<IndeterminateBroadcasts> {
+  const { rows } = await db.query<{ n: number; luna_total: string }>(
+    `SELECT count(*)::int AS n,
+            COALESCE(SUM(t.amount_luna + a.fee_luna), 0)::BIGINT AS luna_total
+     FROM transaction_attempts a
+     JOIN outgoing_transfers t ON t.id = a.transfer_id
+     WHERE ${INDETERMINATE_BROADCAST}`,
+  )
+  return { count: rows[0].n, lunaTotal: BigInt(rows[0].luna_total) }
+}
+
+/**
+ * Ask the chain about every indeterminate attempt and settle the ones it can
+ * answer for (S3). Called by `reconcile()` before the cross-check is computed,
+ * so the cross-check never has to guess.
+ *
+ * An attempt the chain can show is promoted `signed` → `broadcast`: that is a
+ * statement of observed fact, not a money movement, and it is the state the
+ * rest of the system already knows how to reason about. Nothing else is
+ * decided here — finality, confirmation and the claim's own state belong to
+ * `transfers.progressAttempt`, which will see the row on its next pass. The
+ * absence series is cleared for the same reason it is cleared there: a sighting
+ * refutes it, and stale absence evidence is what lets `recover.ts replace`
+ * build a second payment (round-3 R1).
+ *
+ * The lookup is made INSIDE the attempt's row lock, exactly as `progressLocked`
+ * does, so a sighting cannot be discarded while `replace` reads a series this
+ * pass was about to clear.
+ *
+ * LOCK ORDER: this takes only the attempt row, and takes it in its own
+ * transaction that ends before `writeReconciliation` reaches for
+ * `custody_controls`. The mandated order `custody_controls → drop →
+ * attempt/transfer` is therefore never inverted — nothing here holds an attempt
+ * lock while asking for anything above it.
+ *
+ * Failures are not fatal: an unreachable node leaves the attempt indeterminate,
+ * which is the fail-closed state it was already in.
+ */
+export async function resolveIndeterminateBroadcasts(
+  pool: Pool,
+  chain: ChainClient,
+): Promise<{ scanned: number; promoted: number }> {
+  const { rows } = await pool.query<{ id: string; tx_hash: string }>(
+    `SELECT a.id, a.tx_hash
+     FROM transaction_attempts a
+     WHERE ${INDETERMINATE_BROADCAST}
+     ORDER BY a.created_at`,
+  )
+  let promoted = 0
+  for (const row of rows) {
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      const locked = await client.query<{ state: string }>(
+        'SELECT state FROM transaction_attempts WHERE id = $1 FOR UPDATE',
+        [row.id],
+      )
+      // Resolved by another pass while we waited for the lock.
+      if (locked.rows[0]?.state !== 'signed') {
+        await client.query('ROLLBACK')
+        continue
+      }
+      const tx = await chain.getTransaction(row.tx_hash)
+      if (tx === null) {
+        // "The chain does not have it" is not an answer either — it is
+        // mempool-blind (G0 §5A). No absence is recorded here: the absence
+        // SERIES is `progressAttempt`'s evidence chain for `proven_dead`, and
+        // reconciliation must not accelerate a replacement.
+        await client.query('ROLLBACK')
+        continue
+      }
+      await client.query(
+        `UPDATE transaction_attempts
+         SET state = 'broadcast', last_error = NULL, absent_checks = 0, first_absent_at = NULL
+         WHERE id = $1 AND state = 'signed'`,
+        [row.id],
+      )
+      await client.query('COMMIT')
+      promoted += 1
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {})
+      logWarn('indeterminate_broadcast_unresolved', {
+        attemptId: row.id,
+        error: err instanceof Error ? err.message : String(err),
+      })
+    } finally {
+      client.release()
+    }
+  }
+  return { scanned: rows.length, promoted }
 }
 
 /**
@@ -463,6 +630,21 @@ export async function assertSolvent(
       `custody was observed holding less than the ledger at ` +
         `${controls.shortfallDetectedAt.toISOString()} and no reconciliation has succeeded since. ` +
         'Unpausing does not clear this: a clean reconcile must.',
+    )
+  }
+
+  // S3: a broadcast was attempted for some attempt and nobody knows whether the
+  // chain took the money. Custody's real balance is unknown by up to that
+  // amount, so there is no number here to check anything against. This blocks
+  // every new liability — a signature, an activation, an allocation — until the
+  // hash is resolved, which the next `reconcile()` (or the worker's next pass
+  // over the attempt) does automatically.
+  const indeterminate = await indeterminateBroadcasts(client)
+  if (indeterminate.count > 0) {
+    throw new IndeterminateBroadcastError(
+      `${indeterminate.count} attempt(s) worth ${indeterminate.lunaTotal} luna had a broadcast ` +
+        'attempted whose outcome is still unknown, so custody’s balance cannot be pinned down. ' +
+        'Refusing to add new liability until the chain is asked for those hashes.',
     )
   }
 
@@ -521,9 +703,9 @@ export const CROSS_CHECK_EPSILON_LUNA = 0n
  */
 export interface ReconcileOptions extends InFlightOptions {
   /**
-   * TEST SEAM (R3): awaited once the observation is complete and its generation
-   * has been drawn, immediately BEFORE the write. It is the stall that makes
-   * the interleaving reachable, and nothing in production passes it.
+   * TEST SEAM (R3): awaited once the observation is complete, immediately
+   * BEFORE the write. It is the stall that makes the interleaving reachable,
+   * and nothing in production passes it.
    * @internal
    */
   onObserved?: () => Promise<void>
@@ -536,6 +718,8 @@ export interface ReconcileResult {
   accepted: boolean
   height: number
   observationSeq: bigint
+  /** Indeterminate attempts this pass asked the chain about, and how many it settled. */
+  resolved: { scanned: number; promoted: number }
 }
 
 export async function reconcile(
@@ -544,19 +728,61 @@ export async function reconcile(
   alerts?: Alerts,
   opts?: ReconcileOptions,
 ): Promise<ReconcileResult> {
+  // ROUND-4 S2 — the generation is drawn BEFORE anything is observed.
+  //
+  // R3 drew it after the observation completed, reasoning that this orders
+  // passes by when they finished LOOKING. The reasoning was right and the
+  // placement was still wrong, because "finished looking" is not an instant the
+  // process can name: between the last read and the `nextval` there is a gap,
+  // and a pass that stalls in that gap collects a number issued after a pass
+  // that observed later than it did. The exact interleaving:
+  //
+  //   1. pass A completes a CLEAN observation at height H and stalls before
+  //      `nextval`;
+  //   2. money leaves custody;
+  //   3. pass B observes the shortfall at height H, takes generation 1, stamps
+  //      the verdict and pauses;
+  //   4. pass A wakes, takes generation 2 — newer than B's — and, being clean
+  //      at the same height, clears the verdict B just stamped.
+  //
+  // Drawn first, the number orders passes by when they STARTED, which is a
+  // moment each process actually controls. That is a weaker order (a pass can
+  // start earlier and still observe fresher data), so it is paired below with
+  // two guards that make the weakness harmless: a clean pass may only clear a
+  // standing shortfall from a strictly HIGHER chain head, and a short
+  // observation is stamped whatever its generation. Being wrongly ordered can
+  // therefore only ever refuse to clear a verdict, never invent a clean one.
+  const { rows: seqRows } = await pool.query<{ seq: string }>(
+    "SELECT nextval('reconcile_observation_seq')::BIGINT AS seq",
+  )
+  const observationSeq = BigInt(seqRows[0].seq)
+
   const height = await chain.headHeight()
   const chainBalanceLuna = await chain.confirmedBalanceLuna(chain.custodyAddress())
+
+  // ROUND-4 S3 — resolve indeterminate broadcasts, and do it AFTER the balance
+  // read, never before.
+  //
+  // The order is the whole safety argument. If an attempt is included between
+  // these two steps, the balance (older) does not show the debit and the offset
+  // (newer) does: the explainable minimum comes out too LOW, which can only
+  // make this pass more forgiving. Resolving first inverts that — the offset
+  // would miss a debit the balance already shows, and an ordinary payment
+  // would read as a shortfall and pause custody.
+  const resolved = await resolveIndeterminateBroadcasts(pool, chain)
 
   const client = await pool.connect()
   let ledgerLuna: bigint
   let inFlightLuna: bigint
   let stale: StaleInFlight
+  let unresolved: IndeterminateBroadcasts
   try {
     await client.query('BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY')
     const controls = await readControls(client)
     ledgerLuna = await ledgerBalanceLuna(client, controls)
     inFlightLuna = await inFlightOutgoingLuna(client, height, opts)
     stale = await staleInFlightOutgoing(client, height, opts)
+    unresolved = await indeterminateBroadcasts(client)
     await client.query('COMMIT')
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {})
@@ -565,15 +791,6 @@ export async function reconcile(
     client.release()
   }
 
-  // The observation is COMPLETE here and nowhere earlier: the chain reads and
-  // the ledger snapshot are both behind us. Drawing the generation now orders
-  // passes by when they finished looking rather than by when they started, so
-  // a pass that began first but stalled correctly counts as the newer view
-  // (R3, migration 009).
-  const { rows: seqRows } = await pool.query<{ seq: string }>(
-    "SELECT nextval('reconcile_observation_seq')::BIGINT AS seq",
-  )
-  const observationSeq = BigInt(seqRows[0].seq)
   if (opts?.onObserved) await opts.onObserved()
 
   const explainableMinimumLuna = ledgerLuna - inFlightLuna
@@ -598,15 +815,16 @@ export async function reconcile(
       shortfallLuna: (explainableMinimumLuna - chainBalanceLuna).toString(),
       height,
     }
-    if (accepted) {
-      await pause(pool, `chain balance ${chainBalanceLuna} below ledger balance ${ledgerLuna}`)
-      await notify.notify('insolvent', detail)
-    } else {
-      // Our shortfall was observed from an OLDER view than the one on record,
-      // which already says something newer. Overruling it would be the R3 bug
-      // in reverse — a stale pass deciding the current state of custody — so
-      // the verdict stands and the observation is reported instead of acted on.
-      // The next periodic reconciliation re-decides from a current view.
+    // Unconditional, whatever this observation's generation: the shortfall
+    // stamp itself is written by `writeReconciliation` outside the generation
+    // guard, because a wrongly-ordered SHORT observation must still fail
+    // closed. Only the cross-check NUMBERS are newest-wins.
+    await pause(pool, `chain balance ${chainBalanceLuna} below ledger balance ${ledgerLuna}`)
+    await notify.notify('insolvent', detail)
+    if (!accepted) {
+      // A newer observation already owns the recorded numbers. The verdict
+      // still stands (it is the fail-closed one), but an operator should know
+      // it was formed from a view something else has already superseded.
       await notify.notify('manual_review', {
         ...detail,
         reason: 'superseded_shortfall_observation',
@@ -629,33 +847,65 @@ export async function reconcile(
     })
   }
 
-  return { short, accepted, height, observationSeq }
+  // S3: attempts we asked about and still cannot account for. Every money path
+  // is closed while these exist (`assertSolvent`), so an operator has to see
+  // them.
+  if (unresolved.count > 0) {
+    await notify.notify('manual_review', {
+      stage: 'reconcile',
+      reason: 'indeterminate_broadcast',
+      indeterminateAttempts: unresolved.count,
+      lunaTotal: unresolved.lunaTotal.toString(),
+      scanned: resolved.scanned,
+      promoted: resolved.promoted,
+      height,
+    })
+  }
+
+  return { short, accepted, height, observationSeq, resolved }
 }
 
 /**
  * Stamp the cross-check and the durable shortfall verdict — under the controls
- * lock, and only from an observation that is not out of date (R3).
+ * lock, and only from an observation that is not out of date (R3, S2).
  *
- * Two independent guards, because an observation can be stale in two ways.
+ * Two statements, because the two facts have opposite failure directions.
  *
- *  - **Generation.** The whole write is refused unless this observation's
- *    generation is strictly greater than the one on record, i.e. unless it
- *    finished looking after the observation currently written there. That is
- *    what stops a stalled pass from landing its numbers — and its `ELSE NULL` —
- *    on top of a later pass's.
- *  - **Shortfall height.** A clean pass may always refresh the cross-check
- *    numbers (refusing that would let a node lagging by a block stall
- *    activations on staleness), but it may only CLEAR a standing shortfall if
- *    its own chain view is at least as new as the head that shortfall was seen
- *    at. Money missing at height H is not explained by a healthy reading taken
- *    at height H − 5, whichever process finished first.
+ *  1. **A shortfall is recorded unconditionally.** Whatever this observation's
+ *     generation, if it saw the chain below the books then the chain WAS below
+ *     the books at some point, and that is not a fact a later reading gets to
+ *     un-see. `COALESCE` keeps the first sighting and its height across
+ *     repeated failing passes. Making this conditional on the generation is
+ *     what would turn S2's earlier `nextval` into a new hole: a short pass
+ *     wrongly ordered behind a clean one would silently drop its verdict.
  *
- * `COALESCE` on the shortfall branch keeps the FIRST time the condition was
- * seen across repeated failing passes, and its height with it.
+ *  2. **The cross-check numbers are newest-wins, and only a strictly newer
+ *     observation may CLEAR a standing shortfall.** Two guards on that:
  *
- * Returns whether the write was accepted. `false` is not an error: a newer pass
- * has already stamped the row, so the freshness `lockControls` demands is
- * satisfied and the verdict on record is the better-informed one.
+ *      - *Generation.* Refused unless strictly greater than the one on record,
+ *        so a stalled pass cannot land its numbers on top of a later pass's.
+ *      - *Shortfall height.* A clean pass may always refresh the numbers
+ *        (refusing that would let a node lagging by a block stall activations
+ *        on staleness), but it may only clear a standing shortfall from a
+ *        STRICTLY HIGHER chain head. Round-3 allowed an equal head, which is
+ *        wrong for the reason S2 names: money that left at height H is visible
+ *        at height H, so a "healthy" reading of the same height is a reading
+ *        taken before the debit — the two observations are not comparable and
+ *        the older-looking one must not win. Strictly higher is the only
+ *        comparison that proves the clean pass saw the chain AFTER whatever the
+ *        shortfall pass saw.
+ *
+ * Head and balance are read back-to-back rather than atomically: the client
+ * exposes `getHeadHeight()` and `getAccount()` as separate calls and has no
+ * "balance as of height H" query, so there is no way to capture the pair in one
+ * shot. The head is read FIRST, which makes the recorded height a LOWER bound
+ * on the state the balance actually reflects — the conservative direction for
+ * the strict-height rule, since it can only delay a clear, never permit one
+ * that the chain does not support.
+ *
+ * Returns whether the OBSERVATION was accepted. `false` is not an error: a
+ * newer pass has already stamped the row, so the freshness `lockControls`
+ * demands is satisfied and the numbers on record are the better-informed ones.
  */
 async function writeReconciliation(
   pool: Pool,
@@ -667,6 +917,17 @@ async function writeReconciliation(
     // Serializes two passes that would otherwise both read the recorded
     // generation, both decide they are newer, and both write.
     await client.query('SELECT 1 FROM custody_controls WHERE singleton FOR UPDATE')
+    // (1) fail closed, whatever the generation says about who looked last.
+    if (o.short) {
+      await client.query(
+        `UPDATE custody_controls
+         SET shortfall_detected_at = COALESCE(shortfall_detected_at, now()),
+             shortfall_observed_height = COALESCE(shortfall_observed_height, $1::bigint)
+         WHERE singleton`,
+        [o.height.toString()],
+      )
+    }
+    // (2) the observation itself.
     const { rowCount } = await client.query(
       `UPDATE custody_controls
        SET reconciled_confirmed_balance_luna = $1,
@@ -676,14 +937,14 @@ async function writeReconciliation(
            shortfall_detected_at = CASE
              WHEN $4::bool THEN COALESCE(shortfall_detected_at, now())
              WHEN shortfall_observed_height IS NOT NULL
-                  AND $2::bigint < shortfall_observed_height THEN shortfall_detected_at
-             ELSE NULL
+                  AND $2::bigint > shortfall_observed_height THEN NULL
+             ELSE shortfall_detected_at
            END,
            shortfall_observed_height = CASE
              WHEN $4::bool THEN COALESCE(shortfall_observed_height, $2::bigint)
              WHEN shortfall_observed_height IS NOT NULL
-                  AND $2::bigint < shortfall_observed_height THEN shortfall_observed_height
-             ELSE NULL
+                  AND $2::bigint > shortfall_observed_height THEN NULL
+             ELSE shortfall_observed_height
            END
        WHERE singleton
          AND $3::bigint > reconcile_observed_seq`,
@@ -719,6 +980,33 @@ export class NetworkBindingUnconfirmedError extends Error {}
 export const CONFIRM_NETWORK_ENV = 'NIMDROPS_CONFIRM_NETWORK'
 
 /**
+ * The database is bound to a different custody wallet than this process is
+ * using (round-4 review S1).
+ */
+export class CustodyAddressMismatchError extends Error {}
+
+/**
+ * An unbound database that already holds money history: the operator must say
+ * which wallet it belongs to before anything is stamped. Same shape, and the
+ * same reasoning, as {@link NetworkBindingUnconfirmedError}.
+ */
+export class CustodyAddressBindingUnconfirmedError extends Error {}
+
+/**
+ * Env var an operator sets to confirm a custody address the database does not
+ * already agree with — either because it has never been stamped on a database
+ * that already holds payments, or because the wallet is being deliberately
+ * ROTATED. Must equal the address this process is actually using.
+ */
+export const CONFIRM_CUSTODY_ADDRESS_ENV = 'NIMDROPS_CONFIRM_CUSTODY_ADDRESS'
+
+/** What a booted process has proven about the database it is attached to. */
+export interface ChainBinding {
+  network: NetworkName
+  custodyAddress: string
+}
+
+/**
  * Bind this database to a chain, or refuse to run (G1 review finding 6).
  *
  * Nothing in the schema used to say which network the money in it lives on. An
@@ -744,6 +1032,113 @@ export const CONFIRM_NETWORK_ENV = 'NIMDROPS_CONFIRM_NETWORK'
  * first boot, because there is no history for a wrong guess to endanger.
  */
 export async function ensureNetworkBinding(pool: Pool, chain: ChainClient): Promise<NetworkName> {
+  return (await ensureChainBinding(pool, chain)).network
+}
+
+/**
+ * Bind this database to a chain AND to a custody wallet, or refuse to run.
+ *
+ * The network half is {@link ensureNetworkBinding}'s original job (finding 6).
+ * The address half is round-4 review S1, and it exists because the two processes
+ * that need the custody address get it from different places and nothing
+ * compared them:
+ *
+ *   * `index.ts` takes `CUSTODY_ADDRESS` from the environment — that string is
+ *     what a sponsor is told to pay and what `submitFunding` checks
+ *     `tx.recipient` against;
+ *   * `worker.ts` DERIVES the address from `CUSTODY_PRIVATE_KEY_HEX` — that key
+ *     is what every payout is signed with.
+ *
+ * A `CUSTODY_ADDRESS` that is a valid Nimiq address but not the worker's wallet
+ * therefore passed every check at boot: the API published it, sponsors paid it,
+ * `activate()` credited the deposits as custody capacity, and the worker could
+ * never spend a luna of it. The database is now the single authority both
+ * processes are measured against, so the two cannot disagree without one of
+ * them refusing to start.
+ *
+ * The order is deliberate: the NETWORK is settled first. A process on the wrong
+ * chain would be comparing addresses across chains, and "wrong network" is the
+ * more fundamental thing to be told.
+ *
+ * Escape hatch, for a rotation that is genuinely intended: set
+ * `NIMDROPS_CONFIRM_CUSTODY_ADDRESS` to the address this process is actually
+ * using. It re-stamps the binding and logs it loudly. It is a deliberate
+ * operator action because rotating custody strands every deposit still sitting
+ * in the old wallet — the old key must be kept and the balance swept, and no
+ * environment variable can do that for you.
+ */
+export async function ensureChainBinding(pool: Pool, chain: ChainClient): Promise<ChainBinding> {
+  const network = await bindNetwork(pool, chain)
+  const custodyAddress = await bindCustodyAddress(pool, chain)
+  return { network, custodyAddress }
+}
+
+/**
+ * Whether this database already holds payment history that a wrong binding
+ * could endanger. Same probe the network binding uses (round-2 F6): a
+ * transaction attempt is the mark of money this system has moved or tried to.
+ */
+async function hasPaymentHistory(pool: Pool): Promise<number> {
+  const { rows } = await pool.query<{ n: number }>(
+    'SELECT count(*)::int AS n FROM transaction_attempts',
+  )
+  return rows[0].n
+}
+
+async function bindCustodyAddress(pool: Pool, chain: ChainClient): Promise<string> {
+  const running = chain.custodyAddress()
+  const { rows } = await pool.query<{ custody_address: string | null }>(
+    'SELECT custody_address FROM custody_controls WHERE singleton',
+  )
+  const row = rows[0]
+  if (!row) throw new SolvencyError('custody_controls singleton row is missing')
+  const confirmed = process.env[CONFIRM_CUSTODY_ADDRESS_ENV]?.trim()
+
+  if (row.custody_address === null) {
+    const attempts = await hasPaymentHistory(pool)
+    if (attempts > 0 && confirmed !== running) {
+      throw new CustodyAddressBindingUnconfirmedError(
+        `this custody database has ${attempts} transaction attempt(s) but no recorded custody ` +
+          `address, and this process is using ${running}. Refusing to stamp it: if that is not ` +
+          'the wallet the money is actually in, every deposit here is unspendable and every ' +
+          `payout is drawn on the wrong account. Confirm with ${CONFIRM_CUSTODY_ADDRESS_ENV}=` +
+          `<address> (got ${confirmed ?? 'unset'}); it must match this process. Check one of the ` +
+          'stored funding hashes on a block explorer and read off the recipient first.',
+      )
+    }
+    // Conditional UPDATE: two processes booting at once must not disagree, and
+    // the loser of the race re-reads rather than overwrites.
+    const { rows: stamped } = await pool.query<{ custody_address: string }>(
+      `UPDATE custody_controls SET custody_address = $1
+       WHERE singleton AND custody_address IS NULL
+       RETURNING custody_address`,
+      [running],
+    )
+    if (stamped[0]) {
+      logWarn('custody_address_bound', { custodyAddress: running })
+      return stamped[0].custody_address
+    }
+    return bindCustodyAddress(pool, chain)
+  }
+
+  if (row.custody_address !== running) {
+    if (confirmed === running) {
+      await pool.query('UPDATE custody_controls SET custody_address = $1 WHERE singleton', [running])
+      logWarn('custody_address_rotated', { from: row.custody_address, to: running })
+      return running
+    }
+    throw new CustodyAddressMismatchError(
+      `custody database is bound to ${row.custody_address} but this process is using ${running}. ` +
+        'Refusing to start: the API publishes this address as funding instructions and the ' +
+        'worker signs payouts from it, so two processes that disagree accept money into a ' +
+        'wallet nothing can spend. If this is a deliberate rotation, set ' +
+        `${CONFIRM_CUSTODY_ADDRESS_ENV}=${running} — and sweep the old wallet first.`,
+    )
+  }
+  return row.custody_address
+}
+
+async function bindNetwork(pool: Pool, chain: ChainClient): Promise<NetworkName> {
   const running = chain.network()
   const { rows } = await pool.query<{ network: NetworkName | null }>(
     'SELECT network FROM custody_controls WHERE singleton',
@@ -780,7 +1175,7 @@ export async function ensureNetworkBinding(pool: Pool, chain: ChainClient): Prom
       logWarn('network_bound', { network: running })
       return stamped[0].network
     }
-    return ensureNetworkBinding(pool, chain)
+    return bindNetwork(pool, chain)
   }
 
   if (row.network !== running) {

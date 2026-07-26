@@ -91,7 +91,7 @@ describe.skipIf(!hasDb)('schema invariants (real Postgres)', () => {
     pool = getPool()
     await migrate(pool)
     await pool.query(
-      `TRUNCATE transaction_attempts, outgoing_transfers, wallet_challenges, claims, drops, operator_float_deposits, http_idempotency RESTART IDENTITY CASCADE`,
+      `TRUNCATE transaction_attempts, outgoing_transfers, wallet_challenges, claims, drops, operator_float_deposits, custody_deposit_owners, http_idempotency RESTART IDENTITY CASCADE`,
     )
   })
 

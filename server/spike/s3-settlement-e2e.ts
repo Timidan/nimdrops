@@ -69,9 +69,14 @@
  *      is never skipped: custody is faucet-funded only in pre-flight and its
  *      balance is allowed to settle before the baseline is taken, so a run can
  *      no longer print PASSED while an unattributable credit hides the delta
- *      (round-3 R8).
+ *      (round-3 R8). LEG 4b then ENUMERATES every transaction custody sent over
+ *      the run window and requires each hash to be one this run recorded — the
+ *      net delta alone cancels an extra payment against an equal unsolicited
+ *      credit, and cannot see either (round-4 S6).
  *  12. Print every transaction hash, explorer link, timing and final state, and
- *      write `spike/g1-local-evidence.md` (or `S3_EVIDENCE_PATH`).
+ *      write `spike/g1-local-evidence.md` (or `S3_EVIDENCE_PATH`) — stamped
+ *      with the host, commit, database, applied migrations and the process's
+ *      own exit code, so the file can say where and what it ran (round-4 S7).
  *
  * ISOLATION: everything runs in a throwaway Postgres schema named after the run
  * id, migrated from scratch and dropped at the end (`S3_KEEP_SCHEMA=1` keeps it
@@ -88,6 +93,7 @@
 
 import { spawnSync } from 'node:child_process'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { hostname as osHostname } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Address, KeyPair, PrivateKey, TransactionBuilder } from '@nimiq/core'
@@ -138,6 +144,15 @@ const EXPECTED_FUNDING_LUNA = AMOUNT_EACH_LUNA * BigInt(CLAIM_COUNT)
 const CUSTODY_MIN_LUNA = 300_000n
 /** How far below the ledger the shortfall leg pushes the real custody balance. */
 const SHORTFALL_MARGIN_LUNA = 1_000n
+
+/**
+ * Custody enumeration bounds (round-4 S6). The limit is generously above
+ * anything one run can produce (a run signs single-digit transactions), and the
+ * lookback only widens the QUERY — the audit window itself is narrowed back to
+ * the conservation baseline in code.
+ */
+const ENUMERATION_LIMIT = 500
+const ENUMERATION_LOOKBACK_BLOCKS = 1_000
 
 const FUNDING_TIMEOUT_MS = 15 * 60_000
 const PAYOUT_TIMEOUT_MS = 15 * 60_000
@@ -220,6 +235,103 @@ function writeEvidence(lines: string[]): void {
     log('evidence follows on stdout instead:')
     console.log(lines.join('\n'))
   }
+}
+
+// ---------------------------------------------------------------------------
+// provenance (round-4 review S7)
+// ---------------------------------------------------------------------------
+//
+// The evidence file used to end with a line reading "this is a LOCAL run of the
+// harness unless it was executed on the VPS", which is not a statement about
+// anything — the file could not tell you where it ran, what code it ran, which
+// database it ran against, or whether the process that wrote it went on to
+// succeed. A run report that cannot identify itself is a claim, not evidence.
+//
+// Everything below is measured at runtime by the process making the claim.
+
+/** Substituted with the REAL exit status by the `process.on('exit')` handler. */
+const EXIT_CODE_PLACEHOLDER = '{{EXIT_CODE}}'
+
+/** Composed evidence, held until exit so the file can state its own status. */
+let pendingEvidence: string[] | null = null
+
+function git(...args: string[]): string {
+  const r = spawnSync('git', args, { cwd: HERE, encoding: 'utf8' })
+  if (r.status !== 0) return ''
+  return (r.stdout ?? '').trim()
+}
+
+interface Provenance {
+  hostname: string
+  commit: string
+  dirty: boolean
+  branch: string
+  network: string
+  database: string
+  serverVersion: string
+  runSchema: string
+  migrations: string[]
+}
+
+/** Strip the password: this file is committed and pasted into issues. */
+function redactedDatabaseUrl(): string {
+  try {
+    const url = new URL(DATABASE_URL as string)
+    const user = url.username ? `${url.username}@` : ''
+    return `${url.protocol}//${user}${url.host}${url.pathname}`
+  } catch {
+    return '<unparseable DATABASE_URL>'
+  }
+}
+
+async function collectProvenance(pool: pg.Pool): Promise<Provenance> {
+  const { rows } = await pool.query<{ db: string; usr: string; ver: string }>(
+    'SELECT current_database() AS db, current_user AS usr, version() AS ver',
+  )
+  const { rows: migrations } = await pool.query<{ name: string; applied_at: Date }>(
+    'SELECT name, applied_at FROM schema_migrations ORDER BY name',
+  )
+  return {
+    hostname: osHostname(),
+    commit: git('rev-parse', 'HEAD') || '<not a git checkout>',
+    dirty: git('status', '--porcelain') !== '',
+    branch: git('rev-parse', '--abbrev-ref', 'HEAD') || '<unknown>',
+    network: NETWORK,
+    database: `${rows[0].db} as ${rows[0].usr} at ${redactedDatabaseUrl()}`,
+    serverVersion: rows[0].ver.split(' ').slice(0, 2).join(' '),
+    runSchema: RUN_ID,
+    migrations: migrations.map((m) => `${m.name} @ ${m.applied_at.toISOString()}`),
+  }
+}
+
+/**
+ * The self-describing header. Every line here answers a question somebody
+ * reading this file six months later would otherwise have to ask the author.
+ */
+function provenanceLines(p: Provenance): string[] {
+  return [
+    '## Provenance',
+    '',
+    'Measured by the process that wrote this file, at the moment it wrote it.',
+    '',
+    `- host: \`${p.hostname}\``,
+    `- commit: \`${p.commit}\`${p.dirty ? ' **+ uncommitted changes in the working tree**' : ''} (branch \`${p.branch}\`)`,
+    `- network: \`${p.network}\``,
+    `- database: ${p.database}`,
+    `- server: ${p.serverVersion}`,
+    `- run schema: \`${p.runSchema}\` (throwaway, dropped at the end of the run)`,
+    `- process exit code: \`${EXIT_CODE_PLACEHOLDER}\``,
+    '',
+    p.dirty
+      ? 'NOTE: the working tree was DIRTY. The commit named above is not exactly the code that ran.'
+      : 'The working tree was clean, so the commit named above is exactly the code that ran.',
+    '',
+    '### Migrations applied to the run schema',
+    '',
+    '```',
+    ...p.migrations,
+    '```',
+  ]
 }
 
 // ---------------------------------------------------------------------------
@@ -696,8 +808,16 @@ async function main(): Promise<void> {
     const custodyStartLuna = custodyFaucetTapped
       ? await settledBalanceLuna(chain, custodyAddress, 'custody')
       : fundedLuna
+    // The height the baseline was taken at, so the custody audit can ENUMERATE
+    // everything the wallet has sent since — round-4 S6. One block of slack:
+    // `getTransactionsByAddress` is inclusive of `since`, and reading a block
+    // early can only widen the audit.
+    const custodyBaselineHeight = Math.max(0, (await chain.headHeight()) - 1)
     custodyBaselineTaken = true
-    log(`conservation baseline: custody holds ${formatNim(custodyStartLuna)} NIM`)
+    log(
+      `conservation baseline: custody holds ${formatNim(custodyStartLuna)} NIM at height ` +
+        `${custodyBaselineHeight}`,
+    )
     assert(
       custodyStartLuna >= CUSTODY_MIN_LUNA,
       `custody holds ${formatNim(custodyStartLuna)} NIM, needs ${formatNim(CUSTODY_MIN_LUNA)} ` +
@@ -1305,7 +1425,84 @@ async function main(): Promise<void> {
     noteLeg(
       `LEG 4 custody audit: the wallet moved exactly ${custodyStartLuna - custodyEndLuna} luna ` +
         `(${paidLuna} payouts + ${refundedLuna} refund + ${recordedFeesLuna} recorded fees + ` +
-        `${harnessFeesLuna} harness fees) — no unaccounted payment`,
+        `${harnessFeesLuna} harness fees)`,
+    )
+
+    // ---- LEG 4b: every outgoing payment ENUMERATED (round-4 S6) -------------
+    //
+    // The delta audit above is necessary and not sufficient, and the gap is not
+    // subtle: it compares one number. An extra outgoing payment of X plus an
+    // unsolicited credit of X — a stray faucet drip, a well-wisher, a refund
+    // from anywhere — cancel exactly, and "no unaccounted payment" passes while
+    // both exist. A net figure cannot answer the question the audit is for.
+    //
+    // So the wallet's own outgoing history over the run window is listed and
+    // each hash matched against something this run recorded. The recorded set
+    // is the union of every attempt the ledger holds and the two transactions
+    // the HARNESS itself signed from custody; anything else is, by definition,
+    // a payment the books know nothing about.
+    const { rows: attemptHashes } = await pool.query<{ tx_hash: string }>(
+      'SELECT tx_hash FROM transaction_attempts',
+    )
+    const authorisedHashes = new Set<string>([
+      ...attemptHashes.map((r) => r.tx_hash),
+      seedHash,
+      debitHash,
+    ])
+    let custodyOutgoing: ChainTx[]
+    try {
+      // Queried from well BEFORE the window (the client documents `since` as a
+      // height that could not have been forked from) and narrowed here, so the
+      // audit window is exactly the run and not a block more: this custody
+      // wallet is reused between runs, and an earlier run's payouts are not
+      // this run's business.
+      const page = await chain.transactionsByAddress(
+        custodyAddress,
+        Math.max(0, custodyBaselineHeight - ENUMERATION_LOOKBACK_BLOCKS),
+        ENUMERATION_LIMIT,
+      )
+      // A full page is indistinguishable from a truncated one, and a truncated
+      // history is precisely how an unauthorised payment would slip past.
+      assert(
+        page.length < ENUMERATION_LIMIT,
+        `custody history came back at the ${ENUMERATION_LIMIT}-transaction limit, so it may be ` +
+          'truncated and the enumeration cannot be trusted. Raise ENUMERATION_LIMIT and re-run.',
+      )
+      custodyOutgoing = page.filter(
+        (tx) => tx.sender === custodyAddress && tx.includedHeight >= custodyBaselineHeight,
+      )
+    } catch (err) {
+      // A run that cannot enumerate its own custody wallet does not pass. This
+      // is the same rule R8 applied to the delta audit: an audit you are
+      // allowed to skip is not an audit.
+      return fail(
+        `custody enumeration failed (${(err as Error).message}). LEG 4b cannot prove that every ` +
+          'payment out of custody was one this run authorised, and a settlement gate does not ' +
+          'pass on an audit it could not run.',
+      )
+    }
+    const unaccounted = custodyOutgoing.filter((tx) => !authorisedHashes.has(tx.hash))
+    console.log('custody outgoing :', custodyOutgoing.length, 'transaction(s) since baseline')
+    for (const tx of custodyOutgoing) {
+      console.log(
+        `  ${authorisedHashes.has(tx.hash) ? 'authorised' : 'UNKNOWN   '} ${tx.hash} ` +
+          `-> ${tx.recipient} ${formatNim(tx.valueLuna)} NIM @${tx.includedHeight}`,
+      )
+    }
+    assert(
+      unaccounted.length === 0,
+      `CUSTODY ENUMERATION FAILED: ${unaccounted.length} transaction(s) left custody that this ` +
+        `run never recorded: ${unaccounted.map((tx) => `${tx.hash} -> ${tx.recipient}`).join(', ')}`,
+    )
+    assert(
+      custodyOutgoing.length >= confirmedPayouts.length + confirmedRefunds.length,
+      `the chain shows only ${custodyOutgoing.length} outgoing custody transaction(s) since the ` +
+        `baseline, fewer than the ${confirmedPayouts.length + confirmedRefunds.length} settlement ` +
+        'payments the books claim — the enumeration is not seeing the run’s own history',
+    )
+    noteLeg(
+      `LEG 4b custody enumeration: all ${custodyOutgoing.length} transaction(s) sent from custody ` +
+        `since height ${custodyBaselineHeight} are hashes this run recorded — no unaccounted payment`,
     )
 
     // -- 13. evidence ---------------------------------------------------------
@@ -1337,10 +1534,12 @@ async function main(): Promise<void> {
     for (const line of legNotes) console.log(`  ✓ ${line}`)
     console.log('=== S3 PASSED ===')
 
-    // The settlement result is already proven above; a failure to persist the
-    // write-up must not turn a passing gate run into a non-zero exit.
-    writeEvidence([
-      '# G1 local evidence — s3-settlement-e2e',
+    // Round-4 S7: the write-up is COMPOSED here and written by the exit
+    // handler, so it can state the status of the process that produced it
+    // rather than assuming one.
+    const provenance = await collectProvenance(pool)
+    pendingEvidence = [
+      `# G1 evidence — s3-settlement-e2e on \`${provenance.hostname}\``,
       '',
       `- run id: \`${RUN_ID}\``,
       `- network: ${NETWORK}`,
@@ -1355,6 +1554,8 @@ async function main(): Promise<void> {
       `- final drop state: **${finalDrop.state}** (${finalDrop.closing_reason})`,
       `- claim states: ${claimStates.join(', ')}`,
       `- total runtime: ${el()}`,
+      '',
+      ...provenanceLines(provenance),
       '',
       '## Transactions',
       '',
@@ -1385,11 +1586,8 @@ async function main(): Promise<void> {
       `custody end      : ${custodyEndLuna} luna`,
       `recorded fees    : ${recordedFeesLuna} luna (+ ${harnessFeesLuna} luna of harness fees)`,
       `custody audit    : ASSERTED${custodyFaucetTapped ? ' (custody was faucet-funded in pre-flight, before the baseline)' : ''}`,
+      `custody outgoing : ${custodyOutgoing.length} tx since height ${custodyBaselineHeight}, all authorised`,
       '```',
-      '',
-      'NOTE: this is a LOCAL run of the harness unless it was executed on the VPS.',
-      'The formal G1 record is the same script executed on the judging deployment;',
-      'that output goes to docs/HACKATHON.md §3b.',
       '',
       '## What this run FAKES',
       '',
@@ -1406,7 +1604,7 @@ async function main(): Promise<void> {
       '- the pause switch (`pauseCustody`/`unpauseCustody`, the same functions the CLI calls);',
       '- the chain-below-ledger shortfall (real custody money moved out of band, then repaid).',
       '',
-    ])
+    ]
   } finally {
     await pool.end()
     await dropRunSchema()
@@ -1415,6 +1613,24 @@ async function main(): Promise<void> {
 
   process.exit(0)
 }
+
+/**
+ * The evidence is written HERE, from the exit handler, so that the exit code it
+ * reports is the one this process actually ended with (S7). Written before
+ * anything else could rewrite it, synchronously, which is all an `exit`
+ * listener is allowed to do — and all it needs.
+ *
+ * Composing the file inside `main` and writing it there would have to guess: at
+ * that point the process has not exited, and every previous version of this
+ * file simply asserted success because the code that wrote it only ran on the
+ * happy path.
+ */
+process.on('exit', (code) => {
+  if (pendingEvidence === null) return
+  const lines = pendingEvidence
+  pendingEvidence = null
+  writeEvidence(lines.map((line) => line.replaceAll(EXIT_CODE_PLACEHOLDER, String(code))))
+})
 
 main().catch((err: unknown) => {
   console.error(err)

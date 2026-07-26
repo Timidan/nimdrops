@@ -6,7 +6,7 @@ import { exitAfterFlush, exitAfterTeardown } from './exit'
 import { makeApp } from './http/app'
 import { logError, logInfo, logWarn } from './http/redact'
 import { createAlerts } from './services/alerts'
-import { ensureNetworkBinding } from './services/solvency'
+import { ensureChainBinding } from './services/solvency'
 
 /**
  * API entrypoint (design §11).
@@ -95,8 +95,14 @@ async function main(): Promise<void> {
   // API process talking to a different chain than the database is bound to
   // would verify funding against the wrong network. The first boot of a fresh
   // database stamps the binding; every later boot must match it.
-  const network = await ensureNetworkBinding(pool, chain)
-  log('network_binding_verified', { network })
+  //
+  // Round-4 S1: the same is now true of the custody ADDRESS. This process takes
+  // it from `CUSTODY_ADDRESS` and the worker derives it from the key; only the
+  // database can tell them they disagree, and it does so here, before the
+  // socket opens. A wrong-but-valid address published as funding instructions
+  // takes real deposits into a wallet the worker holds no key for.
+  const { network, custodyAddress } = await ensureChainBinding(pool, chain)
+  log('chain_binding_verified', { network, custodyAddress })
 
   const alerts = createAlerts({ source: 'nimdrops-api' })
   const app = makeApp({ pool, chain, alerts })

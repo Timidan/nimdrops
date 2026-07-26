@@ -1,3 +1,6 @@
+import { readFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import pg from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { FakeChain } from '../src/chain/fake'
@@ -183,7 +186,7 @@ describe.skipIf(!hasDb)('drop drafts and exact funding activation (real Postgres
     process.env.NIMIQ_NETWORK = 'TestAlbatross'
     await pool.query(
       `TRUNCATE transaction_attempts, outgoing_transfers, wallet_challenges, claims, drops,
-       operator_float_deposits, http_idempotency RESTART IDENTITY CASCADE`,
+       operator_float_deposits, custody_deposit_owners, http_idempotency RESTART IDENTITY CASCADE`,
     )
     // Deliberately leave custody_controls unreconciled (last_reconciled_at NULL):
     // activation may only succeed because submitFunding reconciles first.
@@ -396,6 +399,144 @@ describe.skipIf(!hasDb)('drop drafts and exact funding activation (real Postgres
     await expect(
       pool.query('UPDATE drops SET funding_tx_hash = $2 WHERE id = $1', [rows[0].id, hash]),
     ).rejects.toThrow(/attested as operator float/i)
+  })
+
+  // ---- S4: the exclusion is a unique key, not two lookups --------------------
+
+  it('S4: two CONCURRENT writers cannot both claim the same deposit hash', async () => {
+    // Round-3 R2 enforced exclusivity with a trigger on each table doing an
+    // EXISTS lookup against the other, and argued the custody lock serialized
+    // the two write paths. `recordPending` does not take that lock, and — more
+    // fundamentally — an uncommitted row is invisible to an EXISTS check by
+    // definition. So both writers looked, both saw nothing, both committed, and
+    // the same luna was credited to the ledger twice.
+    //
+    // Nothing about that is reproducible with sequential writes, which is why
+    // it survived round 3. Here both transactions are genuinely open at once.
+    const d = await draft()
+    const hash = fund(d.publicId, { memo: null })
+    finalize()
+    const { rows } = await pool.query<{ id: string }>('SELECT id FROM drops WHERE public_id = $1', [
+      d.publicId,
+    ])
+    const dropId = rows[0].id
+
+    const a = await pool.connect()
+    const b = await pool.connect()
+    let results: PromiseSettledResult<unknown>[]
+    try {
+      // Both BEGIN before either writes: neither can see the other's row, which
+      // is exactly the state the old EXISTS checks were evaluated in.
+      await a.query('BEGIN')
+      await b.query('BEGIN')
+      results = await Promise.allSettled([
+        (async () => {
+          await a.query('UPDATE drops SET funding_tx_hash = $2 WHERE id = $1', [dropId, hash])
+          await a.query('COMMIT')
+        })().catch(async (err: unknown) => {
+          await a.query('ROLLBACK').catch(() => {})
+          throw err
+        }),
+        (async () => {
+          await b.query(
+            `INSERT INTO operator_float_deposits (tx_hash, value_luna, included_height, network)
+             VALUES ($1, $2, $3, 'TestAlbatross')`,
+            [hash, PRINCIPAL.toString(), String(FUND_HEIGHT)],
+          )
+          await b.query('COMMIT')
+        })().catch(async (err: unknown) => {
+          await b.query('ROLLBACK').catch(() => {})
+          throw err
+        }),
+      ])
+    } finally {
+      a.release()
+      b.release()
+    }
+
+    const won = results.filter((r) => r.status === 'fulfilled')
+    expect(won, 'exactly one owner, whichever got there first').toHaveLength(1)
+
+    // And the books agree: the hash is credited once, on one side only.
+    const { rows: owners } = await pool.query<{ owner: string }>(
+      'SELECT owner FROM custody_deposit_owners WHERE tx_hash = $1',
+      [hash],
+    )
+    expect(owners).toHaveLength(1)
+    const asFunding = await pool.query('SELECT 1 FROM drops WHERE funding_tx_hash = $1', [hash])
+    const asFloat = await pool.query('SELECT 1 FROM operator_float_deposits WHERE tx_hash = $1', [
+      hash,
+    ])
+    expect(
+      asFunding.rows.length + asFloat.rows.length,
+      'the same deposit may be credited exactly once',
+    ).toBe(1)
+    expect(owners[0].owner).toBe(asFunding.rows.length === 1 ? 'drop' : 'float')
+  })
+
+  it('S4: the registry is written by the ordinary activation path', async () => {
+    const d = await draft()
+    const hash = fund(d.publicId)
+    finalize()
+    expect((await submitFunding(pool, chain, { publicId: d.publicId, txHash: hash })).state).toBe(
+      'live',
+    )
+
+    const { rows } = await pool.query<{ owner: string; drop_id: string }>(
+      'SELECT owner, drop_id FROM custody_deposit_owners WHERE tx_hash = $1',
+      [hash],
+    )
+    expect(rows).toHaveLength(1)
+    expect(rows[0].owner).toBe('drop')
+    // Re-stamping the same hash (recordPending then activate) is not a conflict.
+    const { rows: drop } = await pool.query<{ id: string }>(
+      'SELECT id FROM drops WHERE public_id = $1',
+      [d.publicId],
+    )
+    expect(rows[0].drop_id).toBe(drop[0].id)
+    await expect(
+      pool.query('UPDATE drops SET funding_tx_hash = $2 WHERE id = $1', [drop[0].id, hash]),
+    ).resolves.toBeDefined()
+  })
+
+  it('S4: migration 012 ABORTS rather than migrate an existing double-credit', async () => {
+    // The other half of R2's residue: 008 added its triggers and checked
+    // nothing, so a database that already had a hash on both sides was migrated
+    // into a state its own invariant forbids, silently. 012 refuses.
+    //
+    // The guard is executed here as the SHIPPED TEXT, read out of the migration
+    // file, against a schema doctored into the forbidden state — anything else
+    // would be testing a copy of the SQL rather than the SQL.
+    const guard = (
+      await readFile(
+        join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'db', 'migrations', '012_deposit_ownership_registry.sql'),
+        'utf8',
+      )
+    ).split(/^\$\$;$/m)[0].concat('$$;')
+    expect(guard, 'the guard must be the first statement in the migration').toContain(
+      'refusing to install the deposit ownership registry',
+    )
+
+    const d = await draft()
+    const hash = fund(d.publicId)
+    finalize()
+    expect((await submitFunding(pool, chain, { publicId: d.publicId, txHash: hash })).state).toBe(
+      'live',
+    )
+    // Forge the intersection the migration must refuse. Only possible with the
+    // registry's own trigger switched off, which is itself the proof that the
+    // live system cannot reach this state any more.
+    await pool.query('ALTER TABLE operator_float_deposits DISABLE TRIGGER operator_float_deposits_claim_deposit')
+    await pool.query(
+      `INSERT INTO operator_float_deposits (tx_hash, value_luna, included_height, network)
+       VALUES ($1, $2, $3, 'TestAlbatross')`,
+      [hash, PRINCIPAL.toString(), String(FUND_HEIGHT)],
+    )
+    await pool.query('ALTER TABLE operator_float_deposits ENABLE TRIGGER operator_float_deposits_claim_deposit')
+
+    await expect(pool.query(guard)).rejects.toThrow(/already counted[\s\S]*both as a drop/i)
+    // …and it names the hash, so the operator knows what to decide about.
+    await expect(pool.query(guard)).rejects.toThrow(new RegExp(hash))
   })
 
   // ---- finality -------------------------------------------------------------

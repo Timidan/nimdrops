@@ -440,6 +440,45 @@ export class NimiqChain implements ChainClient {
     return this.toChainTx(details)
   }
 
+  /**
+   * Every included transaction touching `address` at or after `sinceHeight`.
+   *
+   * NOT part of the frozen `ChainClient` contract, and deliberately not: no
+   * money path reads it. It exists for the S3 harness's custody audit (round-4
+   * S6), which used to compare only the NET movement of the custody wallet —
+   * so an extra outgoing payment plus an equal unsolicited credit cancelled out
+   * and "no unaccounted payment" passed while both existed. A net figure cannot
+   * answer "was every payment from this wallet one we authorised"; only an
+   * enumeration can.
+   *
+   * `limit` is passed through and MUST be checked by the caller: the client
+   * returns "up to `limit`, newest first", so a full page is indistinguishable
+   * from a truncated history, and a truncated history is exactly how an
+   * unauthorised payment would slip past an enumeration. The caller compares
+   * the returned count against the limit it asked for and fails if they match.
+   *
+   * `sinceHeight` should be comfortably BEFORE the window of interest — the
+   * client documents it as a height that could not have been forked from — and
+   * the caller narrows to the exact window itself.
+   */
+  async transactionsByAddress(
+    address: string,
+    sinceHeight?: number,
+    limit?: number,
+  ): Promise<ChainTx[]> {
+    const client = await this.connect()
+    const details = await client.getTransactionsByAddress(
+      Address.fromAny(address),
+      sinceHeight ?? null,
+      null,
+      null,
+      limit ?? null,
+    )
+    return details
+      .map((d) => this.toChainTx(d))
+      .filter((tx): tx is ChainTx => tx !== null)
+  }
+
   /** Public so the spike can log the raw state of a not-yet-included tx. */
   async getTransactionDetails(hash: string): Promise<PlainTransactionDetails | null> {
     const client = await this.connect()

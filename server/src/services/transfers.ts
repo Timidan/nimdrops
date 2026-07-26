@@ -112,6 +112,26 @@ export const RETRY_BACKOFF_MS = 30_000
  */
 export const UNRESOLVED_BUDGET_MS = 15 * 60_000
 
+/**
+ * How far past its own deadline a `proven_dead` attempt keeps being looked up
+ * (round-4 review S5).
+ *
+ * `progressAttempt` has always had the branch that handles a dead attempt
+ * turning out to be alive — a `proven_dead` row the chain can show means the
+ * replacement and the original may BOTH pay, which is the worst outcome this
+ * module exists to prevent. Nothing ever reached it: every scan filtered on
+ * `state IN ('signed','broadcast')`, so the moment an operator's replacement
+ * committed, the original's hash stopped being looked at by anything at all. A
+ * later sighting could only come from a human.
+ *
+ * So the scans include recent dead attempts too, bounded rather than unbounded:
+ * one extra validity window past the deadline the attempt already had. That is
+ * comfortably longer than the replacement takes to reach finality, so the
+ * window in which both payments could be live is fully covered, and the scan
+ * cost stays proportional to recent activity rather than to all history.
+ */
+export const PROVEN_DEAD_RESCAN_GRACE_BLOCKS = 7_200
+
 // ---- advisory lock -------------------------------------------------------------
 
 /**
@@ -176,9 +196,13 @@ export interface StoredAttempt {
   validityStartHeight: number
 }
 
-/** An attempt still in flight: `signed` (maybe broadcast) or `broadcast`. */
+/**
+ * An attempt reconciliation still has a question about: `signed` (maybe
+ * broadcast), `broadcast`, or — since round-4 S5 — a recently `proven_dead` one
+ * that must keep being checked in case it lands after all.
+ */
 export interface OpenAttempt extends StoredAttempt {
-  state: 'signed' | 'broadcast'
+  state: 'signed' | 'broadcast' | 'proven_dead'
   observedHeight: number | null
   createdAt: Date
   transferState: string
@@ -193,7 +217,7 @@ interface OpenAttemptRow {
   id: string
   transfer_id: string
   sequence: number
-  state: 'signed' | 'broadcast'
+  state: 'signed' | 'broadcast' | 'proven_dead'
   raw_hex: string
   tx_hash: string
   validity_start_height: string
@@ -206,7 +230,7 @@ interface OpenAttemptRow {
   first_absent_at: Date | null
 }
 
-const OPEN_ATTEMPT_SELECT = `
+const ATTEMPT_SELECT = `
   SELECT a.id,
          a.transfer_id,
          a.sequence,
@@ -223,8 +247,9 @@ const OPEN_ATTEMPT_SELECT = `
          t.next_attempt_at
   FROM transaction_attempts a
   JOIN outgoing_transfers t ON t.id = a.transfer_id
-  WHERE a.state IN ('signed', 'broadcast')
 `
+
+const OPEN_ATTEMPT_SELECT = `${ATTEMPT_SELECT} WHERE a.state IN ('signed', 'broadcast')`
 
 function toOpenAttempt(row: OpenAttemptRow): OpenAttempt {
   return {
@@ -295,6 +320,37 @@ export async function loadOpenAttempts(pool: Pool, transferId?: string): Promise
         [transferId],
       )
     : await pool.query<OpenAttemptRow>(`${OPEN_ATTEMPT_SELECT} ORDER BY a.created_at, a.sequence`)
+  return rows.map(toOpenAttempt)
+}
+
+/**
+ * Recently `proven_dead` attempts, so a dead one that LANDED is still found
+ * (round-4 S5).
+ *
+ * `proven_dead` is not a terminal fact about the chain, it is a conclusion an
+ * operator drew from absence plus an expired window — and the one thing that
+ * can falsify it is the transaction showing up. Until this scan existed the
+ * falsification had nowhere to arrive: `loadOpenAttempts` excluded the state,
+ * so the `proven_dead_attempt_landed` emergency in `progressLocked` was
+ * unreachable in practice.
+ *
+ * Bounded by {@link PROVEN_DEAD_RESCAN_GRACE_BLOCKS} past the attempt's own
+ * deadline: past that the replacement has long since finalized, and a scan that
+ * grows with total history would eventually cost a chain round trip per dead
+ * attempt ever recorded.
+ */
+export async function loadRecentProvenDeadAttempts(
+  pool: Pool,
+  head: number,
+  opts?: WindowOptions,
+): Promise<OpenAttempt[]> {
+  const { rows } = await pool.query<OpenAttemptRow>(
+    `${ATTEMPT_SELECT}
+     WHERE a.state = 'proven_dead'
+       AND a.validity_start_height + $1::bigint + $2::bigint >= $3::bigint
+     ORDER BY a.created_at, a.sequence`,
+    [windowOf(opts).toString(), PROVEN_DEAD_RESCAN_GRACE_BLOCKS.toString(), head.toString()],
+  )
   return rows.map(toOpenAttempt)
 }
 
@@ -444,13 +500,20 @@ export async function signAndPersistAttempt(
  * a caller into treating "we did not hear back" as "it did not happen".
  *
  * **Round-3 R4 — the attempt is marked as BROADCAST-ATTEMPTED first**, in its
- * own committed statement, before the bytes leave. From that moment the
- * attempt's `signed` state no longer means "the chain cannot have debited
- * this": the solvency cross-check reads the marker instead of guessing from
- * the state, so an ambiguous broadcast explains the money the chain took
- * rather than looking like a shortfall. The write must precede the call — a
- * process killed the instant the network accepts the transaction is exactly
- * the case the marker exists for.
+ * own committed statement, before the bytes leave. The write must precede the
+ * call: a process killed the instant the network accepts the transaction is
+ * exactly the case the marker exists for, and a marker written afterwards
+ * would be lost in precisely that case.
+ *
+ * **Round-4 S3 — what the marker MEANS was corrected.** R4 read it as "the
+ * chain may have debited this, so it explains a lower balance", and let it
+ * offset the solvency cross-check. It cannot: written before the call, it also
+ * covers the crash in which the bytes never left, and then it was subtracting
+ * a payment that was never made from the minimum balance the books can
+ * explain — hiding an unrelated custody deficit of the same size. The marker
+ * now means only "somebody has to ask the chain about this hash".
+ * `solvency.resolveIndeterminateBroadcasts` asks, on every reconciliation, and
+ * `assertSolvent` refuses to create new liability until it has an answer.
  */
 export async function broadcastStored(
   pool: Pool,
@@ -547,7 +610,12 @@ interface LockedAttempt {
   observedHeight: number | null
   transferState: string
   nextAttemptAt: Date | null
+  /** The intent's recorded reason, so an emergency is raised once and not per tick. */
+  transferLastError: string | null
 }
+
+/** Marker written into `outgoing_transfers.last_error` by the S5 emergency. */
+const PROVEN_DEAD_LANDED_REASON = 'proven_dead_attempt_landed'
 
 /**
  * Pin the attempt row for the rest of the caller's transaction.
@@ -565,8 +633,10 @@ async function lockAttemptRow(
     observed_height: string | null
     transfer_state: string
     next_attempt_at: Date | null
+    transfer_last_error: string | null
   }>(
-    `SELECT a.state, a.observed_height, t.state AS transfer_state, t.next_attempt_at
+    `SELECT a.state, a.observed_height, t.state AS transfer_state, t.next_attempt_at,
+            t.last_error AS transfer_last_error
      FROM transaction_attempts a
      JOIN outgoing_transfers t ON t.id = a.transfer_id
      WHERE a.id = $1
@@ -580,6 +650,7 @@ async function lockAttemptRow(
     observedHeight: row.observed_height === null ? null : Number(row.observed_height),
     transferState: row.transfer_state,
     nextAttemptAt: row.next_attempt_at,
+    transferLastError: row.transfer_last_error,
   }
 }
 
@@ -692,6 +763,10 @@ async function progressLocked(
       attempt.attemptId,
       message,
     ])
+    // S5: a dead attempt we could not look up is exactly as dead as before, and
+    // its intent has already moved on to a replacement. Flagging that intent
+    // for `unresolvable_lookup` would page an operator about the wrong payment.
+    if (locked.state === 'proven_dead') return { progress: 'unchanged' }
     const age = Date.now() - attempt.createdAt.getTime()
     if (age >= UNRESOLVED_BUDGET_MS && !alreadyFlagged) {
       return {
@@ -708,16 +783,25 @@ async function progressLocked(
 
   if (tx) {
     if (locked.state === 'proven_dead') {
-      // RECONCILIATION EMERGENCY (R1). An operator proved this attempt dead and
-      // signed a replacement for the same intent — and here it is, on chain.
-      // Confirming it would mark the intent paid while a second payment is
-      // still live; ignoring it would leave a payment nobody is accounting for.
-      // Neither is survivable automatically, so the intent goes to a human with
-      // both hashes named.
+      // RECONCILIATION EMERGENCY (R1, reachable since S5). An operator proved
+      // this attempt dead and signed a replacement for the same intent — and
+      // here it is, on chain. Confirming it would mark the intent paid while a
+      // second payment is still live; ignoring it would leave a payment nobody
+      // is accounting for. Neither is survivable automatically, so the intent
+      // goes to a human with both hashes named.
+      //
+      // Raised once. The scan that finds this runs every tick, and an emergency
+      // that re-fires every two seconds would both drown the operator and keep
+      // `runWorkerTick` permanently reporting work, so no other intent would
+      // ever be signed. The recorded reason on the intent is the idempotence
+      // key; nothing clears it but a human.
+      if (alreadyFlagged && locked.transferLastError?.includes(PROVEN_DEAD_LANDED_REASON)) {
+        return { progress: 'unchanged' }
+      }
       return {
         progress: 'changed',
         alert: await applyManualReview(client, attempt, {
-          reason: 'proven_dead_attempt_landed',
+          reason: PROVEN_DEAD_LANDED_REASON,
           includedHeight: tx.includedHeight,
           executionOk: tx.executionOk,
           head,
@@ -898,13 +982,20 @@ export async function reconcileOnStartup(
   pool: Pool,
   chain: ChainClient,
   alerts: Alerts,
+  opts?: WindowOptions,
 ): Promise<void> {
-  const attempts = await loadOpenAttempts(pool)
-  if (attempts.length === 0) return
+  const open = await loadOpenAttempts(pool)
+  // The head is needed for the dead-attempt scan even when nothing is open, so
+  // it is only skipped when there is provably nothing to ask about.
+  if (open.length === 0) {
+    const anyDead = await pool.query(`SELECT 1 FROM transaction_attempts WHERE state = 'proven_dead' LIMIT 1`)
+    if (anyDead.rows.length === 0) return
+  }
   const head = await chain.headHeight()
+  const attempts = [...open, ...(await loadRecentProvenDeadAttempts(pool, head, opts))]
   for (const attempt of attempts) {
     try {
-      await progressAttempt(pool, chain, alerts, attempt, head)
+      await progressAttempt(pool, chain, alerts, attempt, head, opts)
     } catch (err) {
       logWarn('reconcile_attempt_failed', {
         transferId: attempt.transferId,
@@ -929,14 +1020,23 @@ export async function runWorkerTick(
   pool: Pool,
   chain: ChainClient,
   alerts: Alerts,
+  opts?: WindowOptions,
 ): Promise<'idle' | 'worked'> {
   let worked = false
 
-  const attempts = await loadOpenAttempts(pool)
-  if (attempts.length > 0) {
+  const open = await loadOpenAttempts(pool)
+  // S5: recently dead attempts are scanned alongside the open ones. A dead
+  // attempt that landed is the one condition under which two payments for the
+  // same intent can both be live, so it must be looked for on the same
+  // schedule as everything else — not only when a human happens to check.
+  const anyDead = await pool.query(`SELECT 1 FROM transaction_attempts WHERE state = 'proven_dead' LIMIT 1`)
+  if (open.length > 0 || anyDead.rows.length > 0) {
     const head = await chain.headHeight()
+    const attempts = [...open, ...(await loadRecentProvenDeadAttempts(pool, head, opts))]
     for (const attempt of attempts) {
-      if ((await progressAttempt(pool, chain, alerts, attempt, head)) === 'changed') worked = true
+      if ((await progressAttempt(pool, chain, alerts, attempt, head, opts)) === 'changed') {
+        worked = true
+      }
     }
   }
   if (worked) return 'worked'

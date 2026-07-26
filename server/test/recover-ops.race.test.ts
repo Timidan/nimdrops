@@ -401,9 +401,11 @@ describe.skipIf(!hasDb)('operator float and status (real Postgres)', () => {
   beforeEach(async () => {
     await pool.query(
       `TRUNCATE transaction_attempts, outgoing_transfers, wallet_challenges, claims, drops,
-       operator_float_deposits, http_idempotency RESTART IDENTITY CASCADE`,
+       operator_float_deposits, custody_deposit_owners, http_idempotency RESTART IDENTITY CASCADE`,
     )
-    await pool.query('UPDATE custody_controls SET network = NULL WHERE singleton')
+    await pool.query(
+      `UPDATE custody_controls SET network = NULL, custody_address = '${CUSTODY}' WHERE singleton`,
+    )
     await setControls({})
     chain = new FakeChain({ custody: CUSTODY, finalityDepth: 5 })
   })

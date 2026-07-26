@@ -250,7 +250,7 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
     setEnv()
     await pool.query(
       `TRUNCATE transaction_attempts, outgoing_transfers, wallet_challenges, claims, drops,
-       operator_float_deposits, http_idempotency RESTART IDENTITY CASCADE`,
+       operator_float_deposits, custody_deposit_owners, http_idempotency RESTART IDENTITY CASCADE`,
     )
     await pool.query(
       `UPDATE custody_controls

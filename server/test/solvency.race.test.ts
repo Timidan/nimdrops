@@ -6,6 +6,7 @@ import { migrate } from '../src/db/migrate'
 import type { Alerts } from '../src/services/alerts'
 import {
   CapExceededError,
+  IndeterminateBroadcastError,
   InsolventError,
   PausedError,
   StaleReconciliationError,
@@ -135,6 +136,8 @@ async function insertAttempt(
      * network and the chain may already have debited them.
      */
     broadcastAttempted?: boolean
+    /** Explicit hash, so a test can also put these bytes on the fake chain. */
+    txHash?: string
   },
 ): Promise<string> {
   const { rows } = await db.query<{ id: string }>(
@@ -148,7 +151,7 @@ async function insertAttempt(
       o.transferId,
       o.state,
       Buffer.from('00ff', 'hex'),
-      randomUUID(),
+      o.txHash ?? randomUUID(),
       (o.feeLuna ?? 0n).toString(),
       o.createdAgoSeconds ?? 0,
       (o.validityStartHeight ?? 1).toString(),
@@ -241,7 +244,7 @@ describe.skipIf(!hasDb)('solvency and custody controls (real Postgres)', () => {
   beforeEach(async () => {
     await pool.query(
       `TRUNCATE transaction_attempts, outgoing_transfers, wallet_challenges, claims, drops,
-       operator_float_deposits, http_idempotency RESTART IDENTITY CASCADE`,
+       operator_float_deposits, custody_deposit_owners, http_idempotency RESTART IDENTITY CASCADE`,
     )
     await setControls({})
   })
@@ -784,20 +787,31 @@ describe.skipIf(!hasDb)('solvency and custody controls (real Postgres)', () => {
     expect(spy.seen).toHaveLength(0)
   })
 
-  // ---- R4: ambiguous broadcasts, and a height-based in-flight bound ---------------
+  // ---- R4 / S3: ambiguous broadcasts, and a height-based in-flight bound ----------
+
+  const PAYOUT_HASH = 'payout-in-question'
 
   /**
    * A 4_395-luna payout plus a 5-luna fee against 5_000 of float, with the
    * chain holding the 600 that leaves. Whether that reads as a shortfall is
    * entirely a question of whether the attempt is allowed to explain it.
+   *
+   * `landed` decides whether those bytes are actually ON CHAIN. Both variants
+   * leave custody holding exactly 600 luna, so the cross-check arithmetic is
+   * identical and the ONLY difference is whether the chain can show the
+   * transaction — which, since round-4 S3, is the whole question.
    */
   async function payoutAgainstDebitedChain(o: {
     state: 'signed' | 'broadcast'
     broadcastAttempted?: boolean
     validityStartHeight?: number
     createdAgoSeconds?: number
+    landed?: boolean
   }): Promise<FakeChain> {
-    await setControls({ operatorFloatLuna: 5_000n })
+    const { landed = false, ...attempt } = o
+    // Reserve 0: these tests are about the cross-check, and a non-zero reserve
+    // would make `assertSolvent` refuse for an unrelated reason.
+    await setControls({ operatorFloatLuna: 5_000n, feeReserveLuna: 0n })
     const drop = await insertDrop(pool, { claimCount: 5, amountEachLuna: 100n, activated: false })
     const claim = await insertClaim(pool, drop.id, 0)
     const transfer = await insertTransfer(pool, {
@@ -807,39 +821,146 @@ describe.skipIf(!hasDb)('solvency and custody controls (real Postgres)', () => {
       amountLuna: 4_395n,
       state: 'in_progress',
     })
-    await insertAttempt(pool, { transferId: transfer.id, feeLuna: 5n, ...o })
+    await insertAttempt(pool, { transferId: transfer.id, feeLuna: 5n, txHash: PAYOUT_HASH, ...attempt })
 
     const chain = new FakeChain({ custody: CUSTODY, finalityDepth: 5 })
     chain.deposit({
       hash: `custody-${randomUUID()}`,
       sender: 'NQ07 OPERATOR',
       recipient: CUSTODY,
-      valueLuna: 600n,
+      valueLuna: landed ? 5_000n : 600n,
       includedHeight: 1,
     })
+    if (landed) {
+      chain.deposit({
+        hash: PAYOUT_HASH,
+        sender: CUSTODY,
+        recipient: 'NQ07 CLAIMANT',
+        valueLuna: 4_395n,
+        feeLuna: 5n,
+        includedHeight: 995,
+      })
+    }
     chain.setHead(1_000)
     return chain
   }
 
-  it('an AMBIGUOUS broadcast explains the money the chain took, and does not pause custody', async () => {
+  it('an ambiguous broadcast the chain CAN SHOW explains the money it took', async () => {
     // Crash window (b), which the G1 harness produces on purpose: the network
     // accepted the transaction and the process died before `markBroadcast`. The
-    // row still says `signed`, but `broadcast_attempted_at` is set, so the
-    // chain really can have debited it — and on restart the cross-check must
-    // not read its own payment as a hole in custody.
+    // row still says `signed` with `broadcast_attempted_at` set — and the chain
+    // really did take the money. Reconciliation asks for the hash, gets it,
+    // promotes the attempt, and the cross-check sees an ordinary payment in
+    // flight rather than a hole in custody.
     const chain = await payoutAgainstDebitedChain({
       state: 'signed',
       broadcastAttempted: true,
       validityStartHeight: 990,
+      landed: true,
     })
 
     const spy = spyAlerts()
-    await reconcile(pool, chain, spy.alerts, { windowBlocks: 100 })
+    const result = await reconcile(pool, chain, spy.alerts, { windowBlocks: 100 })
+    expect(result.resolved).toEqual({ scanned: 1, promoted: 1 })
 
     const controls = await readControls(pool)
-    expect(controls.paused, 'an ambiguous broadcast is a payment, not a shortfall').toBe(false)
+    expect(controls.paused, 'a payment the chain really took is not a shortfall').toBe(false)
     expect(controls.shortfallDetectedAt).toBeNull()
     expect(spy.seen).toHaveLength(0)
+
+    // The resolution is durable: the attempt is `broadcast` now, so the next
+    // pass does not have to re-derive it, and `assertSolvent` stops refusing.
+    const { rows } = await pool.query<{ state: string }>(
+      'SELECT state FROM transaction_attempts WHERE tx_hash = $1',
+      [PAYOUT_HASH],
+    )
+    expect(rows[0].state).toBe('broadcast')
+    await expect(moneyPathWouldPass()).resolves.toBeUndefined()
+  })
+
+  it('S3: a broadcast marker alone does NOT explain an equal unrelated deficit', async () => {
+    // The finding, exactly. `broadcastStored` commits `broadcast_attempted_at`
+    // BEFORE it calls the network, so a process killed in that window leaves a
+    // marker for bytes that never left. Round 3 let that marker subtract the
+    // attempt's full amount from the explainable minimum for the rest of its
+    // validity window — so a custody deficit of the same size, from any
+    // unrelated cause, reconciled CLEAN.
+    //
+    // Same numbers as the test above; the only difference is that the chain has
+    // never heard of this hash.
+    const chain = await payoutAgainstDebitedChain({
+      state: 'signed',
+      broadcastAttempted: true,
+      validityStartHeight: 990,
+      landed: false,
+    })
+
+    const spy = spyAlerts()
+    const result = await reconcile(pool, chain, spy.alerts, { windowBlocks: 100 })
+    expect(result.resolved, 'asked, and could not be answered').toEqual({ scanned: 1, promoted: 0 })
+    expect(result.short, 'the 4400-luna hole is real and must be seen').toBe(true)
+
+    const controls = await readControls(pool)
+    expect(controls.paused).toBe(true)
+    expect(controls.shortfallDetectedAt).not.toBeNull()
+    expect(
+      spy.seen.filter((a) => a.detail.reason === 'chain_below_ledger'),
+      'the operator is told the chain is below the books',
+    ).toHaveLength(1)
+    expect(
+      spy.seen.filter((a) => a.detail.reason === 'indeterminate_broadcast'),
+      '…and told which attempt nobody can account for',
+    ).toHaveLength(1)
+  })
+
+  it('S3: an unresolved broadcast blocks every new signature until it is answered', async () => {
+    // Nothing here is about solvency arithmetic: the chain holds exactly what
+    // the books claim, because these bytes never left. The point is that until
+    // somebody asks the chain, NOBODY KNOWS that — custody's balance is unknown
+    // by this attempt's amount, so there is no number to check a new liability
+    // against and none may be created.
+    await setControls({ operatorFloatLuna: 5_000n, feeReserveLuna: 0n })
+    const drop = await insertDrop(pool, { claimCount: 5, amountEachLuna: 100n, activated: false })
+    const claim = await insertClaim(pool, drop.id, 0)
+    const transfer = await insertTransfer(pool, {
+      purpose: 'payout',
+      dropId: drop.id,
+      claimId: claim.id,
+      amountLuna: 4_395n,
+      state: 'in_progress',
+    })
+    await insertAttempt(pool, {
+      transferId: transfer.id,
+      state: 'signed',
+      broadcastAttempted: true,
+      feeLuna: 5n,
+      validityStartHeight: 990,
+      txHash: PAYOUT_HASH,
+    })
+
+    const chain = new FakeChain({ custody: CUSTODY, finalityDepth: 5 })
+    chain.deposit({
+      hash: 'custody-intact',
+      sender: 'NQ07 OPERATOR',
+      recipient: CUSTODY,
+      valueLuna: 5_000n,
+      includedHeight: 1,
+    })
+    chain.setHead(1_000)
+
+    const clean = await reconcile(pool, chain, spyAlerts().alerts, { windowBlocks: 100 })
+    expect(clean.short, 'the money is all there — this is not a solvency problem').toBe(false)
+
+    await expect(moneyPathWouldPass()).rejects.toBeInstanceOf(IndeterminateBroadcastError)
+    // …and every existing handler already reads it as "we will not sign".
+    await expect(moneyPathWouldPass()).rejects.toBeInstanceOf(InsolventError)
+
+    // An operator proving the attempt dead is one way out (the other is the
+    // chain showing it), and it reopens the money paths.
+    await pool.query(`UPDATE transaction_attempts SET state = 'proven_dead' WHERE tx_hash = $1`, [
+      PAYOUT_HASH,
+    ])
+    await expect(moneyPathWouldPass()).resolves.toBeUndefined()
   })
 
   it('…while an attempt whose bytes never left still does not', async () => {
@@ -999,9 +1120,137 @@ describe.skipIf(!hasDb)('solvency and custody controls (real Postgres)', () => {
     const after = await readControls(pool)
     expect(after.shortfallDetectedAt?.getTime()).toBe(stamped?.getTime())
 
+    // A reading from the SAME head does not clear it either (round-4 S2). Money
+    // that left at height H is already visible at height H, so a healthy view
+    // of H is a view taken before the debit — the two are not comparable, and
+    // round 3's `<` comparison let the older-looking one win.
+    lagging.setHead(1_000)
+    await reconcile(pool, lagging, spyAlerts().alerts)
+    expect((await readControls(pool)).shortfallDetectedAt?.getTime()).toBe(stamped?.getTime())
+
     // Caught up, the same healthy reading does clear it.
     lagging.setHead(1_100)
     await reconcile(pool, lagging, spyAlerts().alerts)
+    expect((await readControls(pool)).shortfallDetectedAt).toBeNull()
+  })
+
+  it('S2: a clean pass that observed FIRST cannot clear a shortfall observed after it', async () => {
+    // The residue R3 left behind, reproduced exactly. Round 3 drew the
+    // observation generation AFTER the observation completed, so a pass that
+    // finished looking and then stalled before `nextval` collected a number
+    // issued later than the pass whose verdict it was about to erase — and
+    // because both saw the same head, the height guard's `<` comparison did not
+    // stop it either.
+    await setControls({ operatorFloatLuna: 5_000n, feeReserveLuna: 0n })
+    const chain = new FakeChain({ custody: CUSTODY, finalityDepth: 5 })
+    chain.deposit({
+      hash: 'custody-healthy',
+      sender: 'NQ07 OPERATOR',
+      recipient: CUSTODY,
+      valueLuna: 5_000n,
+      includedHeight: 1,
+    })
+    chain.setHead(20)
+
+    // 1. Pass A completes a clean observation at head 20 and stalls before its
+    //    write — the stall is now AFTER the generation was drawn, which is what
+    //    used to hand it the newer number.
+    const observed = deferred()
+    const release = deferred()
+    const passA = reconcile(pool, chain, spyAlerts().alerts, {
+      onObserved: async () => {
+        observed.resolve()
+        await release.promise
+      },
+    })
+    await observed.promise
+
+    // 2. Money leaves custody, and pass B sees it — at the SAME head 20, which
+    //    is the case the height guard alone cannot decide.
+    chain.deposit({
+      hash: 'out-of-band-debit',
+      sender: CUSTODY,
+      recipient: 'NQ07 ELSEWHERE',
+      valueLuna: 4_000n,
+      includedHeight: 2,
+    })
+    const passB = await reconcile(pool, chain, spyAlerts().alerts)
+    expect(passB.short).toBe(true)
+    expect(passB.height, 'both passes observed the same head').toBe(20)
+    const afterB = await readControls(pool)
+    expect(afterB.shortfallDetectedAt).not.toBeNull()
+
+    // 3. Pass A writes. Its generation was drawn before B's, so it is refused,
+    //    and even if it were not, its equal height may no longer clear.
+    release.resolve()
+    const resultA = await passA
+    expect(resultA.observationSeq, 'A started first, so A is the older view').toBeLessThan(
+      passB.observationSeq,
+    )
+    expect(resultA.accepted).toBe(false)
+
+    const afterA = await readControls(pool)
+    expect(afterA.shortfallDetectedAt?.getTime()).toBe(afterB.shortfallDetectedAt?.getTime())
+    await unpause(pool)
+    await expect(moneyPathWouldPass()).rejects.toBeInstanceOf(UnreconciledShortfallError)
+  })
+
+  it('S2: a SHORT observation is stamped even when its generation is older', async () => {
+    // The other half of moving `nextval` earlier. Ordering passes by when they
+    // STARTED is a weaker order — a pass can start first and still observe
+    // fresher data — so a short observation must never be dropped just because
+    // something else wrote afterwards. Fail-closed beats newest-wins for a
+    // verdict that says money is missing.
+    await setControls({ operatorFloatLuna: 5_000n, feeReserveLuna: 0n })
+    const chain = new FakeChain({ custody: CUSTODY, finalityDepth: 5 })
+    chain.deposit({
+      hash: 'custody-partial',
+      sender: 'NQ07 OPERATOR',
+      recipient: CUSTODY,
+      valueLuna: 1_000n,
+      includedHeight: 1,
+    })
+    chain.setHead(20)
+
+    // Pass A draws its generation, observes the shortfall, and stalls.
+    const observed = deferred()
+    const release = deferred()
+    const passA = reconcile(pool, chain, spyAlerts().alerts, {
+      onObserved: async () => {
+        observed.resolve()
+        await release.promise
+      },
+    })
+    await observed.promise
+
+    // Pass B starts later, sees a wallet that has since been topped up, and
+    // takes ownership of the recorded numbers.
+    chain.deposit({
+      hash: 'topped-up',
+      sender: 'NQ07 OPERATOR',
+      recipient: CUSTODY,
+      valueLuna: 4_000n,
+      includedHeight: 2,
+    })
+    chain.setHead(21)
+    const passB = await reconcile(pool, chain, spyAlerts().alerts)
+    expect(passB.short).toBe(false)
+    expect(passB.accepted).toBe(true)
+
+    release.resolve()
+    const resultA = await passA
+    expect(resultA.short).toBe(true)
+    expect(resultA.accepted, 'B owns the numbers').toBe(false)
+
+    // …and A's verdict is on the record anyway. It is cleared by the next pass
+    // from a higher head, which is the self-healing property that makes the
+    // fail-closed stamp affordable.
+    const afterA = await readControls(pool)
+    expect(afterA.shortfallDetectedAt, 'a shortfall is never silently dropped').not.toBeNull()
+    expect(afterA.paused).toBe(true)
+
+    chain.setHead(22)
+    await reconcile(pool, chain, spyAlerts().alerts)
     expect((await readControls(pool)).shortfallDetectedAt).toBeNull()
   })
 
@@ -1063,6 +1312,11 @@ describe.skipIf(!hasDb)('solvency and custody controls (real Postgres)', () => {
       valueLuna: 4_400n,
       includedHeight: 2,
     })
+    // Round-4 S2: the head must have MOVED. A clean reading taken at the same
+    // height the shortfall was seen at is a reading of the same chain state,
+    // and cannot refute it — on a real chain the repayment itself advances the
+    // head, so this is what actually happens rather than a concession.
+    chain.setHead(21)
     await reconcile(pool, chain)
 
     expect((await readControls(pool)).shortfallDetectedAt).toBeNull()

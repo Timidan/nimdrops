@@ -22,8 +22,10 @@ import {
   CLAIM_MEMO,
   WORKER_LOCK_ID,
   acquireWorkerLock,
+  PROVEN_DEAD_RESCAN_GRACE_BLOCKS,
   evaluateProvenDead,
   loadOpenAttempts,
+  loadRecentProvenDeadAttempts,
   progressAttempt,
   reconcileOnStartup,
   releaseWorkerLock,
@@ -366,7 +368,7 @@ describe.skipIf(!hasDb)('transfer worker crash windows (real Postgres)', () => {
     setEnv()
     await pool.query(
       `TRUNCATE transaction_attempts, outgoing_transfers, wallet_challenges, claims, drops,
-       operator_float_deposits, http_idempotency RESTART IDENTITY CASCADE`,
+       operator_float_deposits, custody_deposit_owners, http_idempotency RESTART IDENTITY CASCADE`,
     )
     await pool.query(
       `UPDATE custody_controls
@@ -377,7 +379,11 @@ describe.skipIf(!hasDb)('transfer worker crash windows (real Postgres)', () => {
            reconciled_confirmed_balance_luna = NULL,
            last_reconciled_height = NULL,
            last_reconciled_at = NULL,
-           network = 'TestAlbatross'
+           network = 'TestAlbatross',
+           -- Round-4 S1: the custody ADDRESS is bound too. Every test here
+           -- starts already bound, as a booted process would have left it; the
+           -- binding tests below unbind it deliberately.
+           custody_address = '${CUSTODY}'
        WHERE singleton`,
     )
     chain = newChain()
@@ -1268,6 +1274,73 @@ describe.skipIf(!hasDb)('transfer worker crash windows (real Postgres)', () => {
     expect(flagged, 'an operator must be told both hashes may have paid').toHaveLength(1)
     expect(flagged[0].alert).toBe('manual_review')
     expect(flagged[0].detail).toMatchObject({ txHash: first.tx_hash })
+  })
+
+  // ---- S5: the emergency has to be REACHABLE ---------------------------------------
+
+  it('S5: an ordinary tick finds a proven_dead attempt that landed', async () => {
+    // The test above reaches the emergency by handing `progressAttempt` a
+    // snapshot loaded BEFORE the replacement committed. Round-4 S5: that is the
+    // only way anything reached it. `loadOpenAttempts` filters on
+    // `state IN ('signed','broadcast')`, so from the moment an operator's
+    // replacement committed, the original's hash was never looked at again by
+    // startup, by a tick, or by anything else — the branch existed and was
+    // unreachable, and a landed original could only be found by a human.
+    const { payout, attempt: first } = await deadLookingAttempt()
+    await reconcileOnStartup(pool, chain, alerts)
+    await reconcileOnStartup(pool, chain, alerts)
+    await ageAbsenceSeries(payout.transferId, '10 minutes')
+    await replaceTransfer(pool, chain, alerts, payout.transferId)
+    expect((await readAttempts(payout.transferId))[0].state).toBe('proven_dead')
+
+    // The "dead" transaction lands after all.
+    await chain.broadcast(first.raw_hex)
+
+    // Nobody is holding a stale snapshot: the open-attempt scan cannot see it.
+    const open = await loadOpenAttempts(pool, payout.transferId)
+    expect(open.map((a) => a.txHash)).not.toContain(first.tx_hash)
+
+    alerts.sent.length = 0
+    await runWorkerTick(pool, chain, alerts)
+
+    const flagged = alerts.sent.filter((a) => a.detail.reason === 'proven_dead_attempt_landed')
+    expect(flagged, 'a routine tick must surface it').toHaveLength(1)
+    expect(flagged[0].detail).toMatchObject({ txHash: first.tx_hash })
+    expect((await readTransfer(payout.transferId)).state).toBe('manual_review')
+    // Still dead on paper: confirming it would mark the intent paid while the
+    // replacement is also live, which is the outcome being reported.
+    expect((await readAttempts(payout.transferId))[0].state).toBe('proven_dead')
+
+    // Raised ONCE. The scan runs every two seconds; an emergency that re-fires
+    // on every tick would both drown the operator and make `runWorkerTick`
+    // report work forever, so no other intent would ever be signed again.
+    alerts.sent.length = 0
+    await runWorkerTick(pool, chain, alerts)
+    expect(
+      alerts.sent.filter((a) => a.detail.reason === 'proven_dead_attempt_landed'),
+    ).toHaveLength(0)
+  })
+
+  it('S5: the dead-attempt scan is bounded, not a walk over all history', async () => {
+    const { payout, attempt: first } = await deadLookingAttempt()
+    await reconcileOnStartup(pool, chain, alerts)
+    await reconcileOnStartup(pool, chain, alerts)
+    await ageAbsenceSeries(payout.transferId, '10 minutes')
+    await replaceTransfer(pool, chain, alerts, payout.transferId)
+
+    const deadline = Number(first.validity_start_height) + validityWindowBlocks()
+    // One block inside the grace: still scanned.
+    expect(
+      (await loadRecentProvenDeadAttempts(pool, deadline + PROVEN_DEAD_RESCAN_GRACE_BLOCKS)).map(
+        (a) => a.txHash,
+      ),
+    ).toContain(first.tx_hash)
+    // One block past it: the replacement finalized long ago, and a scan that
+    // grew with total history would eventually cost one chain round trip per
+    // dead attempt ever recorded.
+    expect(
+      await loadRecentProvenDeadAttempts(pool, deadline + PROVEN_DEAD_RESCAN_GRACE_BLOCKS + 1),
+    ).toHaveLength(0)
   })
 
   // ---- F6: fail closed, not open --------------------------------------------------
