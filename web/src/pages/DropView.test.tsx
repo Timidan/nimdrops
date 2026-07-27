@@ -17,9 +17,9 @@
  * ## Why the table passes `revealed`
  *
  * A claimant does not land on the claim surface. They land on a full-screen
- * sealed envelope and tap it. `revealed` is the dev and test seam that puts
- * the surface on screen without driving the ritual nineteen times, and the
- * derivation it bypasses — `gateOpened` — is tested directly, on its own,
+ * sealed envelope and press and hold it. `revealed` is the dev and test seam
+ * that puts the surface on screen without driving the ritual nineteen times.
+ * The derivation it bypasses — `gateOpened` — is tested directly, on its own,
  * below. Production never passes it: `Drop.tsx` leaves it undefined, and that
  * is asserted too.
  */

@@ -47,8 +47,8 @@ import Receipt from './Receipt'
  * ## The sealed gate, in front of all of it
  *
  * A claimant does not land here. They land on a full-screen sealed envelope
- * with NO AMOUNT ON IT, tap it once, and the screen
- * below is what the burst reveals. `ui/SealedEnvelope.tsx` has the ordering
+ * with no amount on it, press and hold it, and the screen below is what the
+ * burst reveals. `ui/SealedEnvelope.tsx` has the ordering
  * argument; the derivation of "already opened" is `gateOpened` below, and it is
  * the part that has to be right or the burst re-fires on every poll tick.
  *
