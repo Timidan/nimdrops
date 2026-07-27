@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import type { ClaimServerState, DropPublic } from '../api'
+import { appShareData, canonicalDropUrl, dropShareData, shareOrCopy } from '../integrations/share'
 import { expiryWindowAdjective, expiryWindowLabel } from '../money'
 import { nimiqPayDeeplink } from '../sdk/adapter'
 import { CLAIM_STORAGE_PREFIX, type ClaimUiState } from '../state/claim'
@@ -46,7 +47,7 @@ import Receipt from './Receipt'
  * ## The sealed gate, in front of all of it
  *
  * A claimant does not land here. They land on a full-screen sealed envelope
- * with NO AMOUNT ON IT, hold it for two and a half seconds, and the screen
+ * with NO AMOUNT ON IT, tap it once, and the screen
  * below is what the burst reveals. `ui/SealedEnvelope.tsx` has the ordering
  * argument; the derivation of "already opened" is `gateOpened` below, and it is
  * the part that has to be right or the burst re-fires on every poll tick.
@@ -82,8 +83,8 @@ const OUTCOMES: readonly ClaimUiState[] = ['paused', 'expired', 'closed', 'exhau
  *
  * THE landmine of this whole feature, so it is a pure function with a test of
  * its own. Get it wrong in one direction and a claimant who reloads a settled
- * claim is asked to hold an envelope over their own receipt; get it wrong in
- * the other and the burst re-fires every 2.5 seconds as the status poll ticks.
+ * claim sees the envelope over their own receipt; get it wrong in the other
+ * and a status poll replays the burst.
  *
  * Three things mark a claim as past the envelope, and all three are read from
  * state that already existed before this feature:
@@ -147,7 +148,7 @@ export interface DropViewProps {
    * A dev and test seam, and the only prop on this component production does
    * not pass: `Drop.tsx` leaves it undefined, so the shipped screen derives the
    * gate and nothing else can. `/preview` sets it so all thirteen states can be
-   * looked at without holding an envelope nineteen times, and the tests set it
+   * looked at without opening an envelope nineteen times, and the tests set it
    * to hold the claim surface to rule 1 on every state.
    */
   revealed?: boolean
@@ -209,7 +210,7 @@ export default function DropView({
         publicId={publicId}
         deepLink={nimiqPayDeeplink(here)}
       >
-        <Upper state={state} drop={drop} amount={amount} outcome={outcome} />
+        <Upper publicId={publicId} state={state} drop={drop} amount={amount} outcome={outcome} />
         <GlassSheet
           testId="claim-sheet"
           dip={opened}
@@ -268,11 +269,13 @@ export default function DropView({
  * same words in a sheet.
  */
 function Upper({
+  publicId,
   state,
   drop,
   amount,
   outcome,
 }: {
+  publicId: string
   state: ClaimUiState
   drop: DropPublic | null
   amount: string
@@ -340,8 +343,12 @@ function Upper({
           The custody control is deliberately NOT here: it belongs on the card,
           where its gold shield is 5.43:1 rather than 2.74:1. */}
       <nav className="nd-rail" aria-label="Drop actions">
-        <ShareButton />
-        <CopyLinkButton />
+        <ShareButton
+          publicId={publicId}
+          amount={amount}
+          canForward={!outcome && drop?.state === 'live' && drop.remaining > 0}
+        />
+        <CopyLinkButton publicId={publicId} />
       </nav>
 
       {drop && !outcome ? <Tiles drop={drop} /> : null}
@@ -565,14 +572,10 @@ function Face({ publicId, state, drop, serverState, txHash, amount, sponsor, onC
                   <StatusPill state={state} />
                 </div>
               )}
-              {/**
-               * One word and the number, the way every incumbent does it
-               * (Binance `Open`, WeChat 开, Ugly Cash `Open`). The amount stays
-               * on the button because it is the number the reader checks
-               * against the one they are pressing.
-               */}
+              {/* The envelope is already open. This action claims the visible
+                  amount and leads to the wallet confirmation. */}
               <button type="button" disabled={state !== 'ready'} onClick={onClaim} className="nd-action">
-                Open {amount} NIM
+                Claim {amount} NIM
               </button>
               <p className="nd-note mt-2.5 text-center">
                 {state === 'signing'
@@ -880,12 +883,10 @@ function NoWallet() {
 /**
  * The two circular affordances on the rail.
  *
- * `CopyLinkButton` passes on THIS drop, which is what someone forwarding a link
- * to a friend wants. `ShareButton` recommends the PRODUCT: it used to share the
- * drop's own link under a label that read like a recommendation of the app, so
- * a claimant who had just been paid and wanted to tell a friend about NimDrops
- * instead sent them to the very drop they had just taken a share out of — one
- * share emptier than it was a minute ago, and possibly empty.
+ * While a funded share remains, both buttons pass on this drop: every recipient
+ * can recruit the next wallet without first becoming a sponsor. Once the drop
+ * is closed or empty, Share recommends the product instead of sending a dead
+ * claim link. Copy remains literal and always copies the current drop.
  *
  * `text` matters as much as the URL. WhatsApp routinely drops `title` and shows
  * a bare link, so the product's one-line description travels in the message
@@ -894,7 +895,7 @@ function NoWallet() {
  * Both report back in a live region rather than by changing their own label: an
  * icon button has no label to change, and "copied" has to be announced.
  */
-function CopyLinkButton() {
+function CopyLinkButton({ publicId }: { publicId: string }) {
   const [copied, setCopied] = useState(false)
   return (
     <>
@@ -904,7 +905,7 @@ function CopyLinkButton() {
         data-testid="copy-link"
         aria-label="Copy the link to this drop"
         onClick={() => {
-          const here = typeof window === 'undefined' ? '' : window.location.href
+          const here = canonicalDropUrl(publicId)
           void navigator.clipboard
             ?.writeText(here)
             .then(() => setCopied(true))
@@ -920,38 +921,35 @@ function CopyLinkButton() {
   )
 }
 
-function ShareButton() {
+function ShareButton({
+  publicId,
+  amount,
+  canForward,
+}: {
+  publicId: string
+  amount: string
+  canForward: boolean
+}) {
   const [copied, setCopied] = useState(false)
-  const url = typeof window === 'undefined' ? '' : window.location.origin
+  const origin = typeof window === 'undefined' ? '' : window.location.origin
+  const data = canForward
+    ? dropShareData({ url: canonicalDropUrl(publicId, origin), amount })
+    : appShareData(origin)
   return (
     <>
       <button
         type="button"
-        data-testid="share-app"
+        data-testid="share-link"
         className="nd-round"
-        aria-label="Share the app"
+        aria-label={canForward ? 'Share this drop' : 'Share NimDrops'}
         onClick={() => {
-          if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
-            // A dismissed share sheet rejects with AbortError; that is a choice.
-            void navigator
-              .share({
-                title: 'NimDrops',
-                text: 'One link. A fixed share of NIM for everyone who opens it.',
-                url,
-              })
-              .catch(() => {})
-            return
-          }
-          void navigator.clipboard
-            ?.writeText(url)
-            .then(() => setCopied(true))
-            .catch(() => setCopied(false))
+          void shareOrCopy(data).then((result) => setCopied(result === 'copied'))
         }}
       >
         <ShareIcon size={18} />
       </button>
       <span className="nd-sr" role="status">
-        {copied ? 'Link copied' : ''}
+        {copied ? (canForward ? 'Drop link copied' : 'App link copied') : ''}
       </span>
     </>
   )

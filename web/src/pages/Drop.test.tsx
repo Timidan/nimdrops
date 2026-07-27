@@ -9,7 +9,7 @@
  *    beneath it, and it is never reduced to a single gesture;
  *  - "on its way" while pending, "Paid" only when the backend says paid;
  *  - degradation disables the claim button, it does not delete it;
- *  - "Share the app" shares the app, not the drop the claimant just emptied.
+ *  - a claimant can forward a still-funded drop directly to another wallet.
  */
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
@@ -216,19 +216,19 @@ describe('Drop — the drop card', () => {
     // field ABOVE the sheet, so the order inside the sheet is the one left to
     // defend: who sent it, what they said, then the action.)
     const body = document.body.textContent ?? ''
-    expect(body.indexOf('Thanks for a good week')).toBeLessThan(body.indexOf('Open 2 NIM'))
+    expect(body.indexOf('Thanks for a good week')).toBeLessThan(body.indexOf('Claim 2 NIM'))
 
     // "Campaign" is sponsor-side vocabulary and must not reach a claimant.
     expect(body).not.toMatch(/campaign/i)
   })
 
-  it('labels the action exactly "Open 2 NIM"', async () => {
+  it('labels the money action exactly "Claim 2 NIM"', async () => {
     installFetch({ drop: { status: 200, body: dropBody() } })
     mount()
     await unseal()
 
-    const button = await screen.findByRole('button', { name: /open 2 NIM/i })
-    expect(button.textContent).toBe('Open 2 NIM')
+    const button = await screen.findByRole('button', { name: /claim 2 NIM/i })
+    expect(button.textContent).toBe('Claim 2 NIM')
     // The approval expectation lives under the button, not on it.
     expect(document.body.textContent ?? '').toMatch(/you approve one signature/i)
     // …and the button says nothing the 3.5rem amount above it already said.
@@ -239,7 +239,7 @@ describe('Drop — the drop card', () => {
     installFetch({ drop: { status: 200, body: dropBody() } })
     mount()
     await unseal()
-    await screen.findByRole('button', { name: /open 2 NIM/i })
+    await screen.findByRole('button', { name: /claim 2 NIM/i })
 
     expect(document.body.textContent ?? '').not.toMatch(/one[\s-]?tap/i)
     // Banned vocabulary: shares are fixed and equal, never a game of chance.
@@ -251,7 +251,7 @@ describe('Drop — the drop card', () => {
     mount()
     await unseal()
 
-    await screen.findByRole('button', { name: /open 2 NIM/i })
+    await screen.findByRole('button', { name: /claim 2 NIM/i })
     expect(screen.queryByTestId('status-pill')).toBe(null)
   })
 })
@@ -374,7 +374,7 @@ describe('Drop — the sponsor has not funded it yet', () => {
 
     await screen.findByTestId('awaiting-funding')
     // No reload and no interaction — the poll does it.
-    const button = await screen.findByRole('button', { name: /open 2 NIM/i })
+    const button = await screen.findByRole('button', { name: /claim 2 NIM/i })
     expect((button as HTMLButtonElement).disabled).toBe(false)
     expect(screen.queryByTestId('awaiting-funding')).toBe(null)
   })
@@ -449,7 +449,7 @@ describe('Drop — claiming', () => {
     // §4.3 final CTAs.
     const back = screen.getByRole('link', { name: /drop one back/i })
     expect(back.getAttribute('href')).toBe('/create?amount=2')
-    expect(screen.getByTestId('share-app')).toBeTruthy()
+    expect(screen.getByTestId('share-link')).toBeTruthy()
 
     const nextSteps = screen.getByTestId('post-claim-actions')
     expect(within(nextSteps).getByRole('link', { name: /spend NIM/i })).toBeTruthy()
@@ -459,13 +459,7 @@ describe('Drop — claiming', () => {
     expect(document.body.textContent ?? '').not.toMatch(/campaign/i)
   })
 
-  /**
-   * The share button used to hand a friend `/drop/{publicId}` — the very drop the
-   * claimant had just taken a share out of — under a label that read like a
-   * recommendation of the app. Recommending the product and passing on this
-   * drop are different acts, and the two adjacent buttons must not blur them.
-   */
-  it('shares the app, not the drop that now has one fewer share in it', async () => {
+  it('forwards a still-funded drop to the next wallet', async () => {
     seedResumableClaim()
     installFetch({
       drop: { status: 200, body: dropBody() },
@@ -477,20 +471,18 @@ describe('Drop — claiming', () => {
     mount()
 
     // A 44px circle on the rail: its name is the label, not its text.
-    const button = await screen.findByTestId('share-app')
-    expect(button.getAttribute('aria-label')).toBe('Share the app')
+    const button = await screen.findByTestId('share-link')
+    expect(button.getAttribute('aria-label')).toBe('Share this drop')
     fireEvent.click(button)
 
     expect(share).toHaveBeenCalledTimes(1)
     const payload = share.mock.calls[0]![0]
-    expect(payload.url).toBe(window.location.origin)
-    expect(payload.url).not.toContain(PUBLIC_ID)
-    expect(payload.url).not.toContain('/drop/')
-    // WhatsApp routinely drops `title`, so the description travels in `text`.
-    expect(payload.text).toMatch(/fixed share of NIM for everyone who opens it/i)
+    expect(payload.url).toBe(`${window.location.origin}/drop/${PUBLIC_ID}`)
+    expect(payload.text).toMatch(/fixed 2 NIM share is waiting/i)
+    expect(payload.text).toMatch(/one per wallet/i)
   })
 
-  it('falls back to copying the app link where the share sheet does not exist', async () => {
+  it('falls back to copying the canonical drop link where the share sheet does not exist', async () => {
     seedResumableClaim()
     installFetch({
       drop: { status: 200, body: dropBody() },
@@ -500,15 +492,33 @@ describe('Drop — claiming', () => {
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
     mount()
 
-    const button = await screen.findByTestId('share-app')
+    const button = await screen.findByTestId('share-link')
     await act(async () => {
       fireEvent.click(button)
     })
 
-    expect(writeText).toHaveBeenCalledWith(window.location.origin)
+    expect(writeText).toHaveBeenCalledWith(`${window.location.origin}/drop/${PUBLIC_ID}`)
     // Silence after a tap reads as a broken button. An icon button has no
     // label to change, so it reports into a live region instead.
-    await waitFor(() => expect(screen.getByText('Link copied')).toBeTruthy())
+    await waitFor(() => expect(screen.getByText('Drop link copied')).toBeTruthy())
+  })
+
+  it('shares the product instead of forwarding a closed drop', async () => {
+    seedResumableClaim()
+    installFetch({
+      drop: { status: 200, body: dropBody({ state: 'settled', remaining: 0 }) },
+      status: [{ status: 200, body: { state: 'paid', amountEach: '2', txHash: TX_HASH } }],
+    })
+    const share = vi.fn(async (_data: ShareData) => {})
+    Object.defineProperty(navigator, 'share', { value: share, configurable: true })
+    mount()
+
+    const button = await screen.findByTestId('share-link')
+    expect(button.getAttribute('aria-label')).toBe('Share NimDrops')
+    fireEvent.click(button)
+
+    expect(share).toHaveBeenCalledTimes(1)
+    expect(share.mock.calls[0]![0].url).toBe(window.location.origin)
   })
 
   it('recovers from a wallet rejection with a retry that returns to the claim button', async () => {
@@ -519,7 +529,7 @@ describe('Drop — claiming', () => {
     mount(bridgeOf(rejectingBridge()))
     await unseal()
 
-    const button = await screen.findByRole('button', { name: /open 2 NIM/i })
+    const button = await screen.findByRole('button', { name: /claim 2 NIM/i })
     await act(async () => {
       fireEvent.click(button)
     })
@@ -530,7 +540,7 @@ describe('Drop — claiming', () => {
       fireEvent.click(retry)
     })
 
-    await waitFor(() => expect(screen.getByRole('button', { name: /open 2 NIM/i })).toBeTruthy())
+    await waitFor(() => expect(screen.getByRole('button', { name: /claim 2 NIM/i })).toBeTruthy())
   })
 })
 
@@ -612,12 +622,12 @@ describe('Drop — states that are not a claim', () => {
     mount()
     await unseal()
 
-    const button = await screen.findByRole('button', { name: /open 2 NIM/i })
+    const button = await screen.findByRole('button', { name: /claim 2 NIM/i })
     await act(async () => {
       fireEvent.click(button)
     })
 
-    const still = await screen.findByRole('button', { name: /open 2 NIM/i })
+    const still = await screen.findByRole('button', { name: /claim 2 NIM/i })
     expect((still as HTMLButtonElement).disabled).toBe(true)
     expect(screen.getByTestId('degraded-banner').textContent).toMatch(/try again shortly|having trouble/i)
   })

@@ -17,7 +17,7 @@
  * ## Why the table passes `revealed`
  *
  * A claimant does not land on the claim surface. They land on a full-screen
- * sealed envelope and hold it. `revealed` is the dev and test seam that puts
+ * sealed envelope and tap it. `revealed` is the dev and test seam that puts
  * the surface on screen without driving the ritual nineteen times, and the
  * derivation it bypasses — `gateOpened` — is tested directly, on its own,
  * below. Production never passes it: `Drop.tsx` leaves it undefined, and that
@@ -95,7 +95,7 @@ describe('the sealed gate, in front of everything', () => {
     expect(screen.getByTestId('hold-open')).toBeTruthy()
     expect(screen.queryByTestId('amount-hero')).toBeNull()
     expect(screen.queryByTestId('claim-sheet')).toBeNull()
-    expect(screen.queryByRole('button', { name: /open 2 NIM/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /claim 2 NIM/i })).toBeNull()
   })
 
   /**
@@ -131,7 +131,7 @@ describe('the sealed gate, in front of everything', () => {
 
 /**
  * THE landmine, tested as a pure function so it cannot be got wrong by
- * accident. Too eager and a claimant is asked to hold an envelope over their
+ * accident. Too eager and a claimant sees an envelope over their
  * own receipt; too shy and the burst re-fires on every status poll tick.
  */
 describe('what counts as already opened', () => {
@@ -235,7 +235,7 @@ const STATES: {
     action: { role: 'button', name: /copy the link/i },
     tone: 'live',
   },
-  { state: 'ready', amount: true, action: { role: 'button', name: /open 2 NIM/i }, tone: 'live' },
+  { state: 'ready', amount: true, action: { role: 'button', name: /claim 2 NIM/i }, tone: 'live' },
   { state: 'signing', amount: true, action: null, tone: 'live' },
   {
     state: 'no-wallet',
@@ -323,8 +323,8 @@ describe('the money never depends on the visual layer', () => {
     'keeps a labelled claim button on %s',
     (state) => {
       view(state)
-      const button = screen.getByRole('button', { name: /open 2 NIM/i })
-      expect(button.textContent).toBe('Open 2 NIM')
+      const button = screen.getByRole('button', { name: /claim 2 NIM/i })
+      expect(button.textContent).toBe('Claim 2 NIM')
       expect((button as HTMLButtonElement).disabled).toBe(state !== 'ready')
     },
   )
@@ -392,7 +392,7 @@ describe('the printed amount', () => {
     expect(screen.getByTestId('amount-hero').textContent).toMatch(/2\s*NIM/)
     expect(screen.getByTestId('remaining').textContent).toMatch(/3.*5/)
     const hero = screen.getByTestId('amount-hero')
-    const claim = screen.getByRole('button', { name: /open 2 NIM/i })
+    const claim = screen.getByRole('button', { name: /claim 2 NIM/i })
     expect(hero.compareDocumentPosition(claim) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
@@ -607,7 +607,7 @@ describe('the trivia slot', () => {
           ))}
         </div>
         <button type="button" className="nd-action mt-5">
-          Open 2 NIM
+          Claim 2 NIM
         </button>
       </GlassSheet>,
     )

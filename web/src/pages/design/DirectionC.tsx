@@ -254,7 +254,7 @@ function Landing() {
             </div>
             <p className={`${P}-sheetcount`}>3 of 5 shares left, goes back in 3h 20m</p>
             <button type="button" className={`${P}-primary`}>
-              Open 2 NIM
+              Claim 2 NIM
             </button>
           </div>
         </div>
