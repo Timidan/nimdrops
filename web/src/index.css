@@ -1711,6 +1711,17 @@ body {
   text-wrap: pretty;
 }
 
+/**
+ * The create flow's headings run longer than the claim surface's four outcome
+ * titles, because they name a refusal AND its subject: "That total is over the
+ * operator's limit", not "You just missed it". At the shared 18ch measure that
+ * one breaks into four lines with a single word on the last, so this side gets
+ * four more characters. The claim surface keeps its own measure.
+ */
+.nd-stack .nd-headline {
+  max-width: 22ch;
+}
+
 /* The sheet's own title. The money is the `h1` on every screen in this product,
    so this is the second heading and is sized like one. */
 .nd-sheeth {
