@@ -80,9 +80,9 @@
  */
 
 import { createHash } from 'node:crypto'
-import { existsSync, statSync } from 'node:fs'
+import { existsSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
-import { dirname, isAbsolute, relative, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { type Bank, type Question, type Tier, parseBank } from '../src/gates/trivia/bank'
 import { exitAfterTeardown } from '../src/exit'
@@ -367,6 +367,30 @@ function resolveOutPath(raw: string): string {
   const parent = dirname(out)
   if (!existsSync(parent) || !statSync(parent).isDirectory()) {
     fail(`--out ${out}: the directory ${parent} does not exist. Create it first.`)
+  }
+  // Writability is checked HERE, before a single request goes out.
+  //
+  // Their API allows one request every five seconds, so a full run is minutes
+  // long — and this script discovered a read-only mount at the very end, after
+  // fetching and validating 1200 questions, and threw all of it away on an
+  // EACCES. The permission was knowable before any of that work started.
+  //
+  // A real open-and-unlink rather than an `access()` check: the failure that
+  // actually happened was a bind mount owned by another uid, and only trying it
+  // gives the same answer the final write will give.
+  const probe = join(parent, `.nimdrops-write-probe-${process.pid}`)
+  try {
+    writeFileSync(probe, '')
+    unlinkSync(probe)
+  } catch (err) {
+    fail(
+      `--out ${out}: cannot write to ${parent} (${(err as NodeJS.ErrnoException).code}).\n\n` +
+        '  Checked before fetching, because a full run takes minutes against a rate-limited ' +
+        'API and finding this out at the end wastes all of it.\n\n' +
+        `  In Docker this usually means the directory is owned by another uid, or the mount is ` +
+        'read-only. The server image runs as uid 1000, so `chown 1000:1000 ' +
+        `${parent}\` on the host is the usual fix.`,
+    )
   }
   return out
 }
