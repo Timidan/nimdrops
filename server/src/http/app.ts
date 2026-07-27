@@ -179,6 +179,12 @@ const CLAIM_MESSAGES: Record<ClaimRejectionCode, string> = {
   drop_not_live: 'this drop is not accepting claims',
   drop_expired: 'this drop has expired',
   exhausted: 'every share in this drop has been claimed',
+  // NOT "you failed" and not "you are not eligible". The overwhelmingly common
+  // case is a stranger who was sent the claim link directly and has never seen
+  // the condition at all, so this says what to do rather than what went wrong.
+  // It also avoids naming the condition: this layer does not know which kind the
+  // drop carries, and guessing would eventually be wrong.
+  gate_required: 'this drop asks you to do something first — open it to see what',
 }
 
 const FUNDING_MESSAGES: Record<FundingRejectionCode, string> = {

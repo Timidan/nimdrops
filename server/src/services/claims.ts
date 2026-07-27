@@ -77,6 +77,13 @@ export type ClaimRejectionCode =
   | 'drop_not_live'
   | 'drop_expired'
   | 'exhausted'
+  /**
+   * This drop carries a condition and this wallet has not satisfied it.
+   *
+   * Deliberately kind-agnostic: this module does not know whether the condition
+   * was a quiz, a passphrase or a third party's signature, and must not learn.
+   */
+  | 'gate_required'
 
 /**
  * An operator-facing finding attached to a refusal that the claimant must not
@@ -475,6 +482,53 @@ export async function reserveClaim(pool: Pool, o: ReserveClaimInput): Promise<Cl
       throw new ClaimRejectedError('message_mismatch', 'challenge message changed')
     }
 
+    // 4b. The gate, if this drop carries one. An ungated drop finds no row and
+    //     proceeds exactly as it always has.
+    //
+    //     KIND-AGNOSTIC BY DESIGN. This asks one question — does this wallet
+    //     hold an unconsumed grant for this drop — and imports nothing from
+    //     `src/gates/`. That is what keeps the question bank, the selection salt
+    //     and the attester keys out of the money path, and it is why adding a
+    //     fourth kind of condition will not touch this file. There is a grep in
+    //     the plan's verification list that fails if this module ever imports a
+    //     kind.
+    //
+    //     IT HAS TO BE HERE, for two independent reasons. `issueChallenge` takes
+    //     only a public id, so it cannot bind a grant to a wallet even in
+    //     principle — challenge-time gating is a UX courtesy with no security
+    //     weight. And the grant must be consumed in the SAME transaction that
+    //     inserts the claim, or two concurrent claims could each see it
+    //     unconsumed and both reserve a slot against one satisfied condition.
+    //
+    //     `recipient` is DERIVED from the verified public key (see step 3), never
+    //     nominated by a request body. That is the whole reason a condition may
+    //     be attempted with no wallet signature at all: a grant issued under
+    //     someone else's address is worthless to whoever issued it, because the
+    //     comparison below is against a key the claimant proved they hold.
+    //
+    //     Lock order is custody_controls -> drops -> gate_grants. This is the
+    //     last lock taken and nothing else in the system locks it earlier.
+    const { rows: gate } = await client.query<{ drop_id: string }>(
+      'SELECT drop_id FROM drop_gates WHERE drop_id = $1',
+      [drop.id],
+    )
+    let grantId: string | null = null
+    if (gate.length > 0) {
+      const { rows: held } = await client.query<{ id: string }>(
+        `SELECT id FROM gate_grants
+         WHERE drop_id = $1 AND wallet_address = $2 AND consumed_claim_id IS NULL
+         FOR UPDATE`,
+        [drop.id, recipient],
+      )
+      if (!held[0]) {
+        throw new ClaimRejectedError(
+          'gate_required',
+          'this drop requires its condition to be satisfied by this wallet first',
+        )
+      }
+      grantId = held[0].id
+    }
+
     // 5. Reserve the next slot; the last one closes the drop in this same
     //    transaction, so no later claimer can ever see capacity again.
     const { rows: counted } = await client.query<{ reserved: number }>(
@@ -516,6 +570,16 @@ export async function reserveClaim(pool: Pool, o: ReserveClaimInput): Promise<Cl
        ) VALUES ($1, 'payout', $2, $3, $4, $5, 'queued')`,
       [`payout:${claimId}`, drop.id, claimId, recipient, locked.amount_each_luna],
     )
+    // The grant is spent HERE, in the transaction that created the claim it paid
+    // for. A rollback un-spends it, so a claim refused after this point — by the
+    // limiter hook, by a constraint — leaves the claimant free to try again. A
+    // commit binds the two together, so it can never fund a second slot.
+    if (grantId !== null) {
+      await client.query('UPDATE gate_grants SET consumed_claim_id = $2 WHERE id = $1', [
+        grantId,
+        claimId,
+      ])
+    }
     await bindIdem(client, {
       scope,
       keyHash,
