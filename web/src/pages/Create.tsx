@@ -762,14 +762,14 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
             <ShareRules />
 
             {custody ? (
-              <p data-testid="custody-summary" className="nd-lede mt-6">
+              <p data-testid="custody-summary" className="nd-lede">
                 {custody.summary}
               </p>
             ) : null}
             <button type="button" onClick={() => void fund()} className="nd-action mt-4">
               Fund drop
             </button>
-            <p className="nd-note mt-3 text-center">
+            <p className="nd-note text-center">
               Nimiq Pay opens next — tap and approve one transaction.
             </p>
           </Sheet>
@@ -860,7 +860,7 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
         >
           Review drop
         </button>
-        <p className="nd-note mt-2.5 text-center">
+        <p className="nd-note text-center">
           Nothing is sent until you approve it in Nimiq Pay.
         </p>
       </GlassSheet>
@@ -1205,7 +1205,7 @@ function ReservationNote({
       : `Your room is held for another ${minutesLeft} minutes.`
 
   return (
-    <p data-testid="reservation-note" role="status" className="nd-note mt-4">
+    <p data-testid="reservation-note" role="status" className="nd-note is-hold">
       {text}
     </p>
   )
@@ -1439,10 +1439,10 @@ function Progress({
                 </li>
               ))}
             </ol>
-            <p data-testid="pending-share-note" className="nd-note mt-4">
+            <p data-testid="pending-share-note" className="nd-note">
               {PENDING_SHARE_NOTE}
             </p>
-            <p className="nd-note mt-2">{PENDING_LEAVE_NOTE}</p>
+            <p className="nd-note">{PENDING_LEAVE_NOTE}</p>
           </>
         ) : null}
 
@@ -1631,11 +1631,11 @@ function Live({
           </div>
         </div>
 
-        <p className="nd-note mt-5">
+        <p className="nd-note">
           Unclaimed shares are refunded to the wallet that funded this drop, 24 hours after it went
           live.
         </p>
-        <p className="nd-note mt-2">Reopen NimDrops on this device to come back to this link.</p>
+        <p className="nd-note">Reopen NimDrops on this device to come back to this link.</p>
 
         <button
           type="button"

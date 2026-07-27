@@ -2121,6 +2121,39 @@ body {
   color: var(--color-chalk-ink);
 }
 
+/* ---- spacing between a note and what it follows --------------------------
+ *
+ * Tailwind emits `mt-*` into a LAYER and this file is unlayered, so an
+ * unlayered `.nd-note { margin: 0 }` beats a `mt-4` on the same element and the
+ * utility is silently dropped. Measured, not assumed: `.nd-note.mt-2\.5`
+ * computes to `margin-top: 0px` in Chrome.
+ *
+ * So the spacing lives here, as a relationship rather than as a utility: a note
+ * that follows something is spaced from it, two notes in a row sit closer, and
+ * the hold's countdown gets its own air because it is a different subject from
+ * whatever it follows. Nothing on these surfaces can lose its margin to a
+ * cascade nobody looked at.
+ */
+.nd-stack .nd-note + .nd-note,
+.nd-sheet .nd-note + .nd-note {
+  margin-top: 0.5rem;
+}
+
+.nd-stack :not(.nd-note) + .nd-note,
+.nd-sheet :not(.nd-note) + .nd-note {
+  margin-top: 0.875rem;
+}
+
+.nd-stack .nd-note.is-hold,
+.nd-sheet .nd-note.is-hold {
+  margin-top: 1.25rem;
+}
+
+/* The server's own summary, immediately above the fund button. */
+.nd-sheet .nd-lede {
+  margin-top: 1.5rem;
+}
+
 /* ---- the reward for funding ---------------------------------------------- */
 
 /**
