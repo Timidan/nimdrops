@@ -23,7 +23,8 @@ describe('PostClaimActions', () => {
     }
 
     const text = panel.textContent ?? ''
-    expect(text).toMatch(/already in Nimiq Pay/i)
+    expect(text).toMatch(/wallet scanner/i)
+    expect(text).toMatch(/supported Bitcoin Lightning/i)
     expect(text).toMatch(/availability, minimums, fees, and identity checks vary/i)
     expect(text).not.toMatch(/instant|one.?tap|receive USD/i)
   })

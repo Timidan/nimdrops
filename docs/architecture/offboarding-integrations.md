@@ -12,6 +12,7 @@ The competition build has three external handoffs:
 | Need | Destination | What NimDrops sends |
 |---|---|---|
 | Open/install the wallet | Nimiq Pay deep link, App Store, Google Play | The current public HTTPS page only |
+| Pay from the wallet | Nimiq Pay scanner, including supported Bitcoin Lightning payments | Nothing; the claimant uses their settled wallet balance |
 | Spend NIM | Nimiq Crypto Map | Nothing; a plain link with no query or referrer |
 | Explore selling NIM | Nimiq's official buy-and-sell directory | Nothing; a plain link with no amount, address, drop ID, or referrer |
 

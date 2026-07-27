@@ -13,8 +13,8 @@ export default function PostClaimActions() {
         Your NIM is ready to use
       </h2>
       <p className="nd-note mt-2 text-center">
-        It is already in Nimiq Pay. Keep it there, send it from your wallet, or choose one of these
-        independent next steps.
+        Keep it there, send NIM, or return to the wallet scanner to pay a NIM or supported Bitcoin
+        Lightning request. You can also choose an independent next step below.
       </p>
       <div className="mt-4 grid gap-2">
         <a className="nd-quiet" href={NIMIQ_ECOSYSTEM_LINKS.spend.href} {...EXTERNAL_LINK_PROPS}>
