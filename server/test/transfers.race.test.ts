@@ -19,7 +19,6 @@ import {
   reconcile,
 } from '../src/services/solvency'
 import {
-  CLAIM_MEMO,
   WORKER_LOCK_ID,
   acquireWorkerLock,
   PROVEN_DEAD_RESCAN_GRACE_BLOCKS,
@@ -30,6 +29,7 @@ import {
   reconcileOnStartup,
   releaseWorkerLock,
   runWorkerTick,
+  transferMemo,
   withWorkerLock,
 } from '../src/services/transfers'
 import {
@@ -451,13 +451,14 @@ describe.skipIf(!hasDb)('transfer worker crash windows (real Postgres)', () => {
   })
 
   it('signs the payout with the NimDrop memo, inside the 64-byte limit', async () => {
-    expect(Buffer.byteLength(CLAIM_MEMO, 'utf8')).toBeLessThanOrEqual(MEMO_MAX_BYTES)
-
     const payout = await queuedPayout()
     await runWorkerTick(pool, chain, alerts)
 
     const [tx] = custodyPayments()
-    expect(tx.dataUtf8).toBe(CLAIM_MEMO)
+    expect(Buffer.byteLength(transferMemo(payout.transferId), 'utf8')).toBeLessThanOrEqual(
+      MEMO_MAX_BYTES,
+    )
+    expect(tx.dataUtf8).toBe(transferMemo(payout.transferId))
     expect(tx.recipient).toBe(payout.recipient)
     expect(tx.valueLuna).toBe(AMOUNT_EACH)
   })

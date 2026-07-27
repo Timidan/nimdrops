@@ -60,11 +60,12 @@ import {
  */
 export const WORKER_LOCK_ID = 42
 
-/** Claim payout memo, per Global Constraints. 12 UTF-8 bytes (measured G0). */
-export const CLAIM_MEMO = '🧧 NimDrop'
-
-if (Buffer.byteLength(CLAIM_MEMO, 'utf8') > MEMO_MAX_BYTES) {
-  throw new Error(`claim memo exceeds ${MEMO_MAX_BYTES} UTF-8 bytes`)
+export function transferMemo(transferId: string): string {
+  const memo = `NimDrop ${transferId}`
+  if (Buffer.byteLength(memo, 'utf8') > MEMO_MAX_BYTES) {
+    throw new Error(`transfer memo exceeds ${MEMO_MAX_BYTES} UTF-8 bytes`)
+  }
+  return memo
 }
 
 /**
@@ -577,7 +578,7 @@ export async function buildAttempt(
   return chain.buildSignedBasic({
     to: intent.recipientAddress,
     valueLuna: intent.amountLuna,
-    dataUtf8: CLAIM_MEMO,
+    dataUtf8: transferMemo(intent.id),
     validityStartHeight,
   })
 }
