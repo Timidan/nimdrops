@@ -1,4 +1,6 @@
 import type { ClaimUiState } from '../state/claim'
+import { ClockExpiryIcon, InfoIcon, SuccessCheckIcon, WarningIcon } from './icons'
+import type { IconComponent } from './icons'
 
 /**
  * The one-word answer to "where is my claim right now".
@@ -8,6 +10,11 @@ import type { ClaimUiState } from '../state/claim'
  * finality) and anything implying chance. `sending` and `manual_review` reach
  * this component already folded into `confirming` by `useClaim`, so there is no
  * label here that could imply a payout landed before it did.
+ *
+ * Colour is never the only carrier. Every pill has a word, and every pill has
+ * a mark: a clock while something is in flight, a tick once it is final, a
+ * warning triangle on the states that need attention, and an information dot
+ * on the ones that are simply waiting. Assume the tones are indistinguishable.
  */
 const LABELS: Record<ClaimUiState, string> = {
   loading: 'Opening',
@@ -25,23 +32,41 @@ const LABELS: Record<ClaimUiState, string> = {
   paused: 'Paused',
 }
 
-/** Gold = something is happening; ink = a settled fact; muted = a dead end. */
-const TONES: Record<ClaimUiState, string> = {
-  loading: 'bg-ink/8 text-ink/55',
-  // Muted, not gold: nothing is happening yet. It is also not a dead end, so
+/** Gold = something is happening; solid = a settled fact; quiet = a dead end. */
+type Tone = 'live' | 'settled' | 'quiet'
+
+const TONES: Record<ClaimUiState, Tone> = {
+  loading: 'quiet',
+  // Quiet, not gold: nothing is happening yet. It is also not a dead end, so
   // the copy under it — not the pill — carries the "this can still go live".
-  'awaiting-funding': 'bg-ink/8 text-ink/55',
-  'no-wallet': 'bg-ink/8 text-ink/55',
-  ready: 'bg-gold/18 text-gold-deep',
-  signing: 'bg-gold/18 text-gold-deep',
-  reserved: 'bg-gold/18 text-gold-deep',
-  confirming: 'bg-gold/18 text-gold-deep',
-  paid: 'bg-ink text-paper',
-  rejected: 'bg-ink/8 text-ink/55',
-  exhausted: 'bg-ink/8 text-ink/55',
-  expired: 'bg-ink/8 text-ink/55',
-  degraded: 'bg-ink/8 text-ink/55',
-  paused: 'bg-ink/8 text-ink/55',
+  'awaiting-funding': 'quiet',
+  'no-wallet': 'quiet',
+  ready: 'live',
+  signing: 'live',
+  reserved: 'live',
+  confirming: 'live',
+  paid: 'settled',
+  rejected: 'quiet',
+  exhausted: 'quiet',
+  expired: 'quiet',
+  degraded: 'quiet',
+  paused: 'quiet',
+}
+
+const MARKS: Record<ClaimUiState, IconComponent> = {
+  loading: InfoIcon,
+  'awaiting-funding': InfoIcon,
+  'no-wallet': InfoIcon,
+  ready: SuccessCheckIcon,
+  signing: ClockExpiryIcon,
+  reserved: ClockExpiryIcon,
+  confirming: ClockExpiryIcon,
+  paid: SuccessCheckIcon,
+  rejected: WarningIcon,
+  exhausted: InfoIcon,
+  expired: ClockExpiryIcon,
+  degraded: WarningIcon,
+  paused: WarningIcon,
 }
 
 export interface StatusPillProps {
@@ -49,11 +74,10 @@ export interface StatusPillProps {
 }
 
 export default function StatusPill({ state }: StatusPillProps) {
+  const Mark = MARKS[state]
   return (
-    <span
-      data-testid="status-pill"
-      className={`inline-flex items-center rounded-full px-2.5 py-1 text-[0.6875rem] font-semibold tracking-wide ${TONES[state]}`}
-    >
+    <span data-testid="status-pill" className="nd-pill" data-tone={TONES[state]}>
+      <Mark size={13} />
       {LABELS[state]}
     </span>
   )

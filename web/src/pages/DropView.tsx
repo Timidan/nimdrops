@@ -1,10 +1,18 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import type { ClaimServerState, DropPublic } from '../api'
 import { nimiqPayDeeplink } from '../sdk/adapter'
 import type { ClaimUiState } from '../state/claim'
-import Envelope, { EnvelopeAmount } from '../ui/Envelope'
-import Screen from '../ui/Screen'
+import Field, { Ripple, RIPPLE_MS } from '../ui/Field'
+import GlassSheet from '../ui/GlassSheet'
+import {
+  ClockExpiryIcon,
+  CustodyShieldIcon,
+  InfoIcon,
+  QrCodeIcon,
+  WarningIcon,
+  type IconComponent,
+} from '../ui/icons'
 import Sheet from '../ui/Sheet'
 import StatusPill from '../ui/StatusPill'
 import Receipt from './Receipt'
@@ -12,16 +20,38 @@ import Receipt from './Receipt'
 /**
  * Everything the drop page looks like, with none of what it knows.
  *
- * `Drop` owns the claim machine; this owns the envelope. Splitting them is what
+ * `Drop` owns the claim machine; this owns the surface. Splitting them is what
  * lets `/preview` render all thirteen states at once from fixtures, and it is
- * also what keeps the envelope MOUNTED across a state change — the seal can
- * only be seen to break if the same DOM node was sealed a moment ago.
+ * also what keeps the field MOUNTED across a state change — the ring can only
+ * be seen to leave if the same DOM node was sealed a moment ago.
+ *
+ * ## The composition
+ *
+ * A `Field` with a single `GlassSheet` on it. The sheet holds the transaction:
+ * who sent this, their words, the amount on its opaque plate, one caption, one
+ * action. The drop's live facts and the custody disclosure sit on the field
+ * itself, in the two poster slots, which is what makes the desktop layout a
+ * composition rather than a 430px column with dead space around it.
+ *
+ * ## Two rules this file exists to keep
+ *
+ * **The money never depends on the visual layer.** Nothing here starts hidden.
+ * There is no reveal that content waits behind, no `opacity: 0` that a class
+ * has to clear, and the one animation that does exist — the ring — is an
+ * `aria-hidden` decoration that is not rendered at all under reduced motion.
+ * With CSS animation switched off entirely, every one of the thirteen states
+ * renders complete. `DropView.test.tsx` proves it against all thirteen.
+ *
+ * **The amount is never hidden.** Someone deciding whether to open a wallet has
+ * to see what they are being offered, before they are asked for anything.
+ * Concealing the number until after the claim would reintroduce exactly the
+ * lottery framing this product removed.
  */
 
-/** The seal is broken on exactly these. */
+/** The ring has left and the field keeps the warmer cast on exactly these. */
 const OPENED: readonly ClaimUiState[] = ['reserved', 'confirming', 'paid']
 
-/** Dead ends: no amount to offer, no action to take, grey wax. */
+/** Dead ends: no amount to offer, no action to take, no warmth. */
 const OUTCOMES: readonly ClaimUiState[] = ['paused', 'expired', 'exhausted', 'rejected']
 
 export interface DropViewProps {
@@ -49,16 +79,18 @@ export default function DropView({
 }: DropViewProps) {
   const sponsor = drop?.sponsorLabel ?? ''
   const amount = amountEach ?? ''
-  const mark = sponsor.trim().slice(0, 1).toUpperCase()
   const outcome = OUTCOMES.includes(state)
+  const opened = OPENED.includes(state)
+  const unfunded = state === 'awaiting-funding'
 
   return (
-    <Screen>
-      <Envelope
-        open={OPENED.includes(state)}
-        tone={outcome ? 'quiet' : 'live'}
-        {...(mark ? { sealMark: mark } : {})}
-      >
+    <Field
+      tone={outcome ? 'quiet' : opened ? 'warm' : 'live'}
+      {...(drop && !outcome ? { topRight: <Facts drop={drop} /> } : {})}
+      {...(unfunded ? {} : { bottomLeft: <CustodyDisclosure /> })}
+    >
+      <Reveal opened={opened} />
+      <GlassSheet testId="claim-sheet">
         {outcome ? (
           <Outcome state={state} amount={amount} notice={notice} onRetry={onRetry} />
         ) : state === 'loading' && !drop ? (
@@ -75,12 +107,36 @@ export default function DropView({
             onClaim={onClaim}
           />
         )}
-      </Envelope>
-    </Screen>
+      </GlassSheet>
+    </Field>
   )
 }
 
-// ---- the sealed / opening / opened face ------------------------------------------
+/**
+ * The ring, and only when the surface was sealed a moment ago.
+ *
+ * Landing straight on an opened claim — a reload that resumes one already in
+ * flight — has nothing to break, so it gets the opened state with no theatre.
+ * A status poll ticking `reserved → confirming → paid` must not re-fire it
+ * either: this is an event, not a loop.
+ */
+function Reveal({ opened }: { opened: boolean }) {
+  const mountedOpen = useRef(opened)
+  const fired = useRef(false)
+  const [ringing, setRinging] = useState(false)
+
+  useEffect(() => {
+    if (!opened || fired.current || mountedOpen.current) return
+    fired.current = true
+    setRinging(true)
+    const timer = setTimeout(() => setRinging(false), RIPPLE_MS)
+    return () => clearTimeout(timer)
+  }, [opened])
+
+  return ringing ? <Ripple /> : null
+}
+
+// ---- the sheet's face ---------------------------------------------------------------
 
 interface FaceProps {
   publicId: string
@@ -93,16 +149,7 @@ interface FaceProps {
   onClaim: () => void
 }
 
-function Face({
-  publicId,
-  state,
-  drop,
-  serverState,
-  txHash,
-  amount,
-  sponsor,
-  onClaim,
-}: FaceProps) {
+function Face({ publicId, state, drop, serverState, txHash, amount, sponsor, onClaim }: FaceProps) {
   const paid = state === 'paid'
   const inFlight = state === 'reserved' || state === 'confirming'
   const review = inFlight && serverState === 'manual_review'
@@ -120,104 +167,82 @@ function Face({
   const fundingConfirming = state === 'loading' && drop?.state === 'funding_pending'
 
   return (
-    <div className="flex flex-1 flex-col pb-12">
+    <>
       {/**
        * The order a stranger needs, and nothing else above the fold: who sent
        * this, their own words, how much, what it is in one clause, one action.
-       *
-       * The sponsor's message used to sit sixth, below the share count and the
-       * countdown, which put the mechanics of the gift ahead of the greeting.
        */}
       {sponsor ? (
-        <div className="flex flex-wrap items-baseline justify-center gap-x-2 gap-y-1">
+        <p className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-[0.9375rem] leading-relaxed">
           {/* Claimant-facing, sponsor-supplied text, and labelled as such. */}
-          <p className="line-clamp-3 max-w-full text-center text-sm leading-relaxed text-ink/65 [overflow-wrap:anywhere]">
-            <span className="font-semibold text-ink/85">{sponsor}</span> sent you a NimDrop
-          </p>
-          <span className="shrink-0 rounded-full border border-ink/15 px-2 py-0.5 text-[0.6875rem] font-medium text-ink/45">
+          <span className="line-clamp-3 [overflow-wrap:anywhere]">
+            <span className="font-semibold">{sponsor}</span>
+            <span className="text-plate/76"> sent you a NimDrop</span>
+          </span>
+          <span className="shrink-0 rounded-full border border-plate/30 px-2 py-0.5 text-xs font-medium text-plate/76">
             name unverified
           </span>
-        </div>
+        </p>
       ) : null}
 
       {drop?.message && !paid ? (
-        <p className="mt-5 border-l-2 border-gold/45 pl-4 text-sm leading-relaxed text-ink/70 [overflow-wrap:anywhere]">
+        <p className="mt-4 border-l border-gold pl-4 text-[1.25rem] leading-snug text-pretty -tracking-[0.01em] [overflow-wrap:anywhere]">
           {drop.message}
         </p>
       ) : null}
 
-      <EnvelopeAmount amount={amount} paid={paid} />
+      <AmountPlate amount={amount} paid={paid} inFlight={inFlight} />
 
-      {/* One caption slot, one sentence per state. Nothing stacks up here. */}
-      {inFlight ? (
-        <p className="mt-4 text-center text-[0.9375rem] leading-relaxed font-medium text-ink/75">
-          {amount} NIM is on its way.
-        </p>
-      ) : paid ? null : (
-        <p className="mt-3 text-center text-xs leading-relaxed text-ink/50">
-          A fixed share of NIM — the same amount for everyone who opens this link.
+      {/* One caption slot, one sentence per state. Nothing stacks up here, and
+          this is the slot the trivia gate takes: see `GlassSheet`. */}
+      {paid ? null : (
+        <p className="nd-caption nd-note">
+          {inFlight
+            ? `${amount} NIM is on its way.`
+            : 'A fixed share of NIM. The same amount for everyone who opens this link.'}
         </p>
       )}
 
-      {!paid && (drop || state === 'no-wallet') ? (
-        <div className="mt-4 flex flex-wrap items-center justify-center gap-x-2.5 gap-y-1 text-xs text-ink/55">
-          {drop ? (
-            <span data-testid="remaining" className="tabular-nums">
-              {drop.remaining} of {drop.claimCount} shares left
-            </span>
-          ) : null}
-          {drop?.expiresAt ? (
-            <span aria-hidden="true" className="text-ink/25">
-              ·
-            </span>
-          ) : null}
-          <Countdown expiresAt={drop?.expiresAt ?? null} />
-        </div>
-      ) : null}
-
       {paid ? (
-        <div className="nd-rise mt-8">
-          <Receipt publicId={publicId} amountEach={amount} txHash={txHash} sponsorLabel={sponsor} />
-          <ShareButton className="nd-secondary mt-3 w-full" />
-          <p className="mt-6 text-center text-xs leading-relaxed text-ink/45">
-            One share per wallet. NimDrops held this NIM until you claimed it; the transaction above
-            is the whole story.
+        <div className="nd-rise mt-6">
+          <Receipt publicId={publicId} txHash={txHash} sponsorLabel={sponsor} />
+          <Link
+            to={`/create?amount=${encodeURIComponent(amount)}`}
+            className="nd-action mt-5"
+          >
+            Drop one back
+          </Link>
+          <ShareButton className="nd-quiet mt-2" />
+          <p className="nd-note mt-5 text-center">
+            One share per wallet. The transaction above is the whole story.
           </p>
         </div>
       ) : inFlight ? (
-        <div className="mt-7">
+        <div className="mt-6">
           <div className="flex justify-center">
             <StatusPill state={state} />
           </div>
-          <p className="mt-4 text-sm leading-relaxed text-ink/60">
-            Your share is reserved. NimDrops is sending it to the wallet that signed, and this screen
-            updates itself — you can close this and come back to it.
+          <p className="nd-note mt-4">
+            Sending to the wallet that signed. This screen updates itself, so you can close it.
           </p>
           {review ? (
-            <p
-              data-testid="manual-review"
-              className="mt-5 rounded-2xl bg-ink/5 p-4 text-sm leading-relaxed text-ink/70"
-            >
-              This one is being reviewed by a person before it goes out. Your NIM is safe and your
-              share stays reserved while that happens.
-            </p>
-          ) : (
-            <p className="mt-4 text-xs leading-relaxed text-ink/45">
-              A transaction has to be signed and confirmed by the network before it counts as sent,
-              so this can take a moment.
-            </p>
-          )}
+            <div data-testid="manual-review" className="nd-panel mt-4">
+              <p className="nd-note">
+                A person is reviewing this one before it goes out. Your NIM is safe and your share
+                stays reserved.
+              </p>
+            </div>
+          ) : null}
         </div>
       ) : (
         <>
           {state === 'degraded' ? (
-            <p
-              data-testid="degraded-banner"
-              className="mt-6 rounded-2xl border border-gold/40 bg-gold/10 p-4 text-sm leading-relaxed text-ink/75"
-            >
-              NimDrops is having trouble reaching the network. Your share is not gone — try again
-              shortly.
-            </p>
+            <div data-testid="degraded-banner" className="nd-panel nd-panel--warn mt-5">
+              <p className="text-[0.9375rem] leading-relaxed text-pretty">
+                NimDrops is having trouble reaching the network. Your share is not gone, so try
+                again shortly.
+              </p>
+            </div>
           ) : null}
 
           {state === 'no-wallet' ? (
@@ -225,7 +250,7 @@ function Face({
           ) : unfunded || fundingConfirming ? (
             <Funding confirming={fundingConfirming} />
           ) : (
-            <div className="mt-7">
+            <div className="mt-6">
               {/* No pill on `ready`: "Live" would be the third statement of a
                   fact the button and the share count have already made. The
                   pill stays for the states nobody can infer. */}
@@ -245,36 +270,118 @@ function Face({
                 type="button"
                 disabled={state !== 'ready'}
                 onClick={onClaim}
-                className="nd-primary w-full"
+                className="nd-action"
               >
-                Open — {amount} NIM
+                Open {amount} NIM
               </button>
-              <p className="mt-3 text-center text-xs leading-relaxed text-ink/50">
+              <p className="nd-note mt-3 text-center">
                 {state === 'signing'
-                  ? 'Nimiq Pay is open. Approve the signature request there to reserve your share.'
-                  : 'Nimiq Pay opens next. You approve one signature — no amount to type, no fee to pay.'}
+                  ? 'Nimiq Pay is open. Approve there to reserve your share.'
+                  : 'Nimiq Pay opens next. You approve one signature, with no fee to pay.'}
               </p>
             </div>
           )}
-
-          {/* Not shown while unfunded: NimDrops is holding nothing yet, and a
-              disclosure that says otherwise would be the one invented fact on
-              an otherwise honest screen. */}
-          {unfunded ? null : <CustodyDisclosure />}
         </>
       )}
+    </>
+  )
+}
+
+// ---- the money ------------------------------------------------------------------------
+
+/**
+ * The denomination on its opaque plate.
+ *
+ * The only fully opaque element on the screen is the money, and that is the
+ * hierarchy statement of the whole direction. It is also the physical form of
+ * the rule that matters most: the number a stranger is deciding about cannot
+ * depend on what happens to be behind it, or on an animation having fired.
+ *
+ * The size steps down by character count rather than by media query, because
+ * what overflows a 320px phone is `10000.00000`, not a narrow screen. If a
+ * step-down still does not fit, `.nd-amount`'s `flex-wrap` drops the unit onto
+ * its own centred line. The number itself never wraps and is never truncated.
+ */
+function AmountPlate({
+  amount,
+  paid,
+  inFlight,
+}: {
+  amount: string
+  paid: boolean
+  inFlight: boolean
+}) {
+  const size = amount.length <= 6 ? 'lg' : amount.length <= 9 ? 'md' : 'sm'
+
+  return (
+    <div className="nd-plate">
+      <h1
+        data-testid="amount-hero"
+        aria-label={`${amount} NIM`}
+        className="nd-amount"
+        data-size={size}
+      >
+        <span>{amount}</span>
+        <span className="nd-unit" aria-hidden="true">
+          NIM
+        </span>
+      </h1>
+      {paid ? <div data-testid="paid-keyline" className="nd-keyline" /> : null}
+      {/* Only once the number has a destination. Before that the caption
+          under the plate already says what the number is, and printing the
+          same fact twice at two sizes reads as two different facts. */}
+      {paid || inFlight ? (
+        <p className="nd-plate-note">
+          {paid ? 'Sent to the wallet that signed.' : 'Reserved for the wallet that signed.'}
+        </p>
+      ) : null}
     </div>
   )
 }
 
-// ---- the custody disclosure ----------------------------------------------------------
+// ---- the field's furniture ----------------------------------------------------------
 
 /**
- * The claimant is the person being asked to trust a custodian, and until now
- * they got two grey lines of footer while the sponsor got the whole disclosure
- * before funding. Ugly Cash's move is the one worth copying: take the least
- * reassuring fact about the product, make it the headline of a tappable card,
- * and put the rest one tap away.
+ * The drop's live state, on the field rather than in the sheet.
+ *
+ * This is the whole reason the sheet is translucent: what is behind it is
+ * changing while you read it. Under the sheet on a phone, top right on a
+ * poster. One element, moved by a container query, so the count can never be
+ * on screen twice.
+ *
+ * The marks cap at twelve. A hundred-share drop is a legitimate configuration
+ * and a hundred tally marks is a texture, not a count; the words beside them
+ * carry the exact figure either way.
+ */
+function Facts({ drop }: { drop: DropPublic }) {
+  return (
+    <p className="nd-facts">
+      {drop.claimCount <= 12 ? (
+        <span className="nd-marks" aria-hidden="true">
+          {Array.from({ length: drop.claimCount }).map((_, i) => (
+            <i key={i} data-taken={i >= drop.remaining ? 'true' : 'false'} />
+          ))}
+        </span>
+      ) : null}
+      <span data-testid="remaining">
+        {drop.remaining} of {drop.claimCount} shares left
+      </span>
+      {drop.expiresAt ? <Countdown expiresAt={drop.expiresAt} /> : null}
+    </p>
+  )
+}
+
+/**
+ * The claimant is the person being asked to trust a custodian, and until this
+ * redesign they got two grey lines of footer while the sponsor got the whole
+ * disclosure before funding. Ugly Cash's move is the one worth copying: take
+ * the least reassuring fact about the product, make it the headline of a
+ * tappable control, and put the rest one tap away.
+ *
+ * It stays a button on the poster layout rather than becoming a static line.
+ * Moving the disclosure out of reach on a desktop would be a regression against
+ * "reachable in one tap from the claim screen", and it is the same element in
+ * both places, so there is nothing to keep in sync.
  *
  * The facts are not softened here and are not meant to be. Most of this text
  * already exists in `Create.tsx`'s `Disclosure`, in `README.md` and in
@@ -284,44 +391,49 @@ function Face({
 function CustodyDisclosure() {
   const [open, setOpen] = useState(false)
   return (
-    <div className="mt-auto pt-8">
+    <>
       <button
         type="button"
         data-testid="custody-disclosure"
         aria-haspopup="dialog"
         aria-expanded={open}
         onClick={() => setOpen(true)}
-        className="block w-full rounded-2xl border border-ink/10 bg-ink/4 p-4 text-left"
+        className="flex w-full items-start gap-2.5 rounded-2xl border border-plate/16 bg-plate/6 p-3.5 text-left"
       >
-        <span className="block text-sm font-semibold text-ink/80">
-          NimDrops is holding this NIM, not a smart contract
-        </span>
-        <span className="mt-1 block text-xs leading-relaxed text-ink/55">
-          Who holds it, why one share per wallet is not one person, and where it goes if nobody
-          claims.
+        <CustodyShieldIcon size={18} className="mt-0.5 shrink-0 text-gold" />
+        <span>
+          <span className="block text-[0.8125rem] font-semibold">
+            NimDrops is holding this NIM, not a smart contract
+          </span>
+          <span className="nd-note mt-1 block">Who holds it, and where it goes if nobody claims.</span>
         </span>
       </button>
 
-      <Sheet open={open} title="Who is holding this NIM?" onClose={() => setOpen(false)}>
-        <div className="text-sm leading-relaxed text-ink/70">
+      <Sheet
+        open={open}
+        surface="field"
+        title="Who is holding this NIM?"
+        onClose={() => setOpen(false)}
+      >
+        <div className="text-[0.9375rem] leading-relaxed text-plate/76">
           <p>
             Until you claim it, this NIM sits in a wallet the{' '}
-            <strong className="font-semibold text-ink">NimDrops operator controls</strong>. That is
-            custody — not a smart contract, and not your wallet.
+            <strong className="font-semibold text-plate">NimDrops operator controls</strong>. That
+            is custody: not a smart contract, and not your wallet.
           </p>
           <p className="mt-3">
             When you claim, it is sent to the wallet that signed, and to no other address. Nothing
             you type into this app can change where it goes.
           </p>
           <p className="mt-3">
-            Shares are fixed and first come, first served —{' '}
-            <strong className="font-semibold text-ink">one per wallet</strong>. A signature proves
+            Shares are fixed and first come, first served,{' '}
+            <strong className="font-semibold text-plate">one per wallet</strong>. A signature proves
             control of one wallet. It does not prove one person, so anyone holding several wallets
             can take several shares.
           </p>
           <p className="mt-3">
             A drop stops accepting claims{' '}
-            <strong className="font-semibold text-ink">24 hours</strong> after it goes live. Every
+            <strong className="font-semibold text-plate">24 hours</strong> after it goes live. Every
             unclaimed share is then refunded to the wallet that funded it.
           </p>
           <p className="mt-3">
@@ -339,12 +451,12 @@ function CustodyDisclosure() {
           type="button"
           data-testid="disclosure-close"
           onClick={() => setOpen(false)}
-          className="nd-secondary mt-6 w-full"
+          className="nd-quiet mt-6"
         >
           Close
         </button>
       </Sheet>
-    </div>
+    </>
   )
 }
 
@@ -352,15 +464,15 @@ function CustodyDisclosure() {
 
 function Opening() {
   return (
-    <div className="flex flex-1 flex-col items-center justify-center pb-24 text-center">
+    <div className="flex flex-col items-center py-10 text-center">
       <div className="nd-pulse h-1.5 w-16 rounded-full bg-gold" aria-hidden="true" />
-      <p className="mt-6 text-sm text-ink/55">Opening this NimDrop…</p>
+      <p className="nd-note mt-6">Opening this NimDrop…</p>
     </div>
   )
 }
 
 /**
- * The drop exists, the money does not — yet.
+ * The drop exists, the money does not, yet.
  *
  * There is no claim button here on purpose. A primary button that can never be
  * pressed is read as a broken page, and on `awaiting_funding` there is no
@@ -373,44 +485,26 @@ function Opening() {
  */
 function Funding({ confirming }: { confirming: boolean }) {
   return (
-    <div data-testid={confirming ? 'funding-confirming' : 'awaiting-funding'} className="mt-7">
+    <div data-testid={confirming ? 'funding-confirming' : 'awaiting-funding'} className="mt-6">
       <div className="mb-4 flex justify-center">
         <StatusPill state={confirming ? 'confirming' : 'awaiting-funding'} />
       </div>
 
-      <div className="rounded-2xl bg-ink/5 p-4">
+      <div className="nd-panel">
         {confirming ? (
-          <>
-            <p className="text-sm leading-relaxed text-ink/75">
-              The sponsor&rsquo;s funding transaction is on the network and confirming now.
-            </p>
-            <p className="mt-3 text-sm leading-relaxed text-ink/60">
-              There is nothing to do. This drop goes live the moment that transaction is final, and
-              this page updates itself.
-            </p>
-          </>
+          <p className="text-[0.9375rem] leading-relaxed text-pretty">
+            The sponsor&rsquo;s funding transaction is on the network and confirming now. There is
+            nothing to do: this drop goes live the moment that transaction is final.
+          </p>
         ) : (
-          <>
-            <p className="text-sm leading-relaxed text-ink/75">
-              The sponsor has not funded this NimDrop yet. Until they send the NIM, there is nothing
-              here to claim.
-            </p>
-            <p className="mt-3 text-sm leading-relaxed text-ink/60">
-              Nothing is wrong with this link. The page keeps checking on its own, and the claim
-              button appears here as soon as the funding is confirmed.
-            </p>
-          </>
+          <p className="text-[0.9375rem] leading-relaxed text-pretty">
+            The sponsor has not funded this NimDrop yet. Nothing is wrong with this link, and the
+            claim button appears here as soon as the funding is confirmed.
+          </p>
         )}
       </div>
 
-      {confirming ? null : (
-        <>
-          <CopyLinkButton className="nd-secondary mt-5 w-full" />
-          <p className="mt-3 text-center text-xs leading-relaxed text-ink/50">
-            Keep the link if you would rather come back later — it stays the same.
-          </p>
-        </>
-      )}
+      {confirming ? null : <CopyLinkButton className="nd-quiet mt-4" />}
     </div>
   )
 }
@@ -428,6 +522,20 @@ const OUTCOME_TITLES: Partial<Record<ClaimUiState, string>> = {
   rejected: 'Nothing was claimed',
 }
 
+/**
+ * A word and a shape, never a hue on its own.
+ *
+ * No `StatusPill` here on purpose: the heading below already IS the state, and
+ * a pill reading "Paused" above "Claims are paused for safety" says the same
+ * word twice. The mark carries the non-colour half of the signal instead.
+ */
+const OUTCOME_MARKS: Partial<Record<ClaimUiState, IconComponent>> = {
+  paused: WarningIcon,
+  expired: ClockExpiryIcon,
+  exhausted: InfoIcon,
+  rejected: WarningIcon,
+}
+
 function Outcome({
   state,
   amount,
@@ -439,9 +547,13 @@ function Outcome({
   notice: string
   onRetry: () => void
 }) {
+  const Mark = OUTCOME_MARKS[state] ?? InfoIcon
   return (
-    <div className="flex flex-1 flex-col justify-center pb-16">
-      <h1 className="text-2xl font-semibold tracking-tight">{OUTCOME_TITLES[state]}</h1>
+    <div className="py-2">
+      <Mark size={22} className="mb-3 text-gold" />
+      <h1 className="text-[1.5625rem] font-semibold text-balance -tracking-[0.02em]">
+        {OUTCOME_TITLES[state]}
+      </h1>
 
       {state === 'paused' ? (
         <>
@@ -464,8 +576,8 @@ function Outcome({
       {state === 'exhausted' ? (
         <>
           <Line>
-            Every share in this drop has been claimed. Shares are fixed and first come, first served
-            — there is nothing left to reserve here.
+            Every share in this drop has been claimed. Shares are fixed and first come, first
+            served.
           </Line>
           <DropOneBack amount={amount} />
         </>
@@ -475,7 +587,7 @@ function Outcome({
         <>
           <Line>{notice || 'Your wallet closed without approving. Nothing was claimed.'}</Line>
           <Line>Your share is still here as long as the drop has one left.</Line>
-          <button type="button" onClick={onRetry} className="nd-primary mt-8 w-full">
+          <button type="button" onClick={onRetry} className="nd-action mt-7">
             Try again
           </button>
         </>
@@ -485,15 +597,12 @@ function Outcome({
 }
 
 function Line({ children }: { children: ReactNode }) {
-  return <p className="mt-3 text-sm leading-relaxed text-ink/60">{children}</p>
+  return <p className="nd-note mt-3 text-[0.9375rem]">{children}</p>
 }
 
 function DropOneBack({ amount }: { amount: string }) {
   return (
-    <Link
-      to={`/create?amount=${encodeURIComponent(amount)}`}
-      className="nd-primary mt-8 block w-full text-center"
-    >
+    <Link to={`/create?amount=${encodeURIComponent(amount)}`} className="nd-action mt-7">
       Drop one back
     </Link>
   )
@@ -507,32 +616,34 @@ function DropOneBack({ amount }: { amount: string }) {
 function NoWallet({ publicId }: { publicId: string }) {
   const here = typeof window === 'undefined' ? '' : window.location.href
   return (
-    <div className="mt-7">
+    <div className="mt-6">
       <div className="mb-4 flex justify-center">
         <StatusPill state="no-wallet" />
       </div>
-      <a href={nimiqPayDeeplink(here)} className="nd-primary block w-full text-center">
+      <a href={nimiqPayDeeplink(here)} className="nd-action">
         Open in Nimiq Pay
       </a>
-      <p className="mt-3 text-center text-xs leading-relaxed text-ink/50">
-        Claiming needs your own wallet to sign. This link keeps your place — it opens this same drop
-        inside Nimiq Pay.
+      <p className="nd-note mt-3 text-center">
+        Claiming needs your own wallet to sign.
       </p>
 
-      <div className="mt-6 rounded-3xl border border-ink/10 bg-white p-5">
+      {/* The QR has to be readable by a camera, so it keeps a solid light
+          surface of its own. Nothing translucent is stacked on the sheet. */}
+      <div className="mt-5 rounded-2xl bg-plate p-4">
         <img
           src={`/drop/${publicId}/qr.svg`}
           alt="QR code for this drop's link"
-          width={200}
-          height={200}
-          className="mx-auto h-auto w-full max-w-[200px]"
+          width={192}
+          height={192}
+          className="mx-auto h-auto w-full max-w-48"
         />
-        <p className="mt-3 text-center text-xs text-ink/50">
-          Scan it with the phone that has Nimiq Pay.
+        <p className="mt-2 flex items-center justify-center gap-1.5 text-xs text-plate-ink/76">
+          <QrCodeIcon size={14} />
+          Scan with the phone that has Nimiq Pay
         </p>
       </div>
 
-      <CopyLinkButton className="nd-secondary mt-4 w-full" />
+      <CopyLinkButton className="nd-quiet mt-4" />
     </div>
   )
 }
@@ -559,15 +670,15 @@ function CopyLinkButton({ className }: { className: string }) {
 /**
  * Recommending the product, not passing on this drop.
  *
- * It used to share `/d/{publicId}` under the label "Share NimDrops", so a
- * claimant who had just been paid and wanted to tell a friend about the app
- * instead sent them to the very drop they had just taken a share out of — one
- * share emptier than it was a minute ago, and possibly empty.
+ * It used to share the drop's own link under a label that read like a
+ * recommendation of the app, so a claimant who had just been paid and wanted to
+ * tell a friend about NimDrops instead sent them to the very drop they had just
+ * taken a share out of: one share emptier than it was a minute ago, and
+ * possibly empty.
  *
- * The origin is the honest target: `/` is the create screen, so the friend
- * lands on the thing the recommender is recommending. Sitting under "Drop one
- * back", the label has to name a different object than the button above it,
- * which is why it is not "Share this drop".
+ * The origin is the honest target. Sitting under "Drop one back", the label has
+ * to name a different object than the button above it, which is why it is not
+ * "Share this drop".
  *
  * `text` matters as much as the URL. WhatsApp routinely drops `title` and shows
  * a bare link, so the product's one-line description travels in the message
@@ -608,21 +719,23 @@ function ShareButton({ className }: { className: string }) {
  * Wall-clock countdown from the server's `expiresAt`. Deliberately not block
  * heights: a claimant does not think in macro blocks, and the server's expiry
  * timestamp is the only deadline that decides anything.
+ *
+ * Tabular figures and full-strength ink, because a countdown is a money fact
+ * and is held to AA regardless of size.
  */
-function Countdown({ expiresAt }: { expiresAt: string | null }) {
+function Countdown({ expiresAt }: { expiresAt: string }) {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
-    if (!expiresAt) return
     const timer = setInterval(() => setNow(Date.now()), 30_000)
     return () => clearInterval(timer)
   }, [expiresAt])
 
-  if (!expiresAt) return null
   const remainingMs = new Date(expiresAt).getTime() - now
   if (!Number.isFinite(remainingMs)) return null
 
   return (
-    <span className="tabular-nums">
+    <span className="inline-flex items-center gap-1.5">
+      <ClockExpiryIcon size={14} />
       {remainingMs <= 0 ? 'Expired' : `Expires in ${humanize(remainingMs)}`}
     </span>
   )

@@ -1,22 +1,20 @@
-import { Link } from 'react-router-dom'
 import { explorerTxUrl } from '../state/claim'
+import { SuccessCheckIcon } from '../ui/icons'
 
 /**
- * The proof a claimant keeps (design §4.3 step 5, §4.4 "persistent artifact").
+ * The proof a claimant keeps.
  *
  * It is only ever rendered once the server has said `paid`, and everything on
  * it is checkable by someone who does not trust NimDrops: the amount, the
  * sponsor label (marked unverified, because it is just text the sponsor typed),
  * and the transaction on a public explorer.
  *
- * It does not restate the amount as a headline. The envelope it rises into has
- * that number printed on its face, under the gold keyline; saying it twice at
- * two sizes would read as two different facts.
+ * It does not restate the amount as a headline. The plate it rises under has
+ * that number on it, under the gold keyline; saying it twice at two sizes would
+ * read as two different facts.
  */
 export interface ReceiptProps {
   publicId: string
-  /** Decimal NIM, exactly what the server paid. */
-  amountEach: string
   txHash: string | null
   sponsorLabel: string
 }
@@ -26,31 +24,28 @@ function shortHash(hash: string): string {
   return `${hash.slice(0, 8)}…${hash.slice(-8)}`
 }
 
-export default function Receipt({ publicId, amountEach, txHash, sponsorLabel }: ReceiptProps) {
+export default function Receipt({ publicId, txHash, sponsorLabel }: ReceiptProps) {
   return (
     <section aria-label="Claim receipt">
       <header className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1">
-        <p className="rounded-full bg-ink px-2.5 py-1 text-[0.6875rem] font-semibold tracking-wide text-paper">
+        <p className="nd-pill" data-tone="settled">
+          <SuccessCheckIcon size={13} />
           Paid
         </p>
-        <span className="text-xs text-ink/45">on the Nimiq blockchain</span>
+        <span className="nd-note">on the Nimiq blockchain</span>
       </header>
 
-      <p className="mt-4 text-center text-sm leading-relaxed text-ink/60">
-        Sent to your wallet — the same one that approved the signature.
-      </p>
-
-      <dl className="mt-6 divide-y divide-ink/10 rounded-3xl border border-ink/10 bg-white text-sm">
-        <div className="flex items-baseline justify-between gap-3 px-4 py-3">
-          <dt className="shrink-0 text-ink/55">From</dt>
-          <dd className="min-w-0 text-right [overflow-wrap:anywhere]">
-            {sponsorLabel} <span className="text-xs text-ink/40">(name unverified)</span>
+      <dl className="nd-rows mt-5">
+        <div className="nd-row">
+          <dt>From</dt>
+          <dd className="font-normal">
+            {sponsorLabel} <span className="text-plate/60">(name unverified)</span>
           </dd>
         </div>
-        <div className="flex items-baseline justify-between gap-3 px-4 py-3">
-          <dt className="shrink-0 text-ink/55">Transaction</dt>
-          <dd className="min-w-0 text-right font-mono text-xs [overflow-wrap:anywhere]">
-            {txHash ? shortHash(txHash) : 'confirmed — id syncing'}
+        <div className="nd-row">
+          <dt>Transaction</dt>
+          <dd className="font-mono text-xs">
+            {txHash ? shortHash(txHash) : 'confirmed, id syncing'}
           </dd>
         </div>
       </dl>
@@ -60,22 +55,20 @@ export default function Receipt({ publicId, amountEach, txHash, sponsorLabel }: 
           href={explorerTxUrl(txHash)}
           target="_blank"
           rel="noreferrer noopener"
-          /* py-3 keeps the tap target past 44px; a link is a control too. */
-          className="mt-3 block py-3 text-center text-sm font-semibold text-gold-deep underline underline-offset-4"
+          /* `nd-textlink` keeps the tap target past 44px; a link is a control. */
+          className="nd-textlink mt-1 block w-full text-center"
         >
           View on the Nimiq explorer
         </a>
       ) : null}
 
-      <Link
-        to={`/create?amount=${encodeURIComponent(amountEach)}`}
-        className="nd-primary mt-6 block w-full text-center"
-      >
-        Drop one back
-      </Link>
       {/* "Drop", not "Campaign": a gift is not a campaign, and "campaign" is
-          sponsor-side vocabulary that a claimant never asked for. */}
-      <p className="mt-3 text-center text-xs text-ink/45">
+          sponsor-side vocabulary that a claimant never asked for.
+
+          The two closing actions are NOT here. They belong to the screen, not
+          to the receipt, and rendering one of them mid-artifact put the drop's
+          id between two buttons. */}
+      <p className="nd-note mt-1 text-center">
         Drop <code className="font-mono">{publicId.slice(0, 8)}…</code>
       </p>
     </section>

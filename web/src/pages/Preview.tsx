@@ -4,8 +4,7 @@ import type { ClaimUiState } from '../state/claim'
 import DropView from './DropView'
 
 /**
- * DEV-ONLY. Every state of the envelope, side by side, at the widths a phone
- * actually is.
+ * DEV-ONLY. Every claim state, side by side, at the widths a phone actually is.
  *
  * `App.tsx` mounts this behind `import.meta.env.DEV`, which Vite replaces with
  * the literal `false` in a production build, so the branch and this whole
@@ -106,8 +105,11 @@ const CASES: Case[] = [
   },
 ]
 
-/** The phones this has to survive: smallest, iPhone SE/mini, the 390 reference, largest. */
-const WIDTHS = [320, 375, 390, 430] as const
+/**
+ * The phones this has to survive, plus the two widths that prove the poster:
+ * 768 is where the container query has not fired and 1280 is where it has.
+ */
+const WIDTHS = [320, 375, 390, 430, 768, 1280] as const
 
 /** How long each frame keeps watching after a (re)start of the reveal. */
 const WATCH_MS = 4000
@@ -279,13 +281,15 @@ export default function Preview() {
         .${PREVIEW_SENTINEL} .cap span { color: #9aa0cc; }
         .${PREVIEW_SENTINEL} .frame { height: 780px; overflow: auto; border-radius: 10px;
           outline: 1px solid #2a2f5c; }
+        /* The field measures itself against the frame, not the viewport, so the
+           poster composition can be watched at 1280 next to the phone at 390. */
         .${PREVIEW_SENTINEL} .frame .nd-field { min-height: 100%; }
         .${PREVIEW_SENTINEL} .over { margin-top: 5px; color: #6f77ab; font-size: 11px; }
         .${PREVIEW_SENTINEL} .over.bad { color: #ff8f6b; font-weight: 700; }
       `}</style>
 
       <div className="bar">
-        <b>Envelope states</b>
+        <b>Claim states</b>
         {WIDTHS.map((w) => (
           <button
             key={w}
@@ -310,11 +314,11 @@ export default function Preview() {
 
       <div className="rail" style={{ paddingLeft: gutter, paddingRight: gutter }}>
         {/* The signature moment goes first: one frame that starts sealed and
-            opens on its own, so the flap, the breaking wax and the single gold
-            bloom can all be watched rather than inferred. */}
+            opens on its own, so the ring and the field's warmer cast can be
+            watched rather than inferred. */}
         <div className="cell" style={{ width }}>
           <p className="cap">
-            <b>reveal</b> <span>— ready → reserved, seal breaks once</span>
+            <b>reveal</b> <span>— ready → reserved, the ring leaves once</span>
           </p>
           <Frame width={width} resetKey={run}>
             <DropView
