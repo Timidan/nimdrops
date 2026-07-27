@@ -168,6 +168,12 @@ describe('the money never depends on the visual layer', () => {
     expect(rule).not.toMatch(/(^|[;\s])transition:/)
   })
 
+  it('leaves every reveal overlay transparent when animations are disabled', () => {
+    for (const selector of ['.nd-break', '.nd-break-object', '.nd-bit', '.nd-burst::after']) {
+      expect(block(selector)).toMatch(/opacity:\s*0/)
+    }
+  })
+
   /**
    * Rule 3, and the reason the whole thing is arranged this way: the ritual
    * runs in FRONT of the money action. Asking a stranger to approve a
@@ -556,6 +562,14 @@ describe('the burst cannot hand the page sideways scroll', () => {
     expect(confetti()).toHaveLength(CONFETTI_COUNT)
     expect(shards()).toHaveLength(SHARD_COUNT)
     expect(CONFETTI_COUNT + SHARD_COUNT).toBeLessThanOrEqual(32)
+  })
+
+  it('mounts twelve moving pieces and seventeen total burst elements', () => {
+    view()
+    fireEvent.click(screen.getByTestId('hold-open'), { detail: 0 })
+    const burst = screen.getByTestId('burst')
+    expect(burst.querySelectorAll('.nd-bit')).toHaveLength(12)
+    expect(burst.querySelectorAll('*').length + 1).toBe(17)
   })
 
   /**

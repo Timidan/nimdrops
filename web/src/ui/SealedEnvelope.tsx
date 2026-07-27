@@ -5,6 +5,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type PointerEvent as ReactPointerEvent,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
@@ -15,15 +16,10 @@ import {
   BURST_MS,
   buzzPlan,
   canVibrate,
-  confetti,
   HOLD_MS,
   OPEN_BUZZ,
-  RELEASE_MS,
-  shakeAt,
-  shards,
   SLOP_PX,
   type OpenAbility,
-  type Piece,
   type RevealPhase,
 } from './reveal'
 
@@ -169,11 +165,13 @@ export default function SealedEnvelope({
   const [qrBroken, setQrBroken] = useState(false)
 
   const button = useRef<HTMLButtonElement>(null)
-  const shake = useRef<HTMLSpanElement>(null)
   const openedPane = useRef<HTMLDivElement>(null)
   const hintId = useId()
+  const burstOrigin = useRef<BurstOrigin | null>(null)
 
   const opened = openedByClaim || openedByHand
+  const openedNow = useRef(opened)
+  openedNow.current = opened
 
   /**
    * The one flag the theatre hangs off, and the reason it is a ref rather than
@@ -185,19 +183,26 @@ export default function SealedEnvelope({
   const burstTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
 
   const open = useCallback(() => {
-    if (byHand.current || opened) return
+    if (byHand.current || openedNow.current) return
+    const rect = button.current?.getBoundingClientRect()
+    if (rect?.width && rect.height) {
+      burstOrigin.current = {
+        left: rect.left,
+        top: rect.top,
+        width: rect.width,
+        height: rect.height,
+      }
+    }
     byHand.current = true
     setPhase('opened')
     setOpenedByHand(true)
     onOpen?.()
-  }, [onOpen, opened])
+  }, [onOpen])
 
   const hold = useHoldToOpen({
     holdMs,
     enabled: ability === 'can-open' && !opened,
     reduced,
-    button,
-    shake,
     onFinish: open,
     onHoldingChange: (holding) => setPhase(holding ? 'holding' : 'sealed'),
     onRelease: () => setReleased(true),
@@ -228,10 +233,16 @@ export default function SealedEnvelope({
           `tabIndex={-1}` so the opening can hand focus to it, which is what
           carries the reveal to a screen reader.
         */}
-        <div className="nd-revealed" ref={openedPane} tabIndex={-1} data-testid="revealed">
+        <div
+          className="nd-revealed"
+          ref={openedPane}
+          tabIndex={-1}
+          data-theatre={byHand.current ? 'true' : 'false'}
+          data-testid="revealed"
+        >
           {children}
         </div>
-        {burst ? <Burst /> : null}
+        {burst ? <Burst origin={burstOrigin.current} /> : null}
         {byHand.current ? (
           <p className="nd-sr" role="status">
             Envelope opened.
@@ -242,7 +253,12 @@ export default function SealedEnvelope({
   }
 
   const seconds = (holdMs / 1000).toFixed(holdMs % 1000 === 0 ? 0 : 1)
-  const from = sponsor ? <Sender sponsor={sponsor} message={message} /> : null
+  /*
+   * Keep the sender recess in the layout from the first paint. `drop` can land
+   * one request after the gate, and mounting this block only when that happens
+   * made it look as though touching the envelope had summoned the sponsor.
+   */
+  const from = <Sender sponsor={sponsor} message={message} />
 
   if (ability === 'sealed-only') {
     return (
@@ -318,6 +334,7 @@ export default function SealedEnvelope({
         data-phase={phase}
         data-testid="hold-open"
         aria-describedby={hintId}
+        style={{ '--hold-ms': `${holdMs}ms` } as CSSProperties}
         onPointerDown={hold.onPointerDown}
         onPointerMove={hold.onPointerMove}
         onPointerUp={hold.onPointerUp}
@@ -328,7 +345,6 @@ export default function SealedEnvelope({
         onContextMenu={(event) => event.preventDefault()}
       >
         <Envelope
-          ref={shake}
           label={reduced ? 'Open the envelope' : 'Hold to open'}
           sub={reduced ? undefined : 'Nothing is signed yet'}
           progress
@@ -371,12 +387,18 @@ export default function SealedEnvelope({
  * any alpha short of solid, and this block sits mid-screen where no scrim band
  * reaches it. `surface.contrast.test.ts` computes it there.
  */
-function Sender({ sponsor, message }: { sponsor: string; message?: string | null }) {
+function Sender({ sponsor, message }: { sponsor?: string; message?: string | null }) {
   return (
     <div className="nd-gate-from">
       <p className="nd-gate-who">
-        <b>{sponsor}</b> sent you a NimDrop
-        <span className="nd-chip">name unverified</span>
+        {sponsor ? (
+          <>
+            <b>{sponsor}</b> sent you a NimDrop
+            <span className="nd-chip">name unverified</span>
+          </>
+        ) : (
+          <b>Sender details are arriving…</b>
+        )}
       </p>
       {message ? <p className="nd-gate-msg">{message}</p> : null}
     </div>
@@ -391,8 +413,6 @@ interface HoldArgs {
   holdMs: number
   enabled: boolean
   reduced: boolean
-  button: React.RefObject<HTMLButtonElement | null>
-  shake: React.RefObject<HTMLSpanElement | null>
   onFinish: () => void
   onHoldingChange: (holding: boolean) => void
   onRelease: () => void
@@ -401,10 +421,10 @@ interface HoldArgs {
 /**
  * Press, progress, release, repeat.
  *
- * Progress is written straight onto the DOM as a custom property and a
- * transform inside one `requestAnimationFrame` loop. It is deliberately NOT
- * React state: a hold is sixty renders a second for two and a half seconds, and
- * the only things that change are one number and one transform.
+ * One `requestAnimationFrame` loop owns only the clock and the haptic rungs.
+ * The material strain, shake, cracks and progress are CSS keyframes started by
+ * the `holding` phase, so React renders twice per attempt and JavaScript never
+ * writes a per-frame transform.
  *
  * Everything that can end a hold ends it the same way — pointer up, pointer
  * cancel, losing capture, drifting past the slop radius, `Escape`, the tab
@@ -414,15 +434,12 @@ function useHoldToOpen({
   holdMs,
   enabled,
   reduced,
-  button,
-  shake,
   onFinish,
   onHoldingChange,
   onRelease,
 }: HoldArgs) {
   const frame = useRef(0)
   const startedAt = useRef(0)
-  const progress = useRef(0)
   const origin = useRef<{ x: number; y: number } | null>(null)
   const rung = useRef(0)
   const holding = useRef(false)
@@ -439,40 +456,10 @@ function useHoldToOpen({
     }
   }, [])
 
-  const paint = useCallback(
-    (value: number, elapsed: number) => {
-      button.current?.style.setProperty('--hold', value.toFixed(4))
-      const el = shake.current
-      if (!el) return
-      if (reduced || value === 0) {
-        el.style.transform = ''
-        return
-      }
-      const { x, y, deg } = shakeAt(value, elapsed)
-      el.style.transform = `translate3d(${x.toFixed(2)}px, ${y.toFixed(2)}px, 0) rotate(${deg.toFixed(3)}deg)`
-    },
-    [button, shake, reduced],
-  )
-
   const stop = useCallback(() => {
     if (frame.current) cancelAnimationFrame(frame.current)
     frame.current = 0
   }, [])
-
-  /** Unwinds what was held, so letting go reads as "not finished", not "no". */
-  const unwind = useCallback(() => {
-    const from = progress.current
-    const at = now()
-    const step = () => {
-      const t = (now() - at) / RELEASE_MS
-      const value = t >= 1 ? 0 : from * (1 - t) * (1 - t)
-      progress.current = value
-      paint(value, 0)
-      if (value > 0) frame.current = requestAnimationFrame(step)
-      else frame.current = 0
-    }
-    frame.current = requestAnimationFrame(step)
-  }, [paint])
 
   const cancel = useCallback(() => {
     if (!holding.current) return
@@ -481,24 +468,19 @@ function useHoldToOpen({
     buzz(0)
     onHoldingChange(false)
     onRelease()
-    unwind()
-  }, [stop, buzz, onHoldingChange, onRelease, unwind])
+  }, [stop, buzz, onHoldingChange, onRelease])
 
   const finish = useCallback(() => {
     holding.current = false
     stop()
-    progress.current = 1
-    paint(1, holdMs)
     buzz([...OPEN_BUZZ])
     onHoldingChange(false)
     onFinish()
-  }, [stop, paint, holdMs, buzz, onHoldingChange, onFinish])
+  }, [stop, buzz, onHoldingChange, onFinish])
 
   const tick = useCallback(() => {
     const elapsed = now() - startedAt.current
     const value = Math.min(1, elapsed / holdMs)
-    progress.current = value
-    paint(value, elapsed)
 
     while (rung.current < plan.length && value >= plan[rung.current].at) {
       buzz(plan[rung.current].ms)
@@ -507,7 +489,7 @@ function useHoldToOpen({
 
     if (value >= 1) finish()
     else frame.current = requestAnimationFrame(tick)
-  }, [holdMs, paint, plan, buzz, finish])
+  }, [holdMs, plan, buzz, finish])
 
   const onPointerDown = useCallback(
     (event: ReactPointerEvent<HTMLButtonElement>) => {
@@ -519,16 +501,12 @@ function useHoldToOpen({
       stop()
       origin.current = { x: event.clientX, y: event.clientY }
       startedAt.current = now()
-      progress.current = 0
       rung.current = 0
       holding.current = true
       onHoldingChange(true)
-      // Progress from the first millisecond: paint frame zero before waiting
-      // for one, so the control is never a press with nothing happening.
-      paint(0.0001, 0)
       frame.current = requestAnimationFrame(tick)
     },
-    [enabled, reduced, stop, onHoldingChange, paint, tick],
+    [enabled, reduced, stop, onHoldingChange, tick],
   )
 
   const onPointerMove = useCallback(
@@ -584,6 +562,15 @@ function useHoldToOpen({
     }
   }, [cancel])
 
+  /** A server state can open the gate while a thumb is still down. Stop that
+      stale clock before it can later misclassify the poll tick as a hand-open. */
+  useEffect(() => {
+    if (enabled || !holding.current) return
+    holding.current = false
+    stop()
+    buzz(0)
+  }, [enabled, stop, buzz])
+
   useEffect(
     () => () => {
       if (frame.current) cancelAnimationFrame(frame.current)
@@ -628,7 +615,6 @@ interface EnvelopeProps {
   sub?: string
   /** Draws the ring and the foil bar that fill as the hold progresses. */
   progress?: boolean
-  ref?: React.Ref<HTMLSpanElement>
 }
 
 /**
@@ -638,22 +624,41 @@ interface EnvelopeProps {
  * palette tokens (`--nd-env-*` in `index.css`), because the wax is the last
  * gold on the surface and its legality is arithmetic rather than taste.
  */
-function Envelope({ label, sub, progress, ref }: EnvelopeProps) {
+function Envelope({ label, sub, progress }: EnvelopeProps) {
   return (
     <>
-      {/* Everything that moves is inside this one span, so the button's own
-          hit area never moves under the thumb that is holding it. */}
-      <span className="nd-env-shake" ref={ref} aria-hidden="true">
-        <span className="nd-env-face" />
-        <span className="nd-env-flap" />
-        <span className="nd-env-seal">
-          {progress ? (
-            <svg className="nd-env-ring" viewBox="0 0 100 100" aria-hidden="true">
-              <circle className="nd-env-ring-track" cx="50" cy="50" r="45" />
-              <circle className="nd-env-ring-fill" cx="50" cy="50" r="45" />
-            </svg>
-          ) : null}
-          <NimMark tone="ink" height="21px" />
+      {/* The button stays still under the thumb; the physical packet moves
+          inside it. Every decorative layer is hidden from the accessibility
+          tree because the control's name carries the instruction. */}
+      <span className="nd-env-aura" aria-hidden="true" />
+      <span className="nd-env-shake" aria-hidden="true">
+        <span className="nd-env-contact" />
+        <span className="nd-env-object">
+          <span className="nd-env-back" />
+          <span className="nd-env-liner" />
+          <span className="nd-env-flap">
+            <span className="nd-env-flap-front" />
+            <span className="nd-env-flap-back" />
+          </span>
+          <span className="nd-env-pocket">
+            <span className="nd-env-fold is-left" />
+            <span className="nd-env-fold is-right" />
+            <span className="nd-env-paper-grain" />
+          </span>
+          <span className="nd-env-paper-edge" />
+          <span className="nd-env-seal">
+            {progress ? (
+              <svg className="nd-env-ring" viewBox="0 0 100 100" aria-hidden="true">
+                <circle className="nd-env-ring-track" cx="50" cy="50" r="45" />
+                <circle className="nd-env-ring-fill" cx="50" cy="50" r="45" />
+              </svg>
+            ) : null}
+            <span className="nd-env-seal-foil">
+              <NimMark tone="ink" height="21px" />
+            </span>
+            <span className="nd-env-crack is-one" />
+            <span className="nd-env-crack is-two" />
+          </span>
         </span>
       </span>
       <span className="nd-env-label">
@@ -674,41 +679,310 @@ function Envelope({ label, sub, progress, ref }: EnvelopeProps) {
  * ---------------------------------------------------------------------- */
 
 /**
- * Confetti and paper, as DOM nodes on `transform` and `opacity`.
+ * A breaking packet, four foil shards and eight high-value particles.
  *
- * No canvas and no dependency: twenty-four absolutely positioned spans, each
- * running one keyframe. Bounded count, bounded reach, and the whole thing
- * unmounts itself on a timer in the component above — a particle field that
- * outlives its moment is a leak that happens to be pretty.
+ * No canvas and no dependency: twelve absolutely positioned pieces, each
+ * running one keyframe. The physical packet is four spans; its faces and edge
+ * are pseudo-elements, so the entire burst subtree is seventeen elements
+ * including its root. It unmounts itself on the timer in the component above.
  *
- * The container is `position: fixed`, which is what stops twenty-four particles
- * handing the document horizontal scroll at the exact second everyone is
- * looking: a fixed element is out of flow AND outside the document's scrollable
- * overflow rectangle, so there is nothing to escape and nothing to clip.
+ * The container is fixed and clipped to the viewport, which is what stops the
+ * pieces handing the document horizontal scroll at the exact second everyone
+ * is looking.
  *
  * `aria-hidden`, and every fact it celebrates is also on screen in words, which
  * is what makes deleting it under reduced motion a free choice rather than a
  * loss.
  */
-function Burst() {
-  const field = useMemo(() => [...shards(), ...confetti()], [])
+interface BurstOrigin {
+  left: number
+  top: number
+  width: number
+  height: number
+}
+
+function Burst({ origin }: { origin: BurstOrigin | null }) {
+  const style = origin
+    ? ({
+        '--burst-left': `${origin.left}px`,
+        '--burst-top': `${origin.top}px`,
+        '--burst-width': `${origin.width}px`,
+        '--burst-height': `${origin.height}px`,
+        '--burst-x': `${origin.left + origin.width / 2}px`,
+        '--burst-y': `${origin.top + origin.height * 0.62}px`,
+      } as CSSProperties)
+    : undefined
+
   return (
-    <span className="nd-burst" aria-hidden="true" data-testid="burst">
-      {field.map((piece, i) => (
-        <span key={i} className="nd-bit" data-tone={piece.tone} style={vars(piece)} />
+    <span className="nd-burst" aria-hidden="true" data-testid="burst" style={style}>
+      <span className="nd-break">
+        <span className="nd-break-object">
+          <span className="nd-break-liner" />
+          <span className="nd-break-flap" />
+        </span>
+      </span>
+      {BURST_FIELD.map((piece, i) => (
+        <span
+          key={i}
+          className="nd-bit"
+          data-kind={piece.kind}
+          data-tone={piece.tone}
+          style={vars(piece)}
+        />
       ))}
     </span>
   )
 }
 
-function vars(piece: Piece): React.CSSProperties {
+interface BurstPiece {
+  kind: 'wax' | 'confetti'
+  tone: number
+  round: 0 | 1
+  /** First 60–120ms: the violent release. */
+  x1: number
+  y1: number
+  /** Apex after horizontal velocity has already started bleeding off. */
+  mx: number
+  my: number
+  /** Resting fall position. The clipped field owns anything beyond it. */
+  dx: number
+  dy: number
+  mrot: number
+  rot: number
+  dur: number
+  delay: number
+  size: number
+  ease: string
+}
+
+/*
+ * Hand-authored rather than evenly fanned. Departures cluster at
+ * 0/7/13ms and 9/16/24ms, then break into an irregular tail. The values are
+ * deliberately asymmetric: each piece has its own launch, apex, fall, spin,
+ * size, duration and hard-out curve, while remaining deterministic.
+ */
+const BURST_FIELD: readonly BurstPiece[] = [
+  {
+    kind: 'wax',
+    tone: 4,
+    round: 0,
+    x1: -58,
+    y1: -35,
+    mx: -101,
+    my: -79,
+    dx: -142,
+    dy: 132,
+    mrot: -84,
+    rot: -286,
+    dur: 680,
+    delay: 0,
+    size: 29,
+    ease: 'cubic-bezier(0.12, 0.82, 0.22, 1)',
+  },
+  {
+    kind: 'wax',
+    tone: 4,
+    round: 0,
+    x1: 47,
+    y1: -48,
+    mx: 83,
+    my: -118,
+    dx: 119,
+    dy: 164,
+    mrot: 71,
+    rot: 238,
+    dur: 810,
+    delay: 7,
+    size: 20,
+    ease: 'cubic-bezier(0.16, 1, 0.3, 1)',
+  },
+  {
+    kind: 'wax',
+    tone: 4,
+    round: 0,
+    x1: -31,
+    y1: -58,
+    mx: -55,
+    my: -96,
+    dx: -78,
+    dy: 96,
+    mrot: 126,
+    rot: 402,
+    dur: 735,
+    delay: 13,
+    size: 32,
+    ease: 'cubic-bezier(0.1, 0.86, 0.24, 1)',
+  },
+  {
+    kind: 'wax',
+    tone: 4,
+    round: 0,
+    x1: 61,
+    y1: -24,
+    mx: 108,
+    my: -61,
+    dx: 154,
+    dy: 181,
+    mrot: -46,
+    rot: -173,
+    dur: 915,
+    delay: 61,
+    size: 24,
+    ease: 'cubic-bezier(0.14, 0.92, 0.28, 1)',
+  },
+  {
+    kind: 'confetti',
+    tone: 0,
+    round: 0,
+    x1: -68,
+    y1: -51,
+    mx: -119,
+    my: -131,
+    dx: -166,
+    dy: 156,
+    mrot: -102,
+    rot: -338,
+    dur: 745,
+    delay: 9,
+    size: 15,
+    ease: 'cubic-bezier(0.13, 0.9, 0.2, 1)',
+  },
+  {
+    kind: 'confetti',
+    tone: 2,
+    round: 1,
+    x1: -39,
+    y1: -31,
+    mx: -70,
+    my: -82,
+    dx: -104,
+    dy: 108,
+    mrot: 76,
+    rot: 267,
+    dur: 690,
+    delay: 16,
+    size: 10,
+    ease: 'cubic-bezier(0.18, 1, 0.28, 1)',
+  },
+  {
+    kind: 'confetti',
+    tone: 1,
+    round: 0,
+    x1: -12,
+    y1: -63,
+    mx: -24,
+    my: -151,
+    dx: -41,
+    dy: 191,
+    mrot: -164,
+    rot: -512,
+    dur: 902,
+    delay: 24,
+    size: 13,
+    ease: 'cubic-bezier(0.11, 0.84, 0.23, 1)',
+  },
+  {
+    kind: 'confetti',
+    tone: 3,
+    round: 0,
+    x1: 23,
+    y1: -45,
+    mx: 43,
+    my: -101,
+    dx: 66,
+    dy: 137,
+    mrot: 119,
+    rot: 386,
+    dur: 778,
+    delay: 43,
+    size: 8,
+    ease: 'cubic-bezier(0.16, 1, 0.3, 1)',
+  },
+  {
+    kind: 'confetti',
+    tone: 0,
+    round: 1,
+    x1: 54,
+    y1: -55,
+    mx: 96,
+    my: -124,
+    dx: 139,
+    dy: 174,
+    mrot: -97,
+    rot: -309,
+    dur: 842,
+    delay: 71,
+    size: 16,
+    ease: 'cubic-bezier(0.12, 0.88, 0.21, 1)',
+  },
+  {
+    kind: 'confetti',
+    tone: 2,
+    round: 0,
+    x1: 67,
+    y1: -26,
+    mx: 119,
+    my: -69,
+    dx: 169,
+    dy: 101,
+    mrot: 68,
+    rot: 221,
+    dur: 716,
+    delay: 78,
+    size: 11,
+    ease: 'cubic-bezier(0.17, 0.96, 0.31, 1)',
+  },
+  {
+    kind: 'confetti',
+    tone: 1,
+    round: 1,
+    x1: 34,
+    y1: -66,
+    mx: 62,
+    my: -143,
+    dx: 91,
+    dy: 207,
+    mrot: 151,
+    rot: 489,
+    dur: 936,
+    delay: 123,
+    size: 14,
+    ease: 'cubic-bezier(0.1, 0.86, 0.22, 1)',
+  },
+  {
+    kind: 'confetti',
+    tone: 3,
+    round: 0,
+    x1: -51,
+    y1: -39,
+    mx: -91,
+    my: -109,
+    dx: -134,
+    dy: 219,
+    mrot: -132,
+    rot: -431,
+    dur: 904,
+    delay: 169,
+    size: 9,
+    ease: 'cubic-bezier(0.15, 0.94, 0.26, 1)',
+  },
+] as const
+
+function vars(piece: BurstPiece): CSSProperties {
   return {
+    '--x1': `${piece.x1}px`,
+    '--y1': `${piece.y1}px`,
+    '--mx': `${piece.mx}px`,
+    '--my': `${piece.my}px`,
+    '--r1': `${piece.mrot * 0.3}deg`,
     '--dx': `${piece.dx}px`,
     '--dy': `${piece.dy}px`,
+    '--mrot': `${piece.mrot}deg`,
     '--rot': `${piece.rot}deg`,
     '--dur': `${piece.dur}ms`,
     '--delay': `${piece.delay}ms`,
     '--size': `${piece.size}px`,
     '--round': piece.round ? '50%' : '2px',
-  } as React.CSSProperties
+    '--fly-ease': piece.ease,
+  } as CSSProperties
 }

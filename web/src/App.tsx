@@ -3,7 +3,10 @@ import Create from './pages/Create'
 import DirectionA from './pages/design/DirectionA'
 import DirectionB from './pages/design/DirectionB'
 import DirectionC from './pages/design/DirectionC'
+import Reveal from './pages/design/Reveal'
+import Treatment from './pages/design/Treatments'
 import Drop from './pages/Drop'
+import Landing from './pages/Landing'
 import Preview from './pages/Preview'
 import Spike from './pages/Spike'
 
@@ -34,7 +37,14 @@ function LegacyDropRedirect() {
 export function AppRoutes() {
   return (
     <Routes>
-      <Route path="/" element={<Create />} />
+      {/*
+        The root is the landing page, not the create form. It is the only
+        surface that works on every platform and the only one meant to be
+        found: a stranger who arrives without a link should learn what
+        NimDrops is, not be handed a form that asks them to fund something.
+        Sponsors reach the form at `/create`.
+      */}
+      <Route path="/" element={<Landing />} />
       <Route path="/create" element={<Create />} />
       <Route path="/drop/:publicId" element={<Drop />} />
       {/*
@@ -49,6 +59,10 @@ export function AppRoutes() {
       {import.meta.env.DEV ? <Route path="/design/a" element={<DirectionA />} /> : null}
       {import.meta.env.DEV ? <Route path="/design/b" element={<DirectionB />} /> : null}
       {import.meta.env.DEV ? <Route path="/design/c" element={<DirectionC />} /> : null}
+      {/* Static beats dynamic in the router's own ranking, so this wins over
+          `/design/:treatment` below it whatever the order. */}
+      {import.meta.env.DEV ? <Route path="/design/reveal" element={<Reveal />} /> : null}
+      {import.meta.env.DEV ? <Route path="/design/:treatment" element={<Treatment />} /> : null}
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   )
