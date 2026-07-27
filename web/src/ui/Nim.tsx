@@ -1,21 +1,24 @@
 import { useId } from 'react'
-import { CAP, SIGNET_PATH, SIGNET_RATIO } from '../../ui/signet'
+import { CAP, SIGNET_PATH, SIGNET_RATIO } from './signet'
 
 /**
- * DEV-ONLY. The three things drawn with Nimiq's own signet: the mark itself,
- * the amount lockup, and the row of share pips.
+ * The three things drawn with Nimiq's own signet: the mark itself, the amount
+ * lockup, and the row of share marks.
  *
- * The provenance of the outline, the official gradient stops and the optical
- * rule the lockup is built on all live in `nimkit.ts` beside the constants they
- * describe. This file is only the components.
+ * Promoted out of `pages/design/nim.tsx`. The provenance of the outline, the
+ * official gradient stops and the optical rule the lockup is built on all live
+ * in `signet.ts` beside the constants they describe; this file is only the
+ * components, and the CSS they key off is in `index.css` under `.nim-*`.
  */
 
 export interface NimMarkProps {
   /**
    * `gold` is the official radial gradient, for the mark standing alone as the
-   * unit. `ink` takes `currentColor`, for the mark inside a control whose text
-   * colour it must match. `hollow` is the outline, used only by the share pips
-   * where filled and empty have to be told apart without relying on hue.
+   * unit ON A DARK CARD. `ink` takes `currentColor`, which is what the claim
+   * surface uses, because the amount now sits on the bare field and Nimiq gold
+   * is 2.74:1 there — see the note on `--nd-accent` in `index.css`. `hollow` is
+   * the outline, used only by the share marks where filled and empty have to be
+   * told apart without relying on hue.
    */
   tone?: 'gold' | 'ink' | 'hollow'
   /** CSS length. Defaults to `1em`, i.e. the caller sets it in `font-size`. */
@@ -81,12 +84,16 @@ export interface AmountProps {
   /**
    * The mark's height as a fraction of the figure's CAP HEIGHT. `1` makes the
    * signet exactly as tall as the digit, which is right when it is standing in
-   * for the word. `0.62` is the lockup value: unmistakably the Nimiq mark, and
-   * still subordinate to the number, which is the thing being decided about.
+   * for the word. Under 1 keeps it unmistakably the Nimiq mark and still
+   * subordinate to the number, which is the thing being decided about.
    */
   markScale?: number
-  /** Class on the `<h1>`; each treatment sizes and colours its own. */
+  /** See `NimMarkProps.tone`. The claim surface passes `ink`. */
+  tone?: NimMarkProps['tone']
+  /** Class on the `<h1>`; each surface sizes and colours its own. */
   className?: string
+  /** Passed straight through, so a surface can step the type by length. */
+  'data-size'?: string
 }
 
 /**
@@ -108,6 +115,12 @@ export interface AmountProps {
  * lift is zero and the mark sits on the baseline at full cap height, which is
  * exactly where a capital letter sits, which is the point.
  *
+ * ## Rule 1
+ *
+ * Nothing here starts hidden, nothing animates, and nothing waits for a class.
+ * `DropView.test.tsx` renders this with no CSS engine in the room and reads the
+ * figure straight back out.
+ *
  * ## Accessibility
  *
  * `aria-label` carries `5 NIM` in words in both forms, so the mark-only version
@@ -115,17 +128,25 @@ export interface AmountProps {
  * label already replaced them; announcing both reads the amount twice.
  *
  * The figure never wraps and never truncates. If the lockup cannot fit, the
- * `flex-wrap` in each treatment's CSS drops the unit onto its own line.
+ * `flex-wrap` in the surface's CSS drops the unit onto its own line.
  */
-export function Amount({ value, unit = 'lockup', markScale = 0.62, className }: AmountProps) {
+export function Amount({
+  value,
+  unit = 'lockup',
+  markScale = 0.62,
+  tone = 'gold',
+  className,
+  'data-size': size,
+}: AmountProps) {
   const height = `${CAP * markScale}em`
   const lift = `${((CAP / 2) * (markScale - 1)).toFixed(4)}em`
   return (
-    <h1 className={className} aria-label={`${value} NIM`} data-testid="amount-hero">
+    <h1 className={className} aria-label={`${value} NIM`} data-testid="amount-hero" data-size={size}>
       <span className="nim-figure" aria-hidden="true">
         {value}
       </span>
       <NimMark
+        tone={tone}
         height={height}
         className="nim-mark"
         style={{ transform: `translateY(${lift})` }}
@@ -152,21 +173,21 @@ export interface PipsProps {
  * still there.
  *
  * Filled and empty differ by fill AND by stroke, never by hue alone, so the row
- * survives on a monochrome display and for a reader who cannot separate gold
- * from grey. The exact figure is always printed beside it in words, because a
- * row of marks is a texture and not a number.
+ * survives on a monochrome display and for a reader who cannot separate one
+ * tone from another. The exact figure is always printed beside it in words,
+ * because a row of marks is a texture and not a number.
  *
  * Caps at twelve. A hundred-share drop is a legitimate configuration and a
  * hundred marks is a smear.
  */
-export function Pips({ total, left, size = 13 }: PipsProps) {
+export function Pips({ total, left, size = 11 }: PipsProps) {
   if (total > 12) return null
   return (
     <span className="nim-pips" aria-hidden="true">
       {Array.from({ length: total }).map((_, i) => (
         <NimMark
           key={i}
-          tone={i < left ? 'gold' : 'hollow'}
+          tone={i < left ? 'ink' : 'hollow'}
           height={`${size}px`}
           className={i < left ? 'nim-pip is-live' : 'nim-pip is-spent'}
         />
@@ -174,5 +195,3 @@ export function Pips({ total, left, size = 13 }: PipsProps) {
     </span>
   )
 }
-
-

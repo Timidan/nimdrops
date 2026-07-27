@@ -1,30 +1,31 @@
 /**
- * DEV-ONLY. The sealed-envelope reveal, as numbers and pure functions.
+ * The sealed-envelope reveal, as numbers and pure functions.
  *
- * Everything the ritual can be tuned by lives here and nowhere else, because
- * the whole point of this prototype is that the owner tries the hold with their
- * own thumb and picks a duration. A tunable buried in a component is not a
- * tunable.
+ * Everything the ritual can be tuned by lives here and nowhere else. A tunable
+ * buried in a component is not a tunable, and this one was settled with a thumb
+ * rather than an argument — see `HOLD_MS`.
  *
  * The functions are pure and take their time as an argument, so the shake, the
  * haptic ladder and the confetti field can all be asserted in jsdom, which has
  * no clock, no CSS engine and no compositor.
  */
-import type { BridgeKind } from '../../sdk/adapter'
+import type { BridgeKind } from '../sdk/adapter'
 
 /* -------------------------------------------------------------------------
  * The hold
  * ---------------------------------------------------------------------- */
 
 /**
- * How long the seal has to be held. THE constant.
+ * How long the seal has to be held. THE constant, and it is SHIPPED at 2500.
  *
- * The owner asked for five seconds. The three values below are what the dev
- * route offers so that can be settled with a thumb rather than an argument:
+ * The owner asked for five seconds; press-and-hold convention puts "deliberate
+ * but not broken" nearer 1.2s. Rather than argue, all three were put one tap
+ * apart on `/design/reveal?hold=` and decided with a thumb. 2500 won.
  *
  *   1200  the press-and-hold convention. Deliberate, and nobody thinks it broke.
- *   2500  ceremonial. Long enough that the shake has somewhere to go.
- *   5000  the owner's ask.
+ *   2500  ceremonial, and what ships. Long enough that the shake has somewhere
+ *         to go, short enough that nobody concludes the control is dead.
+ *   5000  the owner's original ask.
  *
  * The usual reason to make a hold long — stopping an accidental activation —
  * does not apply here: opening the envelope spends nothing and signs nothing.

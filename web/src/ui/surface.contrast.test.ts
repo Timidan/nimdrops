@@ -36,19 +36,29 @@
  *
  * ## Where the model gives credit for a scrim, and where it refuses to
  *
- * The two pieces of SECONDARY copy that sit on the field are computed against
- * the field WITH THE SCRIM, because the scrim is what they physically sit on.
- * That is a claim about layout, so it is earned rather than asserted: the
- * masthead is the first element in `.nd-field-inner` and the custody line is
- * the last; `.nd-field-scrim` covers the field edge to edge and holds
- * `--nd-scrim-top` through the first 10% and `--nd-scrim-bottom` through the
- * last 10%. `surface.test.ts` checks those held bands are still declared, so
- * the model cannot quietly stop being true.
+ * Exactly ONE pair takes credit for a scrim: the masthead strapline, which is
+ * the only secondary copy left on the bare field. That is a claim about layout,
+ * so it is earned rather than asserted — the masthead is the first element in
+ * `.nd-field-inner` and `.nd-field-scrim` holds `--nd-scrim-top` at full
+ * strength through the first 10%, which `surface.test.ts` checks is still
+ * declared.
  *
- * Everything at FULL strength on the field — the countdown, the share count,
- * the share marks — is computed against the bare, unscrimmed worst case,
- * because on a phone those sit mid-screen where no scrim reaches them. That
- * pair is what caps how bright the bloom is allowed to be.
+ * Nothing else does. The s4 layout puts the sponsor block and the two fact
+ * tiles on RECESSES rather than on the bare field, and the custody line on the
+ * card, so the scrim is back to being composition. Everything at full strength
+ * on the field — the amount, its caption, the sealed gate's hint — is computed
+ * against the bare, unscrimmed worst case, because those sit mid-screen where
+ * no scrim reaches them. That group is what caps how bright the bloom is
+ * allowed to be.
+ *
+ * ## The money moved onto the field, and that is the biggest change here
+ *
+ * The amount used to sit in a dark well inside the card, at 12.38:1. It is now
+ * bare on the field at 88px, which is 4.70:1 against the brightest pixel the
+ * bloom can physically reach with a fully lit grain pixel on top of it. That
+ * clears the 4.5:1 the product holds money to whatever its size, and it is the
+ * reason the currency mark is near-white rather than Nimiq gold: gold is
+ * 2.74:1 there, under even the 3:1 a non-text mark is held to.
  *
  * ## Three card paths, two accent options, one table
  *
@@ -66,10 +76,23 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import {
+  contrastRatio as ratio,
+  over,
+  parseColour,
+  relativeLuminance,
+  round2 as round,
+  saturate,
+  type Rgb,
+} from './contrast'
 
+/**
+ * The colour maths is `ui/contrast.ts`, shared rather than reimplemented:
+ * source-over compositing, `filter: saturate()`'s sRGB matrix, WCAG relative
+ * luminance and the ratio. This file is only the model — which surfaces exist,
+ * in what order the browser paints them, and what each foreground sits on.
+ */
 const css = readFileSync(resolve(process.cwd(), 'src/index.css'), 'utf8')
-
-type Rgb = [number, number, number]
 
 /** A token's value, following `var()` indirection to the literal underneath. */
 function token(name: string, depth = 0): string {
@@ -89,26 +112,8 @@ function num(name: string): number {
   return value
 }
 
-/** `#rrggbb` or `rgb(r g b / a)`. Returns the colour and its alpha. */
-function parse(value: string): { rgb: Rgb; alpha: number } {
-  const hex = value.match(/^#([0-9a-f]{6})$/i)
-  if (hex) {
-    const h = hex[1]
-    return { rgb: [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16)) as Rgb, alpha: 1 }
-  }
-  const fn = value.match(/rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)\s*(?:[/,]\s*([\d.]+))?\s*\)/)
-  expect(fn, `cannot parse colour ${value}`).toBeTruthy()
-  return {
-    rgb: [Number(fn![1]), Number(fn![2]), Number(fn![3])] as Rgb,
-    alpha: fn![4] === undefined ? 1 : Number(fn![4]),
-  }
-}
-
+const parse = parseColour
 const colour = (name: string) => parse(token(name))
-
-function over(fg: Rgb, alpha: number, bg: Rgb): Rgb {
-  return fg.map((c, i) => c * alpha + bg[i] * (1 - alpha)) as Rgb
-}
 
 /** A literal colour written inline in a rule rather than held as a token. */
 function literal(value: string, alpha: number, bg: Rgb): Rgb {
@@ -116,39 +121,6 @@ function literal(value: string, alpha: number, bg: Rgb): Rgb {
   return over(rgb, alpha, bg)
 }
 
-/**
- * `filter: saturate()`'s matrix, in sRGB, which is the space CSS filter
- * shorthand functions operate in. Clamped, because it can push a channel out of
- * gamut and the compositor clamps too. On a vermilion backdrop that clamp is
- * not theoretical: at 160% the blue channel pins at zero, which is part of why
- * `--nd-saturate` is 120%.
- */
-function saturate(rgb: Rgb, s: number): Rgb {
-  const [r, g, b] = rgb.map((c) => c / 255) as Rgb
-  const rows = [
-    [0.213 + 0.787 * s, 0.715 - 0.715 * s, 0.072 - 0.072 * s],
-    [0.213 - 0.213 * s, 0.715 + 0.285 * s, 0.072 - 0.072 * s],
-    [0.213 - 0.213 * s, 0.715 - 0.715 * s, 0.072 + 0.928 * s],
-  ]
-  return rows.map(
-    (row) => Math.min(1, Math.max(0, row[0] * r + row[1] * g + row[2] * b)) * 255,
-  ) as Rgb
-}
-
-function relativeLuminance(rgb: Rgb): number {
-  const [r, g, b] = rgb.map((c) => {
-    const x = c / 255
-    return x <= 0.04045 ? x / 12.92 : ((x + 0.055) / 1.055) ** 2.4
-  })
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b
-}
-
-function ratio(a: Rgb, b: Rgb): number {
-  const [hi, lo] = [relativeLuminance(a), relativeLuminance(b)].sort((x, y) => y - x)
-  return (hi + 0.05) / (lo + 0.05)
-}
-
-const round = (n: number) => Math.round(n * 100) / 100
 const hex = (rgb: Rgb) => '#' + rgb.map((c) => Math.round(c).toString(16).padStart(2, '0')).join('')
 
 // ---- the field, layer by layer ----------------------------------------------------
@@ -202,14 +174,27 @@ const FIELD_TOP = scrimmed('--nd-scrim-top')
 const FIELD_BOTTOM = scrimmed('--nd-scrim-bottom')
 
 /**
- * The custody block is not bare field: `DropView` gives it a 6% near-white
- * plate and a 16% border, so the copy inside sits on a LIFT. That is the same
- * arithmetic that broke the quiet pill — a lift raises the floor under the text
- * on it — and leaving it out of the model would flatter the one line on the
- * screen that explains who is holding the money. Modelled here rather than
- * fixed there, because the lift lives in a component this task does not own.
+ * A RECESS on the field: the two fact tiles and the sealed gate's sender block.
+ *
+ * They are not bare field and they are not a second pane of glass. Every nested
+ * surface on this palette has to pick a direction, and over a field this bright
+ * the only direction with headroom in it is down: at `--nd-recess-field` the
+ * muted label on a tile clears 4.5:1, where on the bare field it cannot at any
+ * alpha short of solid.
  */
-const FIELD_CUSTODY: Rgb = literal('rgb(244 243 247)', 0.06, FIELD_BOTTOM)
+const FIELD_RECESS: Rgb = (() => {
+  const { rgb, alpha } = colour('--nd-recess-field')
+  return over(rgb, alpha, FIELD_MAX)
+})()
+
+/**
+ * The opposite direction, and the one place it is still allowed: the 44px
+ * circular buttons on the rail are a 6% near-white LIFT, because a control has
+ * to read as raised. Nothing but an icon and a hairline sits on them, so they
+ * are held to the 3:1 non-text floor rather than to 4.5:1 — which is the whole
+ * reason the custody control is not one of them.
+ */
+const FIELD_ROUND: Rgb = literal('rgb(245 240 238)', 0.06, FIELD_MAX)
 
 const SATURATE = Number(token('--nd-saturate').replace('%', '')) / 100
 
@@ -219,7 +204,6 @@ const SATURATE = Number(token('--nd-saturate').replace('%', '')) / 100
 interface Card {
   path: string
   sheet: Rgb
-  well: Rgb
   option: Rgb
   optionPicked: Rgb
   pillLive: Rgb
@@ -234,13 +218,6 @@ function card(path: string, sheet: Rgb): Card {
   return {
     path,
     sheet,
-    /**
-     * The amount's well: a 34% warm-black RECESS inside the card. It is
-     * translucent, so it is derived on each path rather than being a colour —
-     * and it is the reason the well subtracts light rather than adding it,
-     * since a near-white lift put the plate note under the floor.
-     */
-    well: literal('rgb(12 7 6)', 0.34, sheet),
     /** The solid fill of a trivia answer. */
     option: literal('rgb(245 240 238)', 0.1, sheet),
     optionPicked: literal('rgb(245 240 238)', 0.18, sheet),
@@ -326,6 +303,7 @@ function on(fgToken: string, bg: Rgb): Rgb {
 
 const INK = '--nd-on-surface'
 const MUTED = '--nd-on-surface-muted'
+const RULE_STRONG = '--nd-rule-strong'
 
 /**
  * Everything that sits on the card, for one path and one accent option.
@@ -337,15 +315,16 @@ function cardPairs(c: Card, o: Option): Pair[] {
   return [
     { what: 'sponsor line and body copy', fg: on(INK, c.sheet), bg: c.sheet, floor: 4.5 },
     { what: 'secondary copy and captions', fg: on(MUTED, c.sheet), bg: c.sheet, floor: 4.5 },
+    { what: "the sponsor's message keyline (non-text)", fg: o.mark, bg: c.sheet, floor: 3 },
 
-    // --- the money ---
-    { what: 'THE AMOUNT, in its well', fg: on(INK, c.well), bg: c.well, floor: 4.5 },
-    { what: 'THE NIM MARK, in the well', fg: o.accent, bg: c.well, floor: 4.5 },
-    { what: 'the plate note', fg: on(MUTED, c.well), bg: c.well, floor: 4.5 },
+    // --- the action ---
     { what: 'the claim button label', fg: o.onAction, bg: o.action, floor: 4.5 },
     { what: 'the claim button itself (non-text)', fg: o.action, bg: c.sheet, floor: 3 },
-    { what: 'the paid keyline (non-text)', fg: HOT, bg: c.sheet, floor: 3 },
     { what: 'the focus ring (non-text)', fg: o.focus, bg: c.sheet, floor: 3 },
+
+    // --- the last gold in the product, and the reason it is on the card ---
+    { what: 'THE CUSTODY SHIELD (non-text)', fg: o.accent, bg: c.sheet, floor: 3 },
+    { what: 'the custody label beside it', fg: on(MUTED, c.sheet), bg: c.sheet, floor: 4.5 },
 
     // --- the small parts ---
     { what: 'a trivia answer, unpicked', fg: on(INK, c.option), bg: c.option, floor: 4.5 },
@@ -354,41 +333,121 @@ function cardPairs(c: Card, o: Option): Pair[] {
     { what: 'a quiet status pill', fg: on(MUTED, c.pillQuiet), bg: c.pillQuiet, floor: 4.5 },
     { what: 'an explanation panel', fg: on(MUTED, c.panel), bg: c.panel, floor: 4.5 },
     { what: 'a warning panel', fg: on(MUTED, c.panelWarn), bg: c.panelWarn, floor: 4.5 },
+    { what: "a warning panel's hot edge (non-text)", fg: HOT, bg: c.panel, floor: 3 },
   ]
 }
 
-/** Everything that sits on the field itself. Path-independent. */
+/**
+ * Everything that sits on the field itself. Path-independent.
+ *
+ * This list grew by most of the money when the s4 layout moved the amount out
+ * of the card's dark well and onto the open field. Every one of these is
+ * computed against the UNSCRIMMED worst case, because they sit mid-screen where
+ * no scrim band reaches them, and that pair — the amount and the countdown — is
+ * what caps how bright the bloom is allowed to be.
+ */
 function fieldPairs(o: Option): Pair[] {
   return [
-    // straight onto the moving field, with no scrim credit
+    // --- the money, bare on the moving field, with no scrim credit ---
+    { what: 'THE AMOUNT, on the bare field', fg: on(INK, FIELD_MAX), bg: FIELD_MAX, floor: 4.5 },
     {
-      what: 'THE COUNTDOWN and the share count, on the bare field',
+      what: 'THE NIM MARK beside it, which is half the money',
       fg: on(INK, FIELD_MAX),
       bg: FIELD_MAX,
       floor: 4.5,
     },
-    { what: 'the share marks (non-text), on the bare field', fg: o.mark, bg: FIELD_MAX, floor: 3 },
+    {
+      what: "the amount's caption, at full strength because muted cannot reach the floor here",
+      fg: on(INK, FIELD_MAX),
+      bg: FIELD_MAX,
+      floor: 4.5,
+    },
+    { what: 'the paid keyline (non-text)', fg: o.mark, bg: FIELD_MAX, floor: 3 },
+
+    // --- the sealed gate's own copy ---
+    {
+      what: "THE GATE'S HINT and the fixed-and-equal fact, on the bare field",
+      fg: on(INK, FIELD_MAX),
+      bg: FIELD_MAX,
+      floor: 4.5,
+    },
+
+    // --- the recesses ---
+    {
+      what: "THE COUNTDOWN and the share count, on a tile's recess",
+      fg: on(INK, FIELD_RECESS),
+      bg: FIELD_RECESS,
+      floor: 4.5,
+    },
+    {
+      what: "a tile's label, on the same recess",
+      fg: on(MUTED, FIELD_RECESS),
+      bg: FIELD_RECESS,
+      floor: 4.5,
+    },
+    { what: 'the share marks (non-text), on the same recess', fg: o.mark, bg: FIELD_RECESS, floor: 3 },
+    {
+      what: "the sealed gate's sponsor line, on its recess",
+      fg: on(INK, FIELD_RECESS),
+      bg: FIELD_RECESS,
+      floor: 4.5,
+    },
+    {
+      what: 'the unverified-name chip, on the same recess',
+      fg: on(MUTED, FIELD_RECESS),
+      bg: FIELD_RECESS,
+      floor: 4.5,
+    },
+
+    // --- the rail ---
+    { what: 'a rail icon (non-text), on its 6% lift', fg: on(INK, FIELD_ROUND), bg: FIELD_ROUND, floor: 3 },
+    { what: "a rail button's hairline (non-text)", fg: on(RULE_STRONG, FIELD_MAX), bg: FIELD_MAX, floor: 1.4 },
+
+    // --- worst case, bare ---
     { what: 'the focus ring, on the bare field', fg: o.focus, bg: FIELD_MAX, floor: 3 },
 
-    // inside a scrim band
+    // --- inside a scrim band ---
     {
       what: 'the masthead strapline, in the top scrim band',
       fg: on(MUTED, FIELD_TOP),
       bg: FIELD_TOP,
       floor: 4.5,
     },
+  ]
+}
+
+/**
+ * The sealed envelope, which is the first thing every claimant sees.
+ *
+ * It sits DIRECTLY on the field — the sealed screen has no card, which is what
+ * makes it cost no blur — so the worst case behind it is the bloom's own core,
+ * and the paper is within 1.03:1 of that. What carries the object is therefore
+ * its EDGE and not its fill, and what carries the information on it is held to
+ * the ordinary floors on the surfaces it is actually printed on.
+ */
+function envelopePairs(): Pair[] {
+  const FACE = parse(token('--nd-env-face')).rgb
+  const POCKET = parse(token('--nd-env-face-foot')).rgb
+  const WAX = parse(token('--nd-env-foil')).rgb
+  const EDGE = (() => {
+    const { rgb, alpha } = colour('--nd-env-edge')
+    return over(rgb, alpha, FIELD_MAX)
+  })()
+  /** The paper at its LIGHTEST point: the 12%-white end of the face gradient. */
+  const PAPER = literal('rgb(255 255 255)', 0.12, FACE)
+
+  return [
+    { what: "THE ENVELOPE'S EDGE against the field (non-text)", fg: EDGE, bg: FIELD_MAX, floor: 3 },
+    { what: "THE ENVELOPE'S EDGE against its own paper (non-text)", fg: EDGE, bg: PAPER, floor: 3 },
+    { what: "the envelope's label, on its pocket", fg: on('--nd-env-ink', POCKET), bg: POCKET, floor: 4.5 },
     {
-      what: 'the custody line, on its plate in the bottom scrim band',
-      fg: on(MUTED, FIELD_CUSTODY),
-      bg: FIELD_CUSTODY,
+      what: "the envelope's second line, on its pocket",
+      fg: on('--nd-env-ink-2', POCKET),
+      bg: POCKET,
       floor: 4.5,
     },
-    {
-      what: 'the custody heading, on the same plate',
-      fg: on(INK, FIELD_CUSTODY),
-      bg: FIELD_CUSTODY,
-      floor: 4.5,
-    },
+    { what: 'THE PROGRESS RING, on the paper (non-text)', fg: parse(token(INK)).rgb, bg: PAPER, floor: 3 },
+    { what: 'the mark in the wax (non-text)', fg: parse(token('--nd-env-on-foil')).rgb, bg: WAX, floor: 3 },
   ]
 }
 
@@ -515,21 +574,47 @@ for (const o of [OPTION_1, OPTION_2]) {
     })
 
     /**
-     * The two the product holds to AA whatever their size, because misreading
+     * The three the product holds to AA whatever their size, because misreading
      * them has financial consequences. Stated separately from the table so
      * nobody can relax them to the 3:1 large-text allowance by pointing at the
-     * 61px type, and asserted on every path, because the amount is not less
-     * money on a renderer without `backdrop-filter`.
+     * 88px type.
+     *
+     * All three now sit on the FIELD rather than on the card, so they are
+     * path-independent and there is only one number to check — but it is the
+     * pessimistic one, computed against the brightest pixel the bloom can
+     * physically reach with the grain fully lit on top of it.
      */
     it('holds the amount, the mark and the countdown to AA regardless of size', () => {
-      for (const c of PATHS) {
-        expect(round(ratio(on(INK, c.well), c.well)), `the amount, ${c.path}`).toBeGreaterThanOrEqual(4.5)
-        expect(round(ratio(o.accent, c.well)), `the NIM mark, ${c.path}`).toBeGreaterThanOrEqual(4.5)
-      }
-      expect(round(ratio(on(INK, FIELD_MAX), FIELD_MAX))).toBeGreaterThanOrEqual(4.5)
+      expect(round(ratio(on(INK, FIELD_MAX), FIELD_MAX)), 'the amount on the field')
+        .toBeGreaterThanOrEqual(4.5)
+      expect(round(ratio(on(INK, FIELD_RECESS), FIELD_RECESS)), 'the countdown on its tile')
+        .toBeGreaterThanOrEqual(4.5)
     })
   })
 }
+
+describe('the sealed envelope', () => {
+  it.each(envelopePairs())('$what clears $floor:1', ({ fg, bg, floor }) => {
+    expect(round(ratio(fg, bg))).toBeGreaterThanOrEqual(floor)
+  })
+
+  /**
+   * The wax is the last gold in the product and it is 2.83:1 on its own paper,
+   * under the 3:1 a meaningful graphic would need. That is allowed because the
+   * seal carries NO information: the label says "Hold to open" in words, the
+   * progress ring answers "is anything happening", and both of those ARE held
+   * to their floors above. What the seal has instead is a dark rim of its own,
+   * from the outer stop of its radial, and that is what makes it an object
+   * rather than a contrast case.
+   */
+  it('separates the wax from the paper with a rim rather than with hue', () => {
+    const face = parse(token('--nd-env-face')).rgb
+    const wax = parse(token('--nd-env-foil')).rgb
+    const rim = wax.map((c) => c * 0.72) as Rgb
+    expect(round(ratio(wax, face)), 'gold on vermilion, stated rather than hidden').toBeLessThan(3)
+    expect(round(ratio(wax, rim))).toBeGreaterThanOrEqual(1.8)
+  })
+})
 
 describe('the surfaces that are not on the field', () => {
   it.each(LEGACY)('$what clears $floor:1', ({ fg, bg, floor }) => {
@@ -553,35 +638,37 @@ describe('the gold-versus-vermilion collision', () => {
     expect(round(ratio(GOLD, FIELD_MAX))).toBeLessThan(3)
   })
 
-  it('can put it on the dark well, which is where the currency mark lives', () => {
+  /**
+   * Where the one gold on the claim screen actually is, and where it cannot be.
+   *
+   * The s4 layout moved the money out of the card's dark well and onto the open
+   * field, so the currency mark went near-white with it, and every other gold
+   * the render used to carry — the message keyline, the opening pulse, the
+   * outcome mark, the paid keyline — went with it for the same reason. What is
+   * left is the CUSTODY SHIELD, on the card, and it is now literally true that
+   * gold appears once on the claim screen.
+   *
+   * That claim is pinned here because the stylesheet's commentary once made it
+   * and the render disagreed. A statement about how rare a colour is should
+   * fail a build when it stops being true, not age quietly in a comment.
+   */
+  it('keeps the one gold mark legal where it actually sits', () => {
     for (const c of PATHS) {
-      expect(round(ratio(GOLD, c.well)), c.path).toBeGreaterThanOrEqual(4.5)
+      expect(round(ratio(GOLD, c.sheet)), `the custody shield, ${c.path}`).toBeGreaterThanOrEqual(3)
     }
   })
 
-  /**
-   * The gold `DropView` paints that is not the currency mark. These are not
-   * `--nd-accent` — they are the raw `text-gold` / `border-gold` utilities, so
-   * they stay Nimiq gold under both options and have to be checked on their
-   * own. All are non-text marks beside copy that states the same fact, so the
-   * floor is 3:1.
-   *
-   * They are pinned here because the stylesheet's commentary once claimed gold
-   * appeared exactly once and the render disagreed. A claim about how rare a
-   * colour is should fail a build when it stops being true, not age quietly in
-   * a comment.
-   */
-  it('keeps every other gold mark legal where it actually sits', () => {
-    for (const c of PATHS) {
-      expect(
-        round(ratio(GOLD, c.sheet)),
-        `the message keyline, the opening pulse and the outcome mark, ${c.path}`,
-      ).toBeGreaterThanOrEqual(3)
-    }
-    // The custody shield is the only gold on the field, and it survives only
-    // because it sits on a plate inside the bottom scrim band.
-    expect(round(ratio(GOLD, FIELD_CUSTODY))).toBeGreaterThanOrEqual(3)
-    expect(round(ratio(GOLD, FIELD_MAX)), 'and would not survive off it').toBeLessThan(3)
+  it('counts the golds in the shipped stylesheet, and there are two', () => {
+    /**
+     * `--nd-accent` dresses the custody shield and nothing else; `--nd-env-foil`
+     * dresses the wax on the envelope and nothing else. Two rules, on two
+     * different screens. Anything that adds a third has to change this number
+     * and say why.
+     */
+    const shipped = css.replace(/\/\*[\s\S]*?\*\//g, '')
+    const owned = shipped.slice(0, shipped.indexOf('.nd-page {'))
+    const uses = [...owned.matchAll(/(?:color|background(?:-color)?|stroke|fill):\s*var\(--nd-accent\)/g)]
+    expect(uses).toHaveLength(1)
   })
 
   /**
@@ -621,8 +708,8 @@ describe('the table', () => {
       '',
       `FIELD_LIT  ${hex(FIELD_LIT)}  ->  FIELD_MAX ${hex(FIELD_MAX)} (grain ${GRAIN_O})`,
       `FIELD_TOP  ${hex(FIELD_TOP)}      FIELD_BOTTOM ${hex(FIELD_BOTTOM)}`,
+      `RECESS ${hex(FIELD_RECESS)}       ROUND ${hex(FIELD_ROUND)}`,
       `SHEET glass ${hex(GLASS.sheet)}   flat ${hex(FLAT.sheet)}   solid ${hex(SOLID.sheet)}`,
-      `WELL  glass ${hex(GLASS.well)}   flat ${hex(FLAT.well)}   solid ${hex(SOLID.well)}`,
     ]
     for (const o of [OPTION_1, OPTION_2]) {
       out.push('', `=== ${o.label} ===`)
@@ -631,6 +718,7 @@ describe('the table', () => {
       }
       out.push('--- the field ---', ...fieldPairs(o).map(line))
     }
+    out.push('--- the sealed envelope ---', ...envelopePairs().map(line))
     out.push('--- elsewhere ---', ...LEGACY.map(line), '')
     console.log(out.join('\n'))
 

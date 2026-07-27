@@ -299,6 +299,22 @@
   --nd-scrim-bottom: rgb(10 6 5 / 0.7);
   --nd-scrim-clear: rgb(10 6 5 / 0);
 
+  /**
+   * A RECESS on the FIELD, distinct from the 32% recess used on the card.
+   *
+   * Every nested surface on this palette has to choose a direction, and over a
+   * field this bright the only direction with headroom in it is down. The two
+   * fact tiles, the sealed gate's sender block and the amount's own well all
+   * subtract light rather than adding it. At 0.5 over the field's brightest
+   * pixel, secondary copy on it is 5.15:1 where on the bare field it cannot
+   * reach 4.5:1 at any alpha short of solid.
+   *
+   * Deliberately NOT a second `backdrop-filter` surface. Exactly one element in
+   * the tree is ever blurred and it is the sheet; a translucent fill costs a
+   * composite, a blurred one costs a re-read of a moving backdrop.
+   */
+  --nd-recess-field: rgb(12 7 6 / 0.5);
+
   /* ---- the card ----------------------------------------------------------
    *
    * The barrier fill goes under the blur, so text contrast is a property of
@@ -370,15 +386,24 @@
    * 7.22:1 and reads as foil on lacquer. That is the red-packet-and-gold-leaf
    * pairing this product is named after.
    *
-   * "Gold appears exactly once" is the sentence that used to be here and it was
-   * not true of the render. `DropView` also paints gold on the message keyline,
-   * the opening pulse and the outcome mark — all on the dark card at 5.47:1 —
-   * and on the custody shield, which is the only one on the field, at 6.12:1 on
-   * its own plate inside the bottom scrim band. Every one of them clears the
-   * 3:1 non-text floor and `surface.contrast.test.ts` now pins all four, so
-   * this is a question of restraint rather than of legality. The recommendation
-   * stands at three of them going near-white and gold staying on the mark and
-   * the shield, but that edit belongs to `DropView.tsx`, not to this file.
+   * "Gold appears exactly once" is the sentence that used to be here, it was
+   * not true of the render — `DropView` painted four golds — and as of the s4
+   * layout it is true again, by arithmetic rather than by restraint.
+   *
+   * The s4 composition moves the money OUT of the card and onto the open field.
+   * Gold is 2.74:1 on the field's brightest pixel, under even the 3:1 non-text
+   * floor, so every mark that moved onto the field had to go near-white with
+   * it: the currency mark in the lockup, the outcome mark, the paid keyline and
+   * the share marks are all `--nd-mark` now. What is left on the card is the
+   * CUSTODY SHIELD, at 5.47:1, and that is the whole of the gold on the claim
+   * screen. `surface.contrast.test.ts` pins both halves — the shield where it
+   * sits, and gold failing the field it may not sit on.
+   *
+   * The one other gold in the product is the WAX on the sealed envelope, which
+   * is a different screen and a material rather than a UI colour: it carries no
+   * information (the label says "Hold to open" in words and the progress ring
+   * is near-white), and it is what makes the packet read as a packet. See
+   * `--nd-env-foil`.
    *
    * `[data-nd-accent='bright']` is the alternative the owner asked to see
    * built: keep one accent doing every job, and push it to `#ffce45` so it
@@ -394,6 +419,47 @@
   --nd-mark: var(--color-chalk);
   /** Live, hot, warning. On a dark card only: a hard edge, never a bloom. */
   --nd-hot: #ff4d14;
+
+  /* ---- the sealed envelope -----------------------------------------------
+   *
+   * The paper and the amount are different objects and are coloured
+   * differently: a vermilion envelope with a gold wax seal, on the same field
+   * the claim screen uses.
+   *
+   * The paper is DEEPER than the field's bloom on purpose. An object lit by a
+   * light cannot be the same value as the light, or it stops reading as an
+   * object — and the pocket is deeper again, because it is the only ground on
+   * the envelope dark enough to carry the label at 4.5:1.
+   *
+   * The wax is Nimiq gold and it is the last gold in the product. Gold on
+   * vermilion is 2.83:1, under the 3:1 a meaningful graphic would need, and it
+   * is allowed here because the seal carries nothing: the label says "Hold to
+   * open" in words, the progress ring is near-white at 3:1 on the paper, and
+   * the seal separates from the paper by the dark rim of its own radial rather
+   * than by hue. `surface.contrast.test.ts` asserts each of those.
+   */
+  --nd-env-face: #c2360f;
+  --nd-env-face-foot: #7a1d08;
+  /**
+   * The envelope's own edge, and it is load-bearing rather than a shadow.
+   *
+   * The packet sits DIRECTLY on the field now — there is no card behind the
+   * sealed screen, which is what makes it cost no blur — and the bloom's core
+   * is at 70%/58%, which is exactly where a thumb-reachable envelope goes. The
+   * paper and the lit field are the same value to within 1.03:1, so at the
+   * bloom's brightest the silhouette would simply dissolve.
+   *
+   * A near-black rim fixes it at both ends: 3.43:1 against the field's
+   * brightest pixel and 3.34:1 against the paper itself, so the object has a
+   * definite outline whatever is behind it. Cheaper than a scrim, and it is
+   * what a shadowed edge physically is.
+   */
+  --nd-env-edge: rgb(10 6 5 / 0.85);
+  --nd-env-ink: #ffeadd;
+  --nd-env-ink-2: rgb(255 234 221 / 0.76);
+  --nd-env-foil: var(--color-gold);
+  --nd-env-foil-lit: #ffd24a;
+  --nd-env-on-foil: #2a1505;
 
   /* ---- geometry ----------------------------------------------------------
    * Generous. 28px on the card, because a translucent surface with a tight
@@ -421,8 +487,23 @@
   --nd-t-state: 180ms;
   /** Something arriving. */
   --nd-t-enter: 260ms;
-  /** Page choreography. The only duration allowed past 300ms, used once. */
+  /**
+   * Page choreography. Two durations are allowed past 300ms and there are
+   * exactly two beats in the product, one per event:
+   *
+   *   `reveal`  the field's light coming up and STAYING up after a claim
+   *             resolves. A ring is an event; a light that stayed on is a
+   *             memory, and the screen should remember.
+   *   `dip`     the sheet dropping 30px and returning on the same event. s4's
+   *             signature: the surface acknowledges by moving, once.
+   *
+   * They are one beat seen twice, not two beats: the surface moves and the
+   * light behind it changes, on the same state transition. Nothing else in the
+   * product may exceed 300ms — `surface.test.ts` enforces that against this
+   * list, with these two named as the exception.
+   */
   --nd-t-reveal: 900ms;
+  --nd-t-dip: 620ms;
   /**
    * The bloom's drift. Weather, not a screensaver, and slower than the three
    * lights it replaces were: a single large light that moves quickly reads as
@@ -723,56 +804,25 @@ body {
   );
 }
 
-/**
- * The one ring, once, when the seal that is not a seal comes apart.
+/* ===========================================================================
+ * The composition — s4 "Stack"
+ * ===========================================================================
  *
- * It is sized to the field and grows from `scale(0.04)` to exactly `scale(1)`.
- * That bound is a correctness rule carried over from the envelope it replaces,
- * not a taste one: an absolutely positioned decoration counts towards the
- * document's scrollable overflow at its SCALED size, so a ring grown past 1
- * hands the page sideways scroll for the second the claimant is looking
- * hardest. A soft radial gradient rather than a hard border, because a border
- * scaled twenty times is a smear and a gradient is not.
- */
-.nd-ripple {
-  position: absolute;
-  inset: 0;
-  z-index: var(--nd-z-texture);
-  border-radius: 50%;
-  transform-origin: 50% 74%;
-  pointer-events: none;
-  background-image: radial-gradient(
-    closest-side,
-    rgb(245 240 238 / 0) 54%,
-    rgb(245 240 238 / 0.26) 68%,
-    rgb(245 240 238 / 0) 80%
-  );
-  animation: nd-ripple var(--nd-t-reveal) var(--nd-ease) 1 both;
-}
-
-@keyframes nd-ripple {
-  from {
-    transform: scale(0.04);
-    opacity: 0.95;
-  }
-  to {
-    transform: scale(1);
-    opacity: 0;
-  }
-}
-
-/* ---- the poster composition ----------------------------------------------
- *
- * On a phone this is one column: wordmark, sheet, the drop's live facts, the
- * custody line. On a wide surface the same four elements become a poster —
- * field full bleed, sheet centred at its true size, facts top right, custody
- * bottom left. Not a widened column, and nothing appears twice: each fact is
- * ONE element that the container query moves, so there is no second copy to
- * fall out of sync or to be read twice by a screen reader.
+ * Two zones, not one column. An open upper field carries the money bare and
+ * oversized, pushed left past the gutter, with a rail of circular buttons down
+ * its right edge and two fact tiles under it; a sheet rises over the foot of
+ * that field carrying the transaction. At 54rem of the FIELD's own width the
+ * two zones turn sideways: money large on the left, sheet a column on the
+ * right.
  *
  * `@container` against the field's own width rather than a media query, so the
  * same component renders correctly inside `/preview`'s 390px frame and at full
- * width without either knowing anything about the page.
+ * width without either knowing anything about the page. It is also why every
+ * type size below is in `cqw` rather than `vw`: a 390px frame on a 1440px
+ * monitor has to render the phone's type, not the monitor's.
+ *
+ * `.nd-field-inner` carries NO horizontal padding. That is what lets the sheet
+ * run edge to edge on a phone; every child pads itself.
  */
 .nd-field-inner {
   position: relative;
@@ -783,7 +833,6 @@ body {
   flex: 1;
   flex-direction: column;
   min-height: 0;
-  padding: 1.125rem var(--nd-gutter) 1.5rem;
 }
 
 .nd-mast {
@@ -791,6 +840,7 @@ body {
   align-items: baseline;
   gap: 0.5rem;
   margin: 0;
+  padding: 1.125rem var(--nd-gutter) 0;
   font-size: 0.8125rem;
   line-height: 1.4;
   color: var(--nd-on-surface-muted);
@@ -803,58 +853,312 @@ body {
   color: var(--nd-on-surface);
 }
 
-/* The sheet's room. It centres on tall screens and scrolls on short ones. */
-.nd-stage {
+/** The gate and the claim surface are both full-height columns under the mast. */
+.nd-revealed {
   display: flex;
   flex: 1;
   flex-direction: column;
-  justify-content: center;
   min-height: 0;
-  padding: 1.25rem 0 0;
 }
 
-.nd-poster-tr,
-.nd-poster-bl {
-  width: 100%;
-  max-width: var(--nd-sheet-w);
-  margin-inline: auto;
+.nd-revealed:focus {
+  outline: none;
 }
 
-/* Attached to the sheet it describes, not floating under it. */
-.nd-poster-tr {
-  margin-top: 0.875rem;
+.nd-revealed:focus-visible {
+  outline: 2px solid var(--nd-focus);
+  outline-offset: -3px;
 }
 
-/* The field's footer, held off the home indicator by the safe-area inset on
-   `.nd-field` plus this file's own bottom padding. */
-.nd-poster-bl {
-  margin-top: 1.5rem;
+/* ---- the open upper field ------------------------------------------------ */
+
+.nd-upper {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  padding: 1rem var(--nd-gutter);
 }
+
+/**
+ * The money, bare, bottom-weighted, and bleeding half a gutter past the left
+ * edge. Nothing else in the product does that, and it is the whole reason this
+ * layout reads as a composition rather than as a form.
+ */
+.nd-money {
+  margin-top: auto;
+  margin-left: calc(var(--nd-gutter) * -0.5);
+}
+
+/**
+ * The amount wraps its unit rather than overflowing.
+ *
+ * The size steps down by CHARACTER COUNT (in `DropView`), because what
+ * overflows a 320px screen is `10000.00000`, not a narrow viewport, and each
+ * step is itself fluid in `cqw` so the same step also fits a 320px phone.
+ * `flex-wrap` is the belt: if a step-down still does not fit, `NIM` drops to
+ * its own line and the number stays whole. A denomination never breaks across
+ * two lines and is never truncated.
+ */
+.nd-amount {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  margin: 0;
+  font-weight: 800;
+  line-height: 0.88;
+  letter-spacing: -0.05em;
+  color: var(--nd-on-surface);
+}
+
+.nd-amount[data-size='lg'] {
+  font-size: clamp(2.75rem, 16cqw, 5.5rem);
+}
+.nd-amount[data-size='md'] {
+  font-size: clamp(2rem, 11cqw, 3.5rem);
+}
+.nd-amount[data-size='sm'] {
+  font-size: clamp(1.5rem, 8cqw, 2.5rem);
+}
+
+/**
+ * Full strength, not muted, and that is arithmetic rather than emphasis. This
+ * line sits on the bare field at roughly 60% of its height, which no scrim band
+ * reaches, and secondary copy cannot clear 4.5:1 there at any alpha short of
+ * solid. Near-white at 4.70:1 clears it; the weight does the de-emphasis that
+ * the alpha is not allowed to do.
+ */
+.nd-moneycap {
+  margin: 0.625rem 0 0;
+  padding-left: calc(var(--nd-gutter) * 0.5);
+  font-size: 0.84375rem;
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--nd-on-surface);
+}
+
+/* The one celebratory mark on the claim screen, and it lands only after the
+   backend has said `paid`. Near-white, not vermilion: it moved onto the field
+   with the money, and the field's own hot colour is invisible against the field
+   at 1.6:1. */
+.nd-keyline {
+  width: 3.25rem;
+  height: 2px;
+  margin: 0.75rem 0 0 calc(var(--nd-gutter) * 0.5);
+  border-radius: 999px;
+  background-color: var(--nd-mark);
+  animation: nd-keyline var(--nd-t-enter) var(--nd-ease) 1 both;
+}
+
+@keyframes nd-keyline {
+  from {
+    transform: scaleX(0);
+  }
+}
+
+/** The dead ends, and the boot frame. A heading where the money would be. */
+.nd-headline {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-top: auto;
+  max-width: 18ch;
+  color: var(--nd-on-surface);
+}
+
+.nd-headline h1 {
+  margin: 0;
+  font-size: clamp(1.5rem, 7cqw, 1.75rem);
+  font-weight: 700;
+  line-height: 1.16;
+  letter-spacing: -0.03em;
+  text-wrap: balance;
+}
+
+/* ---- the circular rail --------------------------------------------------
+ *
+ * One diameter, one hairline, every secondary affordance on the field. 44px is
+ * the touch floor and this is exactly 44, with an 8px gap, so two of them are
+ * two separate targets rather than one 96px smear.
+ */
+.nd-rail {
+  position: absolute;
+  top: 1rem;
+  right: var(--nd-gutter);
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.nd-round {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  flex: 0 0 auto;
+  border: 1px solid var(--nd-rule-strong);
+  border-radius: 50%;
+  background-color: rgb(245 240 238 / 0.06);
+  color: var(--nd-on-surface);
+  cursor: pointer;
+  transition:
+    background-color var(--nd-t-press) ease-out,
+    transform var(--nd-t-press) var(--nd-ease),
+    border-color var(--nd-t-press) ease-out;
+}
+
+.nd-round:hover {
+  background-color: rgb(245 240 238 / 0.13);
+  border-color: rgb(245 240 238 / 0.4);
+}
+
+.nd-round:active {
+  transform: scale(0.92);
+}
+
+/* ---- the fact tiles ------------------------------------------------------
+ *
+ * A RECESS, never a second pane of glass: exactly one element in the tree is
+ * blurred and it is the sheet. Subtracting light is also what gives the muted
+ * label its 5.15:1, which the bare field cannot.
+ */
+.nd-tiles {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
+.nd-tile {
+  position: relative;
+  min-height: 4.25rem;
+  padding: 0.6875rem 0.75rem 0.625rem;
+  border: 1px solid var(--nd-rule);
+  border-radius: 1.125rem;
+  background-color: var(--nd-recess-field);
+}
+
+.nd-tile > p {
+  margin: 0;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--nd-on-surface-muted);
+}
+
+/* Full-strength ink and tabular figures: a countdown and a share count are
+   money facts and are held to AA regardless of size. */
+.nd-tile > b {
+  display: block;
+  margin-top: 0.1875rem;
+  font-size: 1.125rem;
+  font-weight: 800;
+  letter-spacing: -0.015em;
+  color: var(--nd-on-surface);
+}
+
+.nd-num {
+  font-variant-numeric: tabular-nums;
+}
+
+.nd-affordance {
+  position: absolute;
+  top: 0.5625rem;
+  right: 0.5625rem;
+  display: grid;
+  place-items: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  border: 1px solid var(--nd-rule-strong);
+  border-radius: 50%;
+  color: var(--nd-on-surface-muted);
+}
+
+/** The share marks. Never the only carrier: the count is printed above them. */
+.nim-pips {
+  display: flex;
+  gap: 0.1875rem;
+  margin-top: 0.375rem;
+  color: var(--nd-mark);
+}
+
+.nim-pip.is-spent {
+  opacity: 0.45;
+}
+
+/* ---- the amount lockup ---------------------------------------------------
+ * Figure, mark, word, on one baseline. The mark's size and lift are computed in
+ * `ui/Nim.tsx` from the figure's cap height, so nothing here hardcodes a nudge;
+ * these rules handle spacing and the no-wrap contract.
+ */
+.nim-figure {
+  font-variant-numeric: tabular-nums lining-nums;
+  font-feature-settings:
+    'tnum' 1,
+    'lnum' 1;
+  white-space: nowrap;
+}
+
+/* Optical, not metric: the hexagon's left vertex is a point, so the gap before
+   it can be tighter than the gap after it without the pair looking cramped. */
+.nim-mark {
+  margin: 0 0.17em 0 0.13em;
+}
+
+.nim-word {
+  font-size: 0.2em;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+
+/* ---- the poster ---------------------------------------------------------- */
 
 @container nd-field (min-width: 54rem) {
-  .nd-field-inner {
-    padding: 2rem 2.5rem 2.125rem;
-  }
-  .nd-stage {
-    justify-content: center;
-    padding: 0;
-  }
-  .nd-poster-tr {
+  /* The mast is a sibling of the two zones and would otherwise push the sheet
+     down off the top edge. Lifting it out of the flow is what lets the sheet be
+     a full-height column; the upper field reserves the band it lands in. */
+  .nd-mast {
     position: absolute;
     top: 2rem;
-    right: 2.5rem;
-    width: auto;
-    max-width: 22rem;
-    margin: 0;
-    text-align: right;
-  }
-  .nd-poster-bl {
-    position: absolute;
-    bottom: 2rem;
     left: 2.5rem;
-    width: auto;
-    max-width: 24rem;
-    margin: 0;
+    padding: 0;
+  }
+  .nd-revealed {
+    flex-direction: row;
+    align-items: stretch;
+  }
+  .nd-upper {
+    flex: 1 1 auto;
+    padding: 5.25rem 2.5rem 2.5rem;
+  }
+  .nd-amount[data-size='lg'] {
+    font-size: clamp(3.5rem, 8cqw, 8.5rem);
+  }
+  .nd-amount[data-size='md'] {
+    font-size: clamp(2.5rem, 5.5cqw, 5.5rem);
+  }
+  .nd-amount[data-size='sm'] {
+    font-size: clamp(2rem, 4cqw, 4rem);
+  }
+  .nd-headline h1 {
+    font-size: clamp(1.75rem, 3.4cqw, 2.5rem);
+  }
+  .nd-tiles {
+    max-width: 26rem;
+  }
+  /* The rail turns horizontal and parks bottom left, under the amount's own
+     caption. It is absolute, so nothing reflows around it; the upper field
+     reserves the band with its bottom padding instead. */
+  .nd-rail {
+    flex-direction: row;
+    top: auto;
+    right: auto;
+    bottom: 2.125rem;
+    left: 2.5rem;
+  }
+  .nd-money {
+    margin-bottom: 4.25rem;
   }
 }
 
@@ -880,16 +1184,67 @@ body {
  */
 .nd-glass {
   position: relative;
+  flex: 0 0 auto;
   width: 100%;
-  max-width: var(--nd-sheet-w);
-  margin-inline: auto;
-  padding: 1.5rem 1.375rem 1.375rem;
+  padding: 0.625rem var(--nd-gutter) 1.125rem;
   border: 1px solid rgb(245 240 238 / 0.1);
-  border-radius: var(--nd-radius-sheet);
+  border-bottom: 0;
+  border-radius: var(--nd-radius-sheet) var(--nd-radius-sheet) 0 0;
   background-image: linear-gradient(var(--nd-barrier-flat-top), var(--nd-barrier-flat-bottom));
   box-shadow:
     inset 0 1px 0 rgb(255 255 255 / 0.14),
-    0 1.5rem 3rem -1.5rem rgb(0 0 0 / 0.85);
+    0 -1.5rem 3rem -1.5rem rgb(0 0 0 / 0.85);
+}
+
+/** The grab handle, as a pseudo-element, so the sheet's child order is the
+    contract and nothing else. It goes on the poster, where there is no bottom
+    edge to be gripped. */
+.nd-glass::before {
+  content: '';
+  display: block;
+  width: 2.375rem;
+  height: 4px;
+  margin: 0 auto 0.75rem;
+  border-radius: 999px;
+  background-color: rgb(245 240 238 / 0.24);
+}
+
+/**
+ * The signature beat: the surface acknowledges by moving, once.
+ *
+ * It moves a sheet that is ALREADY fully painted — `from` only, no `to`, and
+ * nothing inside it waits on the animation. Switch animation off and the sheet
+ * is simply where it ends up. `translateY` also cannot create horizontal
+ * overflow, which is what the ring this replaces had to be bounded against.
+ */
+.nd-glass[data-dip='true'] {
+  animation: nd-dip var(--nd-t-dip) var(--nd-ease) 1 both;
+}
+
+@keyframes nd-dip {
+  from {
+    transform: translateY(30px);
+  }
+}
+
+@container nd-field (min-width: 54rem) {
+  .nd-glass {
+    flex: 0 0 27rem;
+    align-self: stretch;
+    max-width: var(--nd-sheet-w);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    padding: 1.875rem 1.625rem;
+    border-bottom: 1px solid rgb(245 240 238 / 0.1);
+    border-radius: var(--nd-radius-sheet) 0 0 var(--nd-radius-sheet);
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.14),
+      -1.5rem 0 3rem -1.5rem rgb(0 0 0 / 0.85);
+  }
+  .nd-glass::before {
+    display: none;
+  }
 }
 
 @supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
@@ -923,136 +1278,103 @@ body {
 }
 
 /* ===========================================================================
- * The money
+ * Inside the sheet
  * ======================================================================== */
 
-/**
- * The amount sits in a well: a RECESS inside the card, with a lit top edge,
- * rather than the near-white slab this used to be.
- *
- * A recess and not a lift, and that is a contrast decision before it is a
- * material one. Every nested surface on a translucent card has to choose a
- * direction, and lifting one by adding near-white raises the floor under every
- * piece of secondary text on it — the plate note landed at 4.38:1 that way.
- * Subtracting light instead buys headroom back on the one surface that carries
- * the number, and it is also what a well physically is.
- *
- * The slab existed to keep rule 1 physical. The amount was dark ink on light
- * paper, so if that paper had been translucent the number's legibility would
- * have depended on whatever the field was doing behind it — a real risk, and
- * opacity was the cheap defence. That risk has inverted. The amount is
- * near-white now, so the dangerous direction is a BRIGHT backdrop, and the
- * brightest this one can get is the bloom's core seen through the card and then
- * through this well: 12.38:1 at the card's thinnest, against a floor of 4.5.
- * The number is safe by arithmetic instead of by opacity, and
- * `surface.contrast.test.ts` is what keeps that true rather than this comment.
- *
- * Rule 1's other half is untouched: the amount is a plain declaration, it
- * starts visible, and no transition is between a claimant and the number.
- */
-.nd-plate {
-  margin-top: 1.5rem;
-  padding: 1.25rem 1rem 1rem;
-  border-radius: var(--nd-radius-plate);
-  background-color: rgb(12 7 6 / 0.34);
-  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.07);
-  color: var(--nd-on-surface);
-  text-align: center;
-}
-
-/**
- * The amount wraps its unit rather than overflowing.
- *
- * What overflows a 320px screen is `10000.00000`, not a narrow viewport, so the
- * size steps down by character count (in `DropView`). `flex-wrap` is the belt:
- * if a step-down still does not fit, `NIM` drops to its own centred line and
- * the number stays whole. A denomination never breaks across two lines and is
- * never truncated.
- */
-.nd-amount {
+/** Who sent this, and the label that says the name is not verified. */
+.nd-from {
   display: flex;
+  align-items: center;
   flex-wrap: wrap;
-  align-items: baseline;
-  justify-content: center;
-  gap: 0 0.5rem;
+  gap: 0.375rem 0.5rem;
   margin: 0;
-  font-weight: 600;
-  line-height: 0.95;
-  letter-spacing: -0.035em;
-  font-variant-numeric: tabular-nums;
+  font-size: 0.875rem;
+  line-height: 1.4;
+  color: var(--nd-on-surface-muted);
 }
 
-.nd-amount > span:first-child {
+.nd-from b {
+  font-weight: 800;
+  color: var(--nd-on-surface);
+}
+
+.nd-chip {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  padding: 0.125rem 0.625rem;
+  border: 1px solid var(--nd-rule-strong);
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--nd-on-surface-muted);
   white-space: nowrap;
 }
 
-.nd-amount[data-size='lg'] {
-  font-size: 3.8125rem;
-}
-.nd-amount[data-size='md'] {
-  font-size: 2.75rem;
-}
-.nd-amount[data-size='sm'] {
-  font-size: 1.9375rem;
-}
-
 /**
- * The currency mark, and the only gold on the screen.
+ * The sponsor's own words.
  *
- * It is gold BECAUSE it is the only one: on a vermilion field a second gold
- * element would make both of them read as warm noise, and a single one reads
- * as foil. It is held to the body floor rather than the large-text allowance
- * even though it renders around 18px bold, because it is half of the money.
- * 7.22:1 on the well over the field's brightest pixel, and it is checked on all
- * three card paths, not just the glass one.
+ * The keyline is near-white and 2px, where it used to be 1px of Nimiq gold.
+ * That is the palette review's recommendation carried out: gold stopped being a
+ * UI colour, and on this card near-white at 9.30:1 is louder than gold at
+ * 5.47:1 ever was. It is a quote bar rather than a decoration, so it is held to
+ * the 3:1 non-text floor.
  */
-.nd-unit {
-  font-size: 0.3em;
-  font-weight: 700;
-  letter-spacing: 0.14em;
-  color: var(--nd-accent);
-}
-
-.nd-plate-note {
+.nd-message {
   margin: 0.625rem 0 0;
-  font-size: 0.8125rem;
-  line-height: 1.5;
-  color: var(--nd-on-surface-muted);
+  padding-left: 0.875rem;
+  border-left: 2px solid var(--nd-mark);
+  font-size: 1rem;
+  line-height: 1.4;
+  letter-spacing: -0.01em;
+  color: var(--nd-on-surface);
   text-wrap: pretty;
+  overflow-wrap: anywhere;
 }
 
 /**
- * The caption slot: the line directly under the amount.
+ * The caption slot: the line directly under the sheet's header.
  *
  * One sentence of context on an ordinary drop, the trivia question on a gated
  * one. Sized so a heading-weight question needs no layout change, and never
  * clamped — a question a claimant cannot finish reading is not a question.
  */
 .nd-caption {
-  margin-top: 1rem;
-  text-align: center;
+  margin-top: 0.75rem;
 }
 
 .nd-caption > :first-child {
   margin-top: 0;
 }
 
-/* The one celebratory beat in the product, and it lands only after the backend
-   has said `paid`. Vermilion rather than gold: on a dark card a hard 2px line
-   of the field's own hot colour reads as a spark, and it keeps gold rare. */
-.nd-keyline {
-  width: 3.25rem;
-  height: 2px;
-  margin: 0.75rem auto 0;
-  border-radius: 999px;
-  background-color: var(--nd-hot);
-  animation: nd-keyline var(--nd-t-enter) var(--nd-ease) 1 both;
+/**
+ * The custody control, at the foot of the sheet, and the last gold in the
+ * product outside the wax on the envelope.
+ *
+ * It is on the card and not on the field, and that is arithmetic: Nimiq gold is
+ * 5.47:1 here and 2.74:1 on the field's brightest pixel, which is under even
+ * the 3:1 a non-text mark is held to.
+ */
+.nd-custody {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  width: 100%;
+  min-height: 2.75rem;
+  margin-top: 0.5rem;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--nd-on-surface-muted);
+  cursor: pointer;
 }
 
-@keyframes nd-keyline {
-  from {
-    transform: scaleX(0);
-  }
+.nd-custody svg {
+  flex: 0 0 auto;
+  color: var(--nd-accent);
 }
 
 /* ===========================================================================
@@ -1293,54 +1615,16 @@ body {
   overflow-wrap: anywhere;
 }
 
-/** The drop's live state, as the field's own furniture. */
-.nd-facts {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: center;
-  gap: 0.375rem 0.625rem;
-  margin: 0;
-  font-size: 0.8125rem;
-  font-weight: 500;
-  /* Full strength, not muted: a countdown is a money fact and is held to AA
-     regardless of size. 4.70:1 on the field's brightest possible pixel, grain
-     included, and UNSCRIMMED, because on a phone this sits mid-screen where no
-     scrim reaches it. It is the pair that decided how bright the bloom is
-     allowed to be — literally: `--nd-bloom-o-warm` is set by this number. */
-  color: var(--nd-on-surface);
-  font-variant-numeric: tabular-nums;
-}
-
-.nd-marks {
-  display: inline-flex;
-  gap: 0.25rem;
-}
-
-.nd-marks > i {
-  display: block;
-  width: 1rem;
-  height: 0.25rem;
-  border-radius: 999px;
-  /* Near-white, at 4.70:1 on the field's brightest pixel. Gold would be 2.74:1
-     here and fails the 3:1 non-text floor outright — the marks sit on the bare
-     field, which is the one place Nimiq gold cannot go. The count beside them
-     carries the same fact in words, so they are never the only carrier. */
-  background-color: var(--nd-mark);
-}
-
-.nd-marks > i[data-taken='true'] {
-  background-color: rgb(245 240 238 / 0.24);
-}
-
-@container nd-field (min-width: 54rem) {
-  .nd-facts {
-    justify-content: flex-end;
-    font-size: 0.9375rem;
-  }
-  .nd-poster-bl .nd-note {
-    max-width: 34ch;
-  }
+/** Announced, not shown. A live region for a control with no label to change. */
+.nd-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 @keyframes nd-rise {
@@ -1394,6 +1678,465 @@ body {
 }
 
 /* ===========================================================================
+ * The sealed gate
+ * ===========================================================================
+ *
+ * The first thing a claimant sees, and there is no amount anywhere on it.
+ *
+ * Bottom-weighted, and that is the whole layout decision. The envelope IS the
+ * gesture target, and it has to land inside the arc a thumb sweeps on a
+ * one-handed grip — which on an 844px screen is the bottom third, clear of the
+ * notch and clear of the home indicator. A ritual at the top of the viewport is
+ * a two-handed design for a one-handed moment.
+ *
+ * No sheet, so no `backdrop-filter`: the first screen in the product costs no
+ * blur at all.
+ */
+.nd-gate {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 1rem;
+  min-height: 0;
+  padding: 1.25rem var(--nd-gutter) 1.5rem;
+}
+
+/**
+ * Who sent this, and their words. Neither is the amount, so both are allowed on
+ * the sealed screen.
+ *
+ * On a recess: the "name unverified" chip is secondary copy and this block sits
+ * mid-screen, where no scrim band reaches it and the bare field cannot carry
+ * secondary copy at any alpha short of solid.
+ */
+.nd-gate-from {
+  width: 100%;
+  max-width: 25.5rem;
+  margin-bottom: auto;
+  padding: 0.875rem 1rem;
+  border: 1px solid var(--nd-rule);
+  border-radius: var(--nd-radius-plate);
+  background-color: var(--nd-recess-field);
+}
+
+.nd-gate-who {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.375rem 0.5rem;
+  margin: 0;
+  font-size: 0.875rem;
+  line-height: 1.4;
+  color: var(--nd-on-surface-muted);
+}
+
+.nd-gate-who b {
+  font-weight: 800;
+  color: var(--nd-on-surface);
+}
+
+.nd-gate-msg {
+  margin: 0.625rem 0 0;
+  font-size: 1rem;
+  line-height: 1.4;
+  letter-spacing: -0.01em;
+  color: var(--nd-on-surface);
+  text-wrap: pretty;
+  overflow-wrap: anywhere;
+}
+
+/**
+ * The instruction, and the fixed-and-equal fact that makes concealing the
+ * amount a ritual rather than a draw.
+ *
+ * Full strength rather than muted, for the same arithmetic as `.nd-moneycap`:
+ * it sits on the bare field below the envelope, where no scrim reaches.
+ */
+.nd-gate-hint {
+  max-width: 34ch;
+  margin: 0;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  text-align: center;
+  color: var(--nd-on-surface);
+  text-wrap: pretty;
+}
+
+.nd-gate-out {
+  width: 100%;
+  max-width: 25.5rem;
+}
+
+.nd-gate-qr {
+  margin-top: 0.875rem;
+  padding: 0.875rem;
+  border-radius: var(--nd-radius-plate);
+  background-color: var(--color-sheet);
+  text-align: center;
+}
+
+.nd-gate-qr img {
+  display: block;
+  width: 100%;
+  max-width: 10.5rem;
+  height: auto;
+  margin: 0 auto;
+}
+
+.nd-gate-qr > p {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  margin: 0.5rem 0 0;
+  font-size: 0.75rem;
+  color: var(--nd-on-surface-muted);
+}
+
+.nd-gate-qr-fallback {
+  margin: 0;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--nd-on-surface-muted);
+}
+
+.nd-gate-qr-fallback code {
+  display: block;
+  margin-top: 0.375rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8125rem;
+  color: var(--nd-on-surface);
+  /* A link that has to be typed is read one character at a time, so it breaks
+     anywhere rather than overflowing, and it is selectable. */
+  overflow-wrap: anywhere;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+@container nd-field (min-width: 54rem) {
+  .nd-gate {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 24rem);
+    align-items: center;
+    justify-items: start;
+    gap: 1rem 3rem;
+    padding: 5.25rem 2.5rem 2.5rem;
+  }
+  .nd-gate-from {
+    grid-column: 2;
+    margin-bottom: 0;
+  }
+  .nd-gate .nd-env {
+    grid-column: 1;
+    grid-row: 1 / span 3;
+    justify-self: center;
+  }
+  .nd-gate-hint,
+  .nd-gate-out {
+    grid-column: 2;
+    text-align: left;
+  }
+}
+
+/* ---- the envelope --------------------------------------------------------
+ *
+ * The whole object is the control: at phone width 336x232, which is 44px of
+ * touch target about forty times over, and it sits in the bottom half of the
+ * screen where a one-handed thumb already is.
+ */
+.nd-env {
+  position: relative;
+  display: block;
+  width: min(100%, 21rem);
+  aspect-ratio: 1.45;
+  margin: 0 auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--nd-on-surface);
+  cursor: pointer;
+  /* The browser must not decide, two seconds in, that this was a scroll. */
+  touch-action: none;
+  /* The long-press furniture: Android's context menu, iOS's callout and
+     magnifier, and the text selection both of them start with. */
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.nd-env[data-static='true'] {
+  cursor: default;
+}
+
+.nd-env-shake {
+  position: absolute;
+  inset: 0;
+  display: block;
+  /* transform only, written per frame from JS. Nothing else animates. */
+  will-change: transform;
+}
+
+.nd-env-face {
+  position: absolute;
+  inset: 0;
+  border-radius: 1rem;
+  background:
+    /* the pocket's foil edge */
+    linear-gradient(
+      to bottom,
+      transparent 0 calc(66% - 1px),
+      color-mix(in srgb, var(--nd-env-foil) 46%, transparent) calc(66% - 1px) 66%,
+      transparent 66%
+    ),
+    /* the pocket itself, a hard edge because it is a real fold */
+      linear-gradient(to bottom, transparent 0 66%, var(--nd-env-face-foot) 66% 100%),
+    linear-gradient(
+      150deg,
+      color-mix(in srgb, var(--nd-env-face) 88%, #fff 12%) 0%,
+      var(--nd-env-face) 46%,
+      color-mix(in srgb, var(--nd-env-face) 86%, #000 14%) 100%
+    );
+  box-shadow:
+    0 0 0 1px var(--nd-env-edge),
+    inset 0 0 0 1px color-mix(in srgb, var(--nd-env-foil) 34%, transparent),
+    0 1.625rem 2.75rem -1.875rem rgb(0 0 0 / 0.95);
+}
+
+/* The flap: one clipped span, its point landing dead centre where the seal is.
+ *
+ * The foil crease is TWO stacked triangles, not one self-intersecting outline.
+ * A polygon that traces an outer ring and then an inner one is the usual CSS
+ * trick for a hairline border on a clipped shape, and it does not work here:
+ * `clip-path` fills with the NONZERO rule, so the inner contour does not
+ * subtract and the "hairline" paints as a solid gold triangle over the whole
+ * flap. Declaring `evenodd` would fix the rule but leaves a seam along the
+ * segment joining the contours, so instead: the flap itself is the foil, and a
+ * second triangle inset by the crease width sits on top of it carrying the
+ * paper. The gold that survives is exactly the 1.5px that misses. */
+.nd-env-flap {
+  position: absolute;
+  inset: 0 0 auto;
+  height: 62%;
+  clip-path: polygon(0 0, 100% 0, 50% 100%);
+  border-radius: 1rem 1rem 0 0;
+  background: color-mix(in srgb, var(--nd-env-foil) 55%, transparent);
+}
+
+.nd-env-flap::after {
+  content: '';
+  position: absolute;
+  /* Bottom inset is doubled: at the apex two edges meet at a shallow angle, so
+     a uniform inset thins the crease to nothing exactly where the eye is, which
+     is the point the seal sits on. */
+  inset: 1.5px 1.5px 3px;
+  clip-path: polygon(0 0, 100% 0, 50% 100%);
+  border-radius: 15px 15px 0 0;
+  background: linear-gradient(
+    170deg,
+    color-mix(in srgb, var(--nd-env-face) 76%, #fff 24%) 0%,
+    color-mix(in srgb, var(--nd-env-face) 92%, #000 8%) 78%
+  );
+}
+
+.nd-env-seal {
+  position: absolute;
+  left: 50%;
+  top: 62%;
+  width: 4.625rem;
+  height: 4.625rem;
+  margin: -2.3125rem 0 0 -2.3125rem;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: radial-gradient(
+    120% 120% at 34% 26%,
+    var(--nd-env-foil-lit) 0%,
+    var(--nd-env-foil) 58%,
+    color-mix(in srgb, var(--nd-env-foil) 72%, #000 28%) 100%
+  );
+  color: var(--nd-env-on-foil);
+  box-shadow: 0 0.375rem 0.875rem -0.5rem rgb(0 0 0 / 0.9);
+}
+
+/* The progress ring, on the seal, because that is where the thumb is looking.
+   Unwrapping a stroke is the one progress form that reads as "a thing is being
+   undone" rather than as a download. */
+.nd-env-ring {
+  position: absolute;
+  inset: -9px;
+  transform: rotate(-90deg);
+}
+
+.nd-env-ring circle {
+  fill: none;
+  stroke-width: 5;
+  stroke-linecap: round;
+  --c: 283;
+  stroke-dasharray: var(--c);
+}
+
+.nd-env-ring-track {
+  stroke: rgb(245 240 238 / 0.22);
+}
+
+.nd-env-ring-fill {
+  /* Near-white, not gold. This is the one meaningful non-text graphic on the
+     screen — it is the answer to "is anything happening" — so it is held to 3:1
+     against the paper, and gold on vermilion does not get there. It also leaves
+     the wax as the only gold, which is what makes the wax read as foil. */
+  stroke: var(--nd-on-surface);
+  stroke-dashoffset: calc(var(--c) * (1 - var(--hold, 0)));
+}
+
+.nd-env-label {
+  position: absolute;
+  right: 0;
+  bottom: 0.8125rem;
+  left: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  font-size: 0.9375rem;
+  font-weight: 800;
+  letter-spacing: -0.01em;
+  color: var(--nd-env-ink);
+}
+
+.nd-env-label em {
+  font-style: normal;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--nd-env-ink-2);
+}
+
+/* The second reading of the same progress, along the envelope's foot, for the
+   thumb that is covering the seal. `scaleX`, so it costs a composite and not a
+   layout. */
+.nd-env-bar {
+  position: absolute;
+  right: 0.875rem;
+  bottom: 0.4375rem;
+  left: 0.875rem;
+  height: 3px;
+  border-radius: 2px;
+  background: rgb(245 240 238 / 0.16);
+  overflow: hidden;
+}
+
+.nd-env-fill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--nd-on-surface);
+  transform: scaleX(var(--hold, 0));
+  transform-origin: left center;
+}
+
+.nd-env[data-phase='holding'] .nd-env-seal {
+  box-shadow:
+    0 2px 8px -6px rgb(0 0 0 / 0.9),
+    0 0 0 calc(var(--hold, 0) * 5px) color-mix(in srgb, var(--nd-env-foil) 26%, transparent);
+}
+
+/* The way out, for anyone the hold does not work for. Present for assistive
+   technology from the first render; on screen for everyone the moment a hold
+   ends early. Clipped rather than displaced, so it stays focusable and stays
+   announced. */
+.nd-env-escape {
+  display: block;
+  min-height: 2.75rem;
+  margin: 0 auto;
+  padding: 0.75rem 1rem;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 0.875rem;
+  font-weight: 700;
+  color: var(--nd-on-surface);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.nd-env-escape[data-shown='false'] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* ---- the burst -----------------------------------------------------------
+ *
+ * `position: fixed` is load-bearing, not layout convenience: a fixed element is
+ * outside the document's scrollable overflow rectangle, so twenty-four
+ * particles cannot hand the page sideways scroll at the exact second everyone
+ * is looking. There is nothing to clip and nothing that can escape.
+ */
+.nd-burst {
+  position: fixed;
+  left: 50%;
+  top: 52%;
+  z-index: var(--nd-z-toast);
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
+.nd-bit {
+  position: absolute;
+  width: var(--size);
+  height: var(--size);
+  margin: calc(var(--size) / -2) 0 0 calc(var(--size) / -2);
+  border-radius: var(--round);
+  animation: nd-fly var(--dur) cubic-bezier(0.16, 0.9, 0.36, 1) var(--delay) 1 both;
+}
+
+/* Value contrast, not hue. On a warm dark field with a vermilion bloom in it, a
+   warm particle is invisible — it is the same lightness as what it is flying
+   over. So the confetti is near-white and gold, and never orange. */
+.nd-bit[data-tone='0'] {
+  background: var(--nd-on-surface);
+}
+.nd-bit[data-tone='1'] {
+  background: var(--nd-env-foil-lit);
+}
+.nd-bit[data-tone='2'] {
+  background: #ffffff;
+}
+.nd-bit[data-tone='3'] {
+  background: var(--nd-env-foil);
+}
+/* The paper: the envelope's own face, coming apart. It reads against the bloom
+   by its gold keyline rather than by its fill, for the same reason. */
+.nd-bit[data-tone='4'] {
+  background: var(--nd-env-face);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--nd-env-foil) 62%, transparent);
+}
+
+@keyframes nd-fly {
+  from {
+    transform: translate3d(0, 0, 0) scale(0.4) rotate(0deg);
+    opacity: 1;
+  }
+  62% {
+    opacity: 1;
+  }
+  to {
+    transform: translate3d(var(--dx), var(--dy), 0) scale(1) rotate(var(--rot));
+    opacity: 0;
+  }
+}
+
+/* ===========================================================================
  * Reduced motion
  * ===========================================================================
  *
@@ -1423,10 +2166,18 @@ body {
     transform: translate3d(-5vmax, -3vmax, 0);
   }
 
-  /* A ring crossing the screen has no reduced-motion equivalent worth having.
-     The hotter cast the field keeps is the part that carries the meaning, and
-     it survives as a plain state. */
-  .nd-ripple {
+  /* Particles crossing the screen have no reduced-motion equivalent worth
+     having. The hotter cast the field keeps is the part that carries the
+     meaning, and it survives as a plain state. Nothing is lost: everything the
+     burst celebrates is also on screen in words. */
+  .nd-burst {
+    display: none;
+  }
+
+  /* There is no hold under reduced motion — a plain tap opens the envelope —
+     so the two readings of the hold's progress have nothing to report. */
+  .nd-env-bar,
+  .nd-env-ring {
     display: none;
   }
 }

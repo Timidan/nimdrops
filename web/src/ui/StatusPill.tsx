@@ -32,12 +32,20 @@ const LABELS: Record<ClaimUiState, string> = {
   paused: 'Paused',
 }
 
-/** Gold = something is happening; solid = a settled fact; quiet = a dead end. */
+/**
+ * Vermilion = something is happening; solid = a settled fact; quiet = a dead
+ * end.
+ *
+ * It said "gold" here until the palette changed under it. The live tone is a
+ * hard vermilion edge on a dark card — the one place the field's own colour may
+ * be a line rather than a bloom — and gold is now a material rather than a UI
+ * colour: it appears once on the claim screen, on the custody shield.
+ */
 type Tone = 'live' | 'settled' | 'quiet'
 
 const TONES: Record<ClaimUiState, Tone> = {
   loading: 'quiet',
-  // Quiet, not gold: nothing is happening yet. It is also not a dead end, so
+  // Quiet, not live: nothing is happening yet. It is also not a dead end, so
   // the copy under it — not the pill — carries the "this can still go live".
   'awaiting-funding': 'quiet',
   'no-wallet': 'quiet',

@@ -23,48 +23,92 @@ import type { ReactNode } from 'react'
  *
  * All of that lives in `index.css` under `.nd-glass`, because it is material
  * rather than behaviour. This component is deliberately almost nothing: a
- * bounded box with a slot. Its value is that it is the ONLY blurred element in
+ * bounded box with slots. Its value is that it is the ONLY blurred element in
  * the tree, which is the property the WebView budget depends on.
  *
- * ## The caption slot, and the contract `Trivia.tsx` can build against
+ * ## The form: a bottom sheet, not a centred card
  *
- * `caption` is the line directly under the amount. On an ordinary drop it is
+ * On a phone the sheet is anchored to the foot of the field, edge to edge, with
+ * 30px top corners; at 54rem of the FIELD's own width it becomes a right-hand
+ * column of 27rem. That is the s4 "Stack" layout the owner chose. The blurred
+ * region is bounded on both: bounded in height on a phone, bounded in width on
+ * a poster, and never the page.
+ *
+ * ## The caption slot, and the contract `Trivia.tsx` builds against
+ *
+ * `caption` is the line directly under the header. On an ordinary drop it is
  * one sentence of context. On a gated drop it is the question, and the answers
  * go in `children` right below it as `.nd-option` buttons.
+ *
+ * ### RECONCILED 2026-07-27 — one structural change, everything else kept
+ *
+ * The s4 layout moves THE AMOUNT OUT OF THE SHEET and onto the open upper field
+ * above it. The published contract said the amount sits in `header`, directly
+ * above `caption`; it now sits in the field, still directly above the sheet in
+ * both reading order and visual order. The guarantee the trivia gate actually
+ * needs — *the amount is on screen, above the question, in every state* — is
+ * unchanged and is still asserted, in `DropView.test.tsx`, against the whole
+ * screen rather than against the sheet's own children.
+ *
+ * Everything else in the contract is kept deliberately, INCLUDING the two
+ * things the s4 sample departed from. The sample laid the four options out as a
+ * 2x2 grid of 84px tiles; that is not shipped, because the grid is only safe
+ * while the option count is exactly four and a tier that ever needs five would
+ * break it silently. Options stay one per line.
  *
  * What a trivia surface can rely on, per
  * `docs/superpowers/specs/2026-07-26-nimdrops-trivia-gate-design.md` §4.6:
  *
- *   - the amount stays visible above the caption at all times, in every state.
- *     Hiding it behind a question would turn a fixed share into a prize for a
- *     correct answer, which is the framing this product refuses;
+ *   - the amount stays visible ABOVE the caption at all times, in every state.
+ *     It is now rendered by the surface into the field above the sheet, not
+ *     into `header`. Hiding it behind a question would turn a fixed share into
+ *     a prize for a correct answer, which is the framing this product refuses;
  *   - the caption slot takes a heading-weight question without any layout
- *     change: it is a block, it wraps, and it is not clamped;
- *   - answers are `<button class="nd-option" aria-pressed>`, one per line,
- *     48px tall with an 8px gap, already past the touch floor. Selection is
- *     carried by border, fill AND weight, so it survives colour blindness;
+ *     change: it is a block, it wraps, and it is not clamped. It is still the
+ *     FIRST child of the sheet when `header` is empty, and directly after
+ *     `header` otherwise;
+ *   - answers are `<button class="nd-option" aria-pressed>`, ONE PER LINE, 48px
+ *     tall with an 8px gap, already past the touch floor. Selection is carried
+ *     by border, fill AND weight, so it survives colour blindness;
  *   - the sheet does not scroll internally. Five options and a deadline fit a
  *     320px screen without the money button leaving the page;
  *   - `GlassSheet` takes no trivia-specific prop, and will not. The gate is
  *     `caption` plus `children`.
+ *
+ * The one prop added since the contract was published is `dip`, below, and it
+ * carries no content.
  */
 export interface GlassSheetProps {
   /**
-   * Directly under the amount. One sentence on an ordinary drop; the question
-   * on a gated one.
+   * Directly under `header`. One sentence on an ordinary drop; the question on
+   * a gated one.
    */
   caption?: ReactNode
   /** Everything below the caption: the answers, the action, the receipt. */
   children: ReactNode
-  /** The amount and everything above it. */
+  /** Anything the sheet wants above the caption — the sponsor line, a status. */
   header?: ReactNode
+  /**
+   * The surface's one choreography beat: the sheet dips 30px and returns when a
+   * state resolves. It is a `data-` attribute rather than a class so it can
+   * never be confused with something that reveals content — nothing inside the
+   * sheet waits on it, and with animation disabled the sheet simply does not
+   * move.
+   */
+  dip?: boolean
   /** Test hook, so a surface can name its own sheet. */
   testId?: string
 }
 
-export default function GlassSheet({ header, caption, children, testId }: GlassSheetProps) {
+export default function GlassSheet({ header, caption, children, dip, testId }: GlassSheetProps) {
   return (
-    <section className="nd-glass" {...(testId ? { 'data-testid': testId } : {})}>
+    <section
+      className="nd-glass"
+      data-dip={dip ? 'true' : 'false'}
+      {...(testId ? { 'data-testid': testId } : {})}
+    >
+      {/* The grab handle is `.nd-glass::before`, not an element, so the sheet's
+          child order stays exactly what the contract above describes. */}
       {header}
       {caption ? <div className="nd-caption">{caption}</div> : null}
       {children}

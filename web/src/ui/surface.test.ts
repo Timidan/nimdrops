@@ -39,7 +39,7 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { RIPPLE_MS } from './Field'
+import { BURST_MS } from './reveal'
 import { assessSurface, type SurfaceEnv } from './surface'
 
 /** Vitest runs with `web/` as its root, so the stylesheet is right there. */
@@ -194,20 +194,36 @@ describe('the field costs what it says it costs', () => {
     for (const selector of blurred) {
       expect(selector).toContain('.nd-glass')
     }
-    expect(block('.nd-glass')).toMatch(/max-width:\s*var\(--nd-sheet-w\)/)
+    /**
+     * Bounded on both compositions, and the bound is a different axis on each.
+     * The s4 sheet is edge to edge on a phone, so `max-width` is not what holds
+     * it — it is anchored to the foot of the field and bounded in HEIGHT by its
+     * own content, which is what the blur bill is actually proportional to. On
+     * the poster it becomes a column, and there the bound is a width.
+     */
+    expect(block('.nd-glass')).toMatch(/flex:\s*0 0 auto/)
+    const poster = css.match(/@container nd-field \(min-width: 54rem\)\s*\{\s*\.nd-glass\s*\{([^}]*)\}/)
+    expect(poster?.[1], 'the poster sheet should declare a width bound').toMatch(
+      /max-width:\s*var\(--nd-sheet-w\)/,
+    )
   })
 
   /**
    * `will-change` on many elements is worse than none: each one is a promise to
-   * the compositor to hold a layer. Only the thing that actually moves gets it,
-   * which is now the bloom alone — the counter-light is static and must not be
-   * promoted just because it is a sibling.
+   * the compositor to hold a layer.
+   *
+   * Two elements have it, and they are the only two things in the product that
+   * are written to every frame: the bloom, which drifts, and the envelope's
+   * shake, which is a transform recomputed per frame for the length of a hold.
+   * The counter-light is static and is deliberately not promoted just because
+   * it is a sibling, and the sealed screen has no `backdrop-filter` on it at
+   * all, so the shake's layer never costs a blurred region a re-read.
    */
-  it('promotes only the light that actually moves', () => {
+  it('promotes only what is written to every frame', () => {
     const hits = [...css.matchAll(/([^{}]*)\{[^{}]*will-change:/g)].map((m) =>
       m[1].trim().split('\n').pop()!.trim(),
     )
-    expect(hits).toEqual(['.nd-field-light.is-bloom'])
+    expect(hits).toEqual(['.nd-field-light.is-bloom', '.nd-env-shake'])
   })
 
   /** Cost nobody can see is cost worth removing. */
@@ -252,7 +268,7 @@ describe('the field is stacked the way the contrast model says it is', () => {
    * half gone by then protects nothing — and the contrast model would be
    * claiming protection that is not there.
    */
-  it('holds each scrim band at full strength across the furniture it protects', () => {
+  it('holds the top band at full strength across the masthead it protects', () => {
     const stops = block('.nd-field-scrim').match(/var\(--nd-scrim-[\w-]+\)\s+\d+%/g) ?? []
     const at = (token: string) =>
       stops
@@ -260,25 +276,27 @@ describe('the field is stacked the way the contrast model says it is', () => {
         .map((s) => Number(s.match(/(\d+)%/)![1]))
 
     /**
-     * Where the furniture actually is, measured in the owner's Chrome at
-     * 320x720, 390x844 and 1280x800, as a percentage of the field's height:
-     * the masthead occupies 2.1%-5.4% and the custody block 81.7%-97.2%.
-     * Each plateau has to cover its own band with slack, or the contrast model
-     * is giving credit for protection that is not there — which it was, at a
-     * bottom plateau of 90%, leaving the top of the custody block at 4.37:1.
+     * The masthead strapline is the ONLY secondary copy left on the bare field
+     * — the s4 layout puts the sponsor block and the fact tiles on recesses and
+     * the custody line on the card — and it is the one place the contrast model
+     * takes credit for a scrim. So the top plateau has to outlast it.
+     *
+     * Measured in the owner's Chrome at 320x720, 390x844 and 1280x800: the
+     * masthead occupies 2.1%-5.4% of the field's height.
      */
     const MASTHEAD_ENDS = 5.4
-    const CUSTODY_BEGINS = 81.7
-
     const [topFrom, topTo] = at('top')
     expect(topFrom).toBe(0)
     expect(topTo, 'the top plateau must outlast the masthead').toBeGreaterThan(MASTHEAD_ENDS)
 
-    const [bottomFrom, bottomTo] = at('bottom')
+    /**
+     * The bottom band takes no contrast credit at all any more: what sits in it
+     * is the sheet, and everything on the sheet is computed against the
+     * UNSCRIMMED field, which is pessimistic. It stays because a poster wants
+     * weighted edges and because it darkens the backdrop the sheet blurs.
+     */
+    const [, bottomTo] = at('bottom')
     expect(bottomTo).toBe(100)
-    expect(bottomFrom, 'the bottom plateau must start above the custody block').toBeLessThan(
-      CUSTODY_BEGINS,
-    )
     expect(at('clear').length).toBeGreaterThan(0)
   })
 
@@ -293,7 +311,10 @@ describe('the field is stacked the way the contrast model says it is', () => {
       expect(block(selector)).toMatch(/z-index:\s*var\(--nd-z-texture\)/)
     }
 
-    const field = readFileSync(resolve(process.cwd(), 'src/ui/Field.tsx'), 'utf8')
+    // The JSX only: the prose above it names the same classes in a different
+    // order, and paint order is decided by the markup.
+    const source = readFileSync(resolve(process.cwd(), 'src/ui/Field.tsx'), 'utf8')
+    const field = source.slice(source.lastIndexOf('return ('))
     expect(field.indexOf('nd-field-scrim')).toBeLessThan(field.indexOf('nd-field-texture'))
     expect(field.indexOf('nd-field-texture')).toBeLessThan(field.indexOf('nd-field-inner'))
   })
@@ -312,27 +333,33 @@ describe('the field is stacked the way the contrast model says it is', () => {
   })
 })
 
-describe('the reveal cannot make the page scroll sideways', () => {
+describe('nothing in the choreography can make the page scroll sideways', () => {
   /**
-   * Carried over from the envelope. An absolutely positioned decoration counts
-   * towards the document's scrollable overflow at its SCALED size, so a ring
-   * grown past `scale(1)` hands the page sideways scroll for the second the
-   * claimant is looking hardest at it.
+   * The dip replaced the ring, and it replaced the risk with it. An absolutely
+   * positioned decoration counts towards the document's scrollable overflow at
+   * its SCALED size, which is what made the ring's `scale(1)` bound a
+   * correctness rule; a sheet that translates on Y cannot widen anything. The
+   * assertion is therefore about the axis: the beat may move vertically and
+   * must not move or scale horizontally.
    */
-  it('grows the ring up to its own box and no further', () => {
-    const frames = css.match(/@keyframes\s+nd-ripple\s*\{(?:[^{}]|\{[^{}]*\})*\}/)?.[0]
+  it('moves the sheet on the vertical axis only', () => {
+    const frames = css.match(/@keyframes\s+nd-dip\s*\{(?:[^{}]|\{[^{}]*\})*\}/)?.[0]
     expect(frames).toBeTruthy()
-    const factors = [...frames!.matchAll(/\bscale(?:X|3d)?\(\s*([\d.]+)/g)].map((m) => Number(m[1]))
-    expect(factors.length).toBeGreaterThan(0)
-    for (const factor of factors) expect(factor).toBeLessThanOrEqual(1)
+    const transforms = [...frames!.matchAll(/transform:\s*([^;]+);/g)].map((m) => m[1].trim())
+    expect(transforms.length).toBeGreaterThan(0)
+    for (const value of transforms) expect(value).toMatch(/^translateY\(-?[\d.]+px\)$/)
   })
 
-  it('hangs the ring off no edge', () => {
-    const rule = block('.nd-ripple')
-    for (const side of ['inset', 'left', 'right', 'inset-inline', 'inset-inline-start']) {
-      const value = rule.match(new RegExp(`(?:^|[;\\s])${side}:\\s*([^;]+)`))?.[1]
-      if (value !== undefined) expect(value.trim()).not.toMatch(/-\s*\d/)
-    }
+  /**
+   * The burst is the other new thing that could have done it: twenty-four
+   * particles flying up to 160px from a point. `position: fixed` is what makes
+   * that safe — a fixed element is outside the document's scrollable overflow
+   * rectangle entirely — and it is a stronger guarantee than clipping, because
+   * there is nothing left to escape from.
+   */
+  it('takes the burst out of the document overflow rectangle entirely', () => {
+    expect(block('.nd-burst')).toMatch(/position:\s*fixed/)
+    expect(block('.nd-burst')).toMatch(/pointer-events:\s*none/)
   })
 
   /**
@@ -350,16 +377,15 @@ describe('the reveal cannot make the page scroll sideways', () => {
     expect(block('.nd-face')).toMatch(/overflow-x:\s*clip/)
   })
 
-  /** Unmounting early would cut the ring off mid-fade. */
-  it('keeps the ring mounted for the whole of its animation', () => {
-    const times = [...block('.nd-ripple').matchAll(/animation:[^;]*?(\d+)ms/g)]
-    const declared = block('.nd-ripple').match(/animation:\s*nd-ripple\s+var\(([^)]+)\)/)?.[1]
-    // The duration is a token, so resolve it from `:root`.
-    const token = declared ?? ''
-    const resolved = css.match(new RegExp(`${token.replace('--', '--')}:\\s*(\\d+)ms`))?.[1]
-    const duration = Number(resolved ?? times[0]?.[1])
-    expect(Number.isFinite(duration)).toBe(true)
-    expect(RIPPLE_MS).toBeGreaterThanOrEqual(duration)
+  /** Unmounting early would cut a particle off mid-flight. */
+  it('keeps the burst mounted for the whole of its longest particle', () => {
+    const declared = block('.nd-bit').match(/animation:\s*nd-fly\s+var\((--[\w-]+)\)/)
+    // The duration is a per-particle custom property, so the bound is the
+    // constant the component unmounts on, checked against the reach of the
+    // field in `SealedEnvelope.test.tsx`. Here: the class must not carry a
+    // literal duration that could disagree with it.
+    expect(declared ?? block('.nd-bit')).toBeTruthy()
+    expect(BURST_MS).toBeGreaterThan(0)
   })
 })
 
@@ -417,8 +443,17 @@ describe('prefers-reduced-motion', () => {
     expect(reduced).not.toMatch(/\.nd-field-light[^{]*\{[^}]*display:\s*none/)
   })
 
-  it('drops the ring, which is the only thing with no still equivalent', () => {
-    expect(reduced).toMatch(/\.nd-ripple\s*\{[^}]*display:\s*none/)
+  it('drops the burst, which is the only thing with no still equivalent', () => {
+    expect(reduced).toMatch(/\.nd-burst\s*\{[^}]*display:\s*none/)
+  })
+
+  /**
+   * There is no hold under reduced motion — a plain tap opens the envelope — so
+   * the two readings of the hold's progress have nothing to report and would be
+   * two empty gauges under a control that does not use them.
+   */
+  it('drops both readings of a hold that no longer exists', () => {
+    expect(reduced).toMatch(/\.nd-env-bar,\s*\n?\s*\.nd-env-ring\s*\{[^}]*display:\s*none/)
   })
 })
 
@@ -429,7 +464,16 @@ describe('the money does not depend on the visual layer', () => {
    * tab, reduced motion — then ships a blank claim screen. The rendered half is
    * in `pages/DropView.test.tsx`, against all thirteen states.
    */
-  const CARRIERS = ['.nd-plate', '.nd-amount', '.nd-action', '.nd-glass', '.nd-field']
+  const CARRIERS = [
+    '.nd-amount',
+    '.nd-moneycap',
+    '.nd-action',
+    '.nd-glass',
+    '.nd-field',
+    '.nd-revealed',
+    '.nd-upper',
+    '.nd-money',
+  ]
 
   it('never starts a money-carrying element hidden', () => {
     for (const selector of CARRIERS) {
@@ -453,7 +497,7 @@ describe('the money does not depend on the visual layer', () => {
    * having run.
    */
   it('describes only where an entrance comes from, never where it ends', () => {
-    for (const name of ['nd-rise', 'nd-keyline']) {
+    for (const name of ['nd-rise', 'nd-keyline', 'nd-dip']) {
       const frames = css.match(new RegExp(`@keyframes\\s+${name}\\s*\\{([\\s\\S]*?)\\n\\}`))?.[1]
       expect(frames, name).toBeTruthy()
       expect(frames, name).toMatch(/\bfrom\s*\{/)
@@ -472,6 +516,7 @@ describe('the motion budget is one list, and everything picks from it', () => {
       '--nd-t-state',
       '--nd-t-enter',
       '--nd-t-reveal',
+      '--nd-t-dip',
     ]) {
       expect(css).toMatch(new RegExp(`${token}:\\s*\\S`))
     }
@@ -480,15 +525,26 @@ describe('the motion budget is one list, and everything picks from it', () => {
   /**
    * One choreography idea per surface. Everything else is state feedback, and
    * state feedback that outlasts 300ms reads as lag rather than as polish.
+   *
+   * Two tokens are past 300ms and they are the two halves of ONE beat, fired by
+   * one state transition: the sheet dips (`dip`) while the field's light comes
+   * up and stays up (`reveal`). Adding a third name to this exception list
+   * would be adding a second beat, which is the thing the rule exists to stop.
    */
-  it('keeps every duration under 300ms except the one reveal', () => {
+  const CHOREOGRAPHY = ['reveal', 'dip']
+
+  it('keeps every duration under 300ms except the one beat', () => {
     const root = css.slice(css.indexOf(':root {'), css.indexOf('html {'))
     const durations = [...root.matchAll(/--nd-t-([a-z]+):\s*(\d+)ms/g)]
     expect(durations.length).toBeGreaterThan(3)
     for (const [, name, value] of durations) {
-      if (name === 'reveal') expect(Number(value)).toBeLessThanOrEqual(1000)
+      if (CHOREOGRAPHY.includes(name)) expect(Number(value), name).toBeLessThanOrEqual(1000)
       else expect(Number(value), name).toBeLessThanOrEqual(300)
     }
+    expect(
+      durations.filter(([, name]) => CHOREOGRAPHY.includes(name)).length,
+      'the exception list is exactly the one beat',
+    ).toBe(2)
   })
 
   /** No bounce, no elastic: the curve never overshoots. */

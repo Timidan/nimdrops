@@ -116,6 +116,25 @@ function mount(
   )
 }
 
+/**
+ * Break the seal, the way a keyboard or a screen reader does.
+ *
+ * The claim surface sits behind a full-screen sealed envelope now, so a test
+ * that wants the transaction has to open it first. `detail: 0` is the
+ * synthesised activation `Enter`, `Space` and an assistive double-tap all
+ * produce, and it is the documented path that needs no sustained gesture —
+ * `ui/SealedEnvelope.tsx` has the argument for why that path has to exist.
+ *
+ * States that are already past the envelope — a resumed claim, a settled one,
+ * a dead end — open the gate themselves and never call this.
+ */
+async function unseal() {
+  const envelope = await screen.findByTestId('hold-open')
+  await act(async () => {
+    fireEvent.click(envelope, { detail: 0 })
+  })
+}
+
 afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
@@ -134,6 +153,7 @@ describe('Drop — the drop card', () => {
   it('shows sponsor, the unverified chip, the fixed amount, what is left, and the message', async () => {
     installFetch({ drop: { status: 200, body: dropBody() } })
     mount()
+    await unseal()
 
     expect(await screen.findByText('Team NimDrops')).toBeTruthy()
     // §4.1: the sponsor label is claimant-supplied text and is labelled as such.
@@ -141,7 +161,9 @@ describe('Drop — the drop card', () => {
     expect(screen.getByTestId('amount-hero').textContent).toMatch(/2\s*NIM/)
     expect(screen.getByTestId('remaining').textContent).toMatch(/3.*5/)
     expect(screen.getByText('Thanks for a good week')).toBeTruthy()
-    expect(screen.getByText(/expires in/i)).toBeTruthy()
+    // The deadline is a labelled tile in the open field now, not a sentence.
+    expect(screen.getByText(/closes in/i)).toBeTruthy()
+    expect(screen.getByTestId('countdown').textContent).toMatch(/\d+h/)
   })
 
   /**
@@ -152,13 +174,17 @@ describe('Drop — the drop card', () => {
   it('introduces itself to someone who has never seen a NimDrop', async () => {
     installFetch({ drop: { status: 200, body: dropBody() } })
     mount()
+    await unseal()
 
     expect(await screen.findByText(/sent you a NimDrop/i)).toBeTruthy()
     expect(screen.getByText(/a fixed share of NIM/i)).toBeTruthy()
 
-    // The sponsor's own words come before the mechanics, not below them.
+    // The sponsor's own words come before the thing they are asked to press.
+    // (The s4 layout puts the money and the drop's live facts in the open
+    // field ABOVE the sheet, so the order inside the sheet is the one left to
+    // defend: who sent it, what they said, then the action.)
     const body = document.body.textContent ?? ''
-    expect(body.indexOf('Thanks for a good week')).toBeLessThan(body.indexOf('shares left'))
+    expect(body.indexOf('Thanks for a good week')).toBeLessThan(body.indexOf('Open 2 NIM'))
 
     // "Campaign" is sponsor-side vocabulary and must not reach a claimant.
     expect(body).not.toMatch(/campaign/i)
@@ -167,6 +193,7 @@ describe('Drop — the drop card', () => {
   it('labels the action exactly "Open 2 NIM"', async () => {
     installFetch({ drop: { status: 200, body: dropBody() } })
     mount()
+    await unseal()
 
     const button = await screen.findByRole('button', { name: /open 2 NIM/i })
     expect(button.textContent).toBe('Open 2 NIM')
@@ -179,6 +206,7 @@ describe('Drop — the drop card', () => {
   it('never promises one tap, anywhere on the page', async () => {
     installFetch({ drop: { status: 200, body: dropBody() } })
     mount()
+    await unseal()
     await screen.findByRole('button', { name: /open 2 NIM/i })
 
     expect(document.body.textContent ?? '').not.toMatch(/one[\s-]?tap/i)
@@ -189,6 +217,7 @@ describe('Drop — the drop card', () => {
   it('does not stack a "Live" pill on top of a button that already says so', async () => {
     installFetch({ drop: { status: 200, body: dropBody() } })
     mount()
+    await unseal()
 
     await screen.findByRole('button', { name: /open 2 NIM/i })
     expect(screen.queryByTestId('status-pill')).toBe(null)
@@ -203,6 +232,7 @@ describe('Drop — the custody disclosure', () => {
   it('opens a sheet with the facts a claimant is entitled to before they trust it', async () => {
     installFetch({ drop: { status: 200, body: dropBody() } })
     mount()
+    await unseal()
 
     const card = await screen.findByTestId('custody-disclosure')
     expect(card.textContent).toMatch(/holding this NIM/i)
@@ -227,6 +257,7 @@ describe('Drop — the custody disclosure', () => {
   it('does not claim to be holding anything before the sponsor has funded it', async () => {
     installFetch({ drop: { status: 200, body: dropBody({ state: 'awaiting_funding' }) } })
     mount()
+    await unseal()
 
     await screen.findByTestId('awaiting-funding')
     expect(screen.queryByTestId('custody-disclosure')).toBe(null)
@@ -234,7 +265,15 @@ describe('Drop — the custody disclosure', () => {
 })
 
 describe('Drop — opened in a plain browser (no wallet)', () => {
-  it('offers the Nimiq Pay deep link, a QR and a copy button instead of a dead end', async () => {
+  /**
+   * The seal means the same thing everywhere. A device that cannot sign gets
+   * the same full-screen sealed envelope a phone gets, with no amount on it and
+   * no press affordance — a FINISHED state, not a disabled one — plus the deep
+   * link and the QR. The branch is the SDK adapter reporting `unavailable`,
+   * never a viewport width: a narrow desktop window is still a desktop, and a
+   * phone browser outside Nimiq Pay has exactly the same problem as a monitor.
+   */
+  it('offers the Nimiq Pay deep link and a QR on a seal that cannot be opened', async () => {
     installFetch({ drop: { status: 200, body: dropBody() } })
     mount(unavailableBridge)
 
@@ -246,9 +285,15 @@ describe('Drop — opened in a plain browser (no wallet)', () => {
     const qr = screen.getByRole('img', { name: /qr/i })
     expect(qr.getAttribute('src')).toBe(`/drop/${PUBLIC_ID}/qr.svg`)
 
-    expect(screen.getByRole('button', { name: /copy link/i })).toBeTruthy()
-    // The offer is still visible, so the claimant knows what it is worth.
-    expect(screen.getByTestId('amount-hero').textContent).toMatch(/2\s*NIM/)
+    // Sealed, and there is nothing on it to press.
+    expect(screen.getByTestId('sealed-envelope')).toBeTruthy()
+    expect(screen.queryByTestId('hold-open')).toBe(null)
+    expect(document.querySelectorAll('[disabled], [aria-disabled="true"]')).toHaveLength(0)
+
+    // The amount is NOT on it. What the claimant is told instead is the fact
+    // that makes concealing it a ritual rather than a draw.
+    expect(screen.queryByTestId('amount-hero')).toBe(null)
+    expect(screen.getByTestId('sealed-only').textContent).toMatch(/every share.*same size/i)
   })
 })
 
@@ -256,6 +301,7 @@ describe('Drop — the sponsor has not funded it yet', () => {
   it('keeps the offer visible and says why, without a claim button that cannot work', async () => {
     installFetch({ drop: { status: 200, body: dropBody({ state: 'awaiting_funding' }) } })
     mount()
+    await unseal()
 
     const panel = await screen.findByTestId('awaiting-funding')
     expect(panel.textContent).toMatch(/has not funded this NimDrop yet/i)
@@ -266,8 +312,9 @@ describe('Drop — the sponsor has not funded it yet', () => {
     // A dead primary button reads as a broken page: there must not be one.
     expect(screen.queryByRole('button', { name: /^open/i })).toBe(null)
     expect(screen.getByTestId('status-pill').textContent).toBe('Not funded yet')
-    // ...but there IS something that works.
-    expect(screen.getByRole('button', { name: /copy link/i })).toBeTruthy()
+    // ...but there IS something that works. It is a 44px circle on the rail
+    // now rather than a full-width button, so it is found by its name.
+    expect(screen.getByRole('button', { name: /copy the link/i })).toBeTruthy()
 
     // The sheet is on screen and everything real stays on it.
     expect(screen.getByTestId('claim-sheet')).toBeTruthy()
@@ -291,6 +338,7 @@ describe('Drop — the sponsor has not funded it yet', () => {
     // A slower poll than the rest of this file uses, so the unfunded screen is
     // observably rendered before the refresh replaces it.
     mount(bridgeOf(new MockBridge()), 60)
+    await unseal()
 
     await screen.findByTestId('awaiting-funding')
     // No reload and no interaction — the poll does it.
@@ -302,6 +350,7 @@ describe('Drop — the sponsor has not funded it yet', () => {
   it('says a pending funding transaction is confirming, not that the page is opening', async () => {
     installFetch({ drop: { status: 200, body: dropBody({ state: 'funding_pending' }) } })
     mount()
+    await unseal()
 
     const panel = await screen.findByTestId('funding-confirming')
     expect(panel.textContent).toMatch(/funding transaction is on the network and confirming/i)
@@ -391,8 +440,9 @@ describe('Drop — claiming', () => {
     Object.defineProperty(navigator, 'share', { value: share, configurable: true })
     mount()
 
+    // A 44px circle on the rail: its name is the label, not its text.
     const button = await screen.findByTestId('share-app')
-    expect(button.textContent).toBe('Share the app')
+    expect(button.getAttribute('aria-label')).toBe('Share the app')
     fireEvent.click(button)
 
     expect(share).toHaveBeenCalledTimes(1)
@@ -420,8 +470,9 @@ describe('Drop — claiming', () => {
     })
 
     expect(writeText).toHaveBeenCalledWith(window.location.origin)
-    // Silence after a tap reads as a broken button.
-    await waitFor(() => expect(screen.getByTestId('share-app').textContent).toBe('Link copied'))
+    // Silence after a tap reads as a broken button. An icon button has no
+    // label to change, so it reports into a live region instead.
+    await waitFor(() => expect(screen.getByText('Link copied')).toBeTruthy())
   })
 
   it('recovers from a wallet rejection with a retry that returns to the claim button', async () => {
@@ -430,6 +481,7 @@ describe('Drop — claiming', () => {
       challenge: { status: 200, body: CHALLENGE },
     })
     mount(bridgeOf(rejectingBridge()))
+    await unseal()
 
     const button = await screen.findByRole('button', { name: /open 2 NIM/i })
     await act(async () => {
@@ -467,6 +519,7 @@ describe('Drop — states that are not a claim', () => {
   it('disables the claim button on degradation instead of removing it', async () => {
     installFetch({ drop: { status: 200, body: dropBody() }, challenge: { status: 503, body: { error: { code: 'degraded', message: 'temporarily unavailable' } } } })
     mount()
+    await unseal()
 
     const button = await screen.findByRole('button', { name: /open 2 NIM/i })
     await act(async () => {

@@ -320,12 +320,56 @@ export default function Preview() {
       </div>
 
       <div className="rail" style={{ paddingLeft: gutter, paddingRight: gutter }}>
-        {/* The signature moment goes first: one frame that starts sealed and
-            opens on its own, so the ring and the field's warmer cast can be
-            watched rather than inferred. */}
+        {/* The two frames that are NOT one of the thirteen: the sealed gate a
+            claimant actually lands on, and the same seal on a device that
+            cannot sign. Both derive the gate rather than forcing it, so what is
+            on screen here is what a claimant gets. */}
         <div className="cell" style={{ width }}>
           <p className="cap">
-            <b>reveal</b> <span>— ready → reserved, the ring leaves once</span>
+            <b>sealed</b> <span>— the first screen, hold 2.5s to open it</span>
+          </p>
+          <Frame width={width} resetKey={run}>
+            <DropView
+              key={`sealed:${run}`}
+              publicId={PUBLIC_ID}
+              state="ready"
+              drop={drop()}
+              serverState={null}
+              txHash={null}
+              amountEach="2"
+              notice=""
+              onClaim={() => {}}
+              onRetry={() => {}}
+            />
+          </Frame>
+        </div>
+
+        <div className="cell" style={{ width }}>
+          <p className="cap">
+            <b>sealed · no wallet</b> <span>— finished, not disabled. Still no amount.</span>
+          </p>
+          <Frame width={width} resetKey={run}>
+            <DropView
+              key={`sealed-nowallet:${run}`}
+              publicId={PUBLIC_ID}
+              state="no-wallet"
+              drop={drop()}
+              serverState={null}
+              txHash={null}
+              amountEach="2"
+              notice=""
+              onClaim={() => {}}
+              onRetry={() => {}}
+            />
+          </Frame>
+        </div>
+
+        {/* The signature moment: one frame that starts sealed and opens on its
+            own, so the burst, the sheet's dip and the field's warmer cast can
+            be watched rather than inferred. */}
+        <div className="cell" style={{ width }}>
+          <p className="cap">
+            <b>reveal</b> <span>— ready → reserved, the sheet dips once</span>
           </p>
           <Frame width={width} resetKey={run}>
             <DropView
@@ -337,6 +381,7 @@ export default function Preview() {
               txHash={null}
               amountEach="2"
               notice=""
+              revealed
               onClaim={() => setOpened(true)}
               onRetry={() => setOpened(false)}
             />
@@ -359,6 +404,10 @@ export default function Preview() {
                 txHash={c.txHash ?? null}
                 amountEach={(c.drop === undefined ? drop() : c.drop)?.amountEach ?? '2'}
                 notice={c.notice ?? ''}
+                /* The gate is a state in front of these, not one of them: it
+                   has its own two frames above, and forcing it open here is
+                   what lets all thirteen be looked at side by side. */
+                revealed
                 onClaim={() => {}}
                 onRetry={() => {}}
               />

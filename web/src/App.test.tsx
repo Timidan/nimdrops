@@ -26,9 +26,11 @@ describe('router', () => {
 
   it('renders the drop page for /drop/:publicId', () => {
     at('/drop/abc')
-    // The claim flow owns everything past this point; the router's job is only
-    // to hand `/drop/:publicId` to it. Behaviour lives in `pages/Drop.test.tsx`.
-    expect(screen.getByText(/opening this nimdrop/i)).toBeTruthy()
+    // The sealed envelope is the drop page's first frame: a claimant lands on
+    // the seal, not on the claim surface. The claim flow owns everything past
+    // this point; the router's job is only to hand `/drop/:publicId` to it.
+    // Behaviour lives in `pages/Drop.test.tsx`.
+    expect(screen.getByTestId('hold-open')).toBeTruthy()
   })
 
   // A printed QR cannot be reissued, so the old path has to keep landing on the
@@ -36,7 +38,7 @@ describe('router', () => {
   // the only place a client-side navigation to `/d/…` is still reachable.
   it('carries a legacy /d/:publicId link through to the drop', () => {
     at('/d/abc')
-    expect(screen.getByText(/opening this nimdrop/i)).toBeTruthy()
+    expect(screen.getByTestId('hold-open')).toBeTruthy()
   })
 
   it('sends unknown paths home', () => {

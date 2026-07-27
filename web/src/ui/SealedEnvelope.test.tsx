@@ -1,32 +1,34 @@
 /**
- * The reveal, held to the same three rules the claim surface is held to.
+ * The sealed gate, held to the same rules the claim surface is held to.
  *
  * jsdom has no CSS engine, no compositor and no clock, which is exactly the
  * property that makes it the right harness for the rule that matters most:
  * nothing here can be made to appear by a transition, a keyframe or a media
- * query, because none of those exist. If the revealed state renders its amount
- * here, it renders it in a headless renderer, in a background tab, and under
+ * query, because none of those exist. If the opened state renders its children
+ * here, it renders them in a headless renderer, in a background tab, and under
  * reduced motion.
  *
  * The rules, restated because this file exists to defend them:
  *
- *   1. the amount renders with CSS animation and transitions disabled ENTIRELY,
- *      and is never gated on a class-triggered transition;
+ *   1. what is behind the gate renders with CSS animation and transitions
+ *      disabled ENTIRELY, and is never gated on a class-triggered transition;
  *   2. `opened` is a STATE — a reload, a resumed claim or a poll tick lands on
  *      it with no theatre and no re-fire;
  *   3. the ritual runs BEFORE the wallet signature, never after, and never
  *      gates it;
  *   4. there is a path to the money that is not a sustained gesture, because on
  *      a phone with VoiceOver or TalkBack running a press-and-hold never
- *      reaches the element at all.
+ *      reaches the element at all;
+ *   5. the sealed screen shows NO AMOUNT, on any device.
  *
  * What is checked against the stylesheet rather than the DOM is checked there
  * on purpose: jsdom returns hardcoded zeros for every rect, so an overflow or
  * a touch-target assertion made against it would pass whatever the CSS said.
  */
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import SealedReveal, { revealCss } from './SealedReveal'
 import {
   BURST_MS,
   buzzPlan,
@@ -42,12 +44,14 @@ import {
   shards,
   SHARD_COUNT,
 } from './reveal'
+import SealedEnvelope from './SealedEnvelope'
 
 afterEach(cleanup)
 
-const css = revealCss('x')
+/** The envelope's CSS ships in the product stylesheet, not in a generator. */
+const css = readFileSync(resolve(process.cwd(), 'src/index.css'), 'utf8')
 
-/** The body of one top-level rule in the generated stylesheet, by selector. */
+/** The body of one top-level rule, by selector. */
 function block(selector: string): string {
   const escaped = selector.replace(/[.[\]*+?^${}()|\\]/g, '\\$&')
   const found = css.match(new RegExp(`\\n${escaped}\\s*\\{([^{}]*)\\}`))?.[1]
@@ -55,17 +59,19 @@ function block(selector: string): string {
   return found!
 }
 
-function view(over: Partial<React.ComponentProps<typeof SealedReveal>> = {}) {
+function view(over: Partial<React.ComponentProps<typeof SealedEnvelope>> = {}) {
   return render(
-    <SealedReveal
-      prefix="x"
-      amount="5"
+    <SealedEnvelope
       ability="can-open"
+      sponsor="Amara O."
+      message="Thanks for a good week."
       publicId="Ab3Cd4Ef5Gh6Ij7Kl8Mn9O"
       deepLink="nimiqpay://miniapp?url=https%3A%2F%2Fexample.test%2Fdrop%2F1"
-      action={<button type="button">Open 5 NIM</button>}
       {...over}
-    />,
+    >
+      <p data-testid="claim-surface">5 NIM</p>
+      <button type="button">Open 5 NIM</button>
+    </SealedEnvelope>,
   )
 }
 
@@ -74,9 +80,13 @@ function view(over: Partial<React.ComponentProps<typeof SealedReveal>> = {}) {
  * ---------------------------------------------------------------------- */
 
 describe('the hold duration is one named constant', () => {
-  it('offers exactly the three the owner is choosing between', () => {
-    expect([...HOLD_OPTIONS]).toEqual([1200, 2500, 5000])
+  it('ships the value the owner picked with a thumb', () => {
+    expect(HOLD_MS).toBe(2500)
     expect(HOLD_OPTIONS).toContain(HOLD_MS)
+  })
+
+  it('offers exactly the three that were compared', () => {
+    expect([...HOLD_OPTIONS]).toEqual([1200, 2500, 5000])
   })
 
   it('falls back to the default rather than trusting a query string', () => {
@@ -88,20 +98,55 @@ describe('the hold duration is one named constant', () => {
 })
 
 /* -------------------------------------------------------------------------
- * The money
+ * No amount on the seal
+ * ---------------------------------------------------------------------- */
+
+describe('the sealed screen shows no amount', () => {
+  it.each(['can-open', 'sealed-only'] as const)('on %s', (ability) => {
+    view({ ability })
+    expect(screen.queryByTestId('claim-surface')).toBeNull()
+    expect(screen.queryByTestId('amount-hero')).toBeNull()
+  })
+
+  /**
+   * What it DOES say, on both, is the fact that makes concealing a number a
+   * ritual rather than a draw: the shares are fixed and equal, so the covered
+   * figure cannot vary and nothing is being gambled on.
+   */
+  it.each(['can-open', 'sealed-only'] as const)(
+    'states the fixed-and-equal fact on %s',
+    (ability) => {
+      view({ ability })
+      expect(screen.getByTestId('reveal-stage').textContent).toMatch(/fixed share|same size/i)
+    },
+  )
+
+  /** Who sent it and what they wrote are not the amount, so they stay. */
+  it('still names the sender and prints their message', () => {
+    view()
+    const stage = screen.getByTestId('reveal-stage')
+    expect(stage.textContent).toMatch(/Amara O\./)
+    expect(stage.textContent).toMatch(/Thanks for a good week/)
+    expect(stage.textContent).toMatch(/name unverified/)
+  })
+})
+
+/* -------------------------------------------------------------------------
+ * The money behind it
  * ---------------------------------------------------------------------- */
 
 describe('the money never depends on the visual layer', () => {
-  it('renders the revealed amount complete, with no CSS engine in the room', () => {
-    view({ initialOpened: true })
-    const hero = screen.getByTestId('amount-hero')
-    expect(hero.textContent).toMatch(/5\s*NIM/)
-    expect(hero.getAttribute('aria-label')).toBe('5 NIM')
+  it('renders what is behind the gate complete, with no CSS engine in the room', () => {
+    view({ opened: true })
+    expect(screen.getByTestId('claim-surface').textContent).toBe('5 NIM')
+    expect(screen.getByRole('button', { name: /open 5 nim/i })).toBeTruthy()
   })
 
-  it('hides nothing inline on the revealed state', () => {
-    view({ initialOpened: true })
-    for (const el of Array.from(document.querySelectorAll<HTMLElement>('[data-testid="reveal-stage"] *'))) {
+  it('hides nothing inline on the opened state', () => {
+    view({ opened: true })
+    for (const el of Array.from(
+      document.querySelectorAll<HTMLElement>('[data-testid="revealed"] *'),
+    )) {
       expect(el.style.opacity, el.className.toString()).not.toBe('0')
       expect(el.style.display).not.toBe('none')
       expect(el.style.visibility).not.toBe('hidden')
@@ -109,28 +154,18 @@ describe('the money never depends on the visual layer', () => {
   })
 
   /**
-   * The stylesheet half of the same rule. Nothing that carries the amount may
-   * start hidden or carry an animation, because a transition that never fires —
-   * headless, background tab, reduced motion — would then ship a blank claim
-   * screen, which is a financial bug wearing a costume.
+   * The stylesheet half of the same rule. The wrapper the claim surface lands
+   * in may not start hidden and may not animate, because a transition that
+   * never fires — headless, background tab, reduced motion — would then ship a
+   * blank claim screen, which is a financial bug wearing a costume.
    */
-  it.each(['.x-rv-plate', '.x-rv-amount', '.x-rv-platecap'])(
-    'never starts %s hidden, and never animates it',
-    (selector) => {
-      const rule = block(selector)
-      expect(rule).not.toMatch(/(^|[;\s])opacity:\s*0(\.0*)?\s*(;|$)/)
-      expect(rule).not.toMatch(/visibility:\s*hidden/)
-      expect(rule).not.toMatch(/display:\s*none/)
-      expect(rule).not.toMatch(/(^|[;\s])animation(-name)?:/)
-      expect(rule).not.toMatch(/(^|[;\s])transition:/)
-    },
-  )
-
-  it('gives the amount tabular figures, so it cannot jitter', () => {
-    // The lockup's own contract, from `nimkit.ts`: the figure is a `.nim-figure`
-    // run and the shared kit gives that class `tabular-nums`.
-    view({ initialOpened: true })
-    expect(document.querySelector('.nim-figure')?.textContent).toBe('5')
+  it('never starts the revealed wrapper hidden, and never animates it', () => {
+    const rule = block('.nd-revealed')
+    expect(rule).not.toMatch(/(^|[;\s])opacity:\s*0(\.0*)?\s*(;|$)/)
+    expect(rule).not.toMatch(/visibility:\s*hidden/)
+    expect(rule).not.toMatch(/display:\s*none/)
+    expect(rule).not.toMatch(/(^|[;\s])animation(-name)?:/)
+    expect(rule).not.toMatch(/(^|[;\s])transition:/)
   })
 
   /**
@@ -145,9 +180,9 @@ describe('the money never depends on the visual layer', () => {
 
     fireEvent.click(screen.getByTestId('hold-open'), { detail: 0 })
 
-    const hero = screen.getByTestId('amount-hero')
+    const amount = screen.getByTestId('claim-surface')
     const claim = screen.getByRole('button', { name: /open 5 nim/i })
-    expect(hero.compareDocumentPosition(claim) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(amount.compareDocumentPosition(claim) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 })
 
@@ -157,26 +192,74 @@ describe('the money never depends on the visual layer', () => {
 
 describe('opened is a state, not the end of a keyframe', () => {
   it('lands a resumed claim on the opened state with no theatre', () => {
-    view({ initialOpened: true })
+    view({ opened: true })
     expect(screen.getByTestId('revealed')).toBeTruthy()
     expect(screen.queryByTestId('burst')).toBeNull()
     expect(screen.queryByTestId('hold-open')).toBeNull()
+    // Nothing is announced either: a reload is not an event.
+    expect(screen.queryByRole('status')).toBeNull()
   })
 
   it('does not move focus when it merely mounted opened', () => {
-    view({ initialOpened: true })
+    view({ opened: true })
     expect(document.activeElement).toBe(document.body)
   })
 
-  it('fires the burst once, on the transition, and never again', () => {
-    view()
-    fireEvent.click(screen.getByTestId('hold-open'), { detail: 0 })
-    expect(screen.getByTestId('burst')).toBeTruthy()
+  /**
+   * THE landmine. `opened` is derived from claim state, so it flips to true on
+   * a poll tick — a resumed claim answering, or a drop projection landing late
+   * and saying the drop expired. Neither is the claimant's thumb, and neither
+   * may fire a burst.
+   */
+  it('does not fire the burst when the claim state opens the gate mid-session', () => {
+    const { rerender } = render(
+      <SealedEnvelope ability="can-open" opened={false}>
+        <p data-testid="claim-surface">5 NIM</p>
+      </SealedEnvelope>,
+    )
+    expect(screen.getByTestId('hold-open')).toBeTruthy()
 
-    // Moving on through the surface's later states must not mount a second one.
-    screen.getByTestId('burst').remove()
-    fireEvent.click(screen.getByTestId('revealed'))
+    rerender(
+      <SealedEnvelope ability="can-open" opened={true}>
+        <p data-testid="claim-surface">5 NIM</p>
+      </SealedEnvelope>,
+    )
+    expect(screen.getByTestId('claim-surface')).toBeTruthy()
     expect(screen.queryByTestId('burst')).toBeNull()
+    expect(screen.queryByRole('status')).toBeNull()
+    expect(document.activeElement).toBe(document.body)
+  })
+
+  it('fires the burst once, on the thumb, and never again', () => {
+    vi.useFakeTimers()
+    try {
+      const { rerender } = render(
+        <SealedEnvelope ability="can-open" opened={false}>
+          <p data-testid="claim-surface">5 NIM</p>
+        </SealedEnvelope>,
+      )
+      fireEvent.click(screen.getByTestId('hold-open'), { detail: 0 })
+      expect(screen.getByTestId('burst')).toBeTruthy()
+
+      // It spends itself and unmounts, rather than living on as a leak that
+      // happens to be pretty.
+      act(() => {
+        vi.advanceTimersByTime(BURST_MS + 1)
+      })
+      expect(screen.queryByTestId('burst')).toBeNull()
+
+      // And a status poll re-rendering the tree must not mount a second one.
+      for (let tick = 0; tick < 3; tick++) {
+        rerender(
+          <SealedEnvelope ability="can-open" opened={true}>
+            <p data-testid="claim-surface">5 NIM</p>
+          </SealedEnvelope>,
+        )
+      }
+      expect(screen.queryByTestId('burst')).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 
@@ -204,10 +287,10 @@ describe('a screen reader must not be locked out of the money', () => {
   it('opens on a keyboard or assistive activation, with no hold', () => {
     view()
     fireEvent.click(screen.getByTestId('hold-open'), { detail: 0 })
-    expect(screen.getByTestId('amount-hero').textContent).toMatch(/5\s*NIM/)
+    expect(screen.getByTestId('claim-surface')).toBeTruthy()
   })
 
-  it('announces the opening, and puts focus on the amount', () => {
+  it('announces the opening, and puts focus on what was revealed', () => {
     view()
     fireEvent.click(screen.getByTestId('hold-open'), { detail: 0 })
     expect(screen.getByRole('status').textContent).toMatch(/opened/i)
@@ -218,7 +301,7 @@ describe('a screen reader must not be locked out of the money', () => {
   it('does not open on a plain tap', () => {
     view()
     fireEvent.click(screen.getByTestId('hold-open'), { detail: 1 })
-    expect(screen.queryByTestId('amount-hero')).toBeNull()
+    expect(screen.queryByTestId('claim-surface')).toBeNull()
   })
 
   /**
@@ -233,7 +316,7 @@ describe('a screen reader must not be locked out of the money', () => {
     const escape = screen.getByRole('button', { name: /open it without holding/i })
     expect(escape.getAttribute('data-shown')).toBe('false')
     fireEvent.click(escape)
-    expect(screen.getByTestId('amount-hero').textContent).toMatch(/5\s*NIM/)
+    expect(screen.getByTestId('claim-surface')).toBeTruthy()
   })
 
   it('brings that way out on screen after one early release, with no error copy', () => {
@@ -248,12 +331,14 @@ describe('a screen reader must not be locked out of the money', () => {
     expect(document.body.textContent).not.toMatch(/failed|error|try again|too short/i)
   })
 
-  /** Under reduced motion there is no hold at all: a tap lands on the amount. */
+  /** Under reduced motion there is no hold at all: a tap lands on the money. */
   it('drops the hold requirement entirely under reduced motion', () => {
     stubMotion(true)
     view()
+    // The name changes too: promising a hold that is not required is a lie.
+    expect(screen.getByRole('button', { name: /open the envelope/i })).toBeTruthy()
     fireEvent.click(screen.getByTestId('hold-open'), { detail: 1 })
-    expect(screen.getByTestId('amount-hero').textContent).toMatch(/5\s*NIM/)
+    expect(screen.getByTestId('claim-surface')).toBeTruthy()
     // And no particles, ever.
     expect(screen.queryByTestId('burst')).toBeNull()
     stubMotion(false)
@@ -261,10 +346,10 @@ describe('a screen reader must not be locked out of the money', () => {
 })
 
 /* -------------------------------------------------------------------------
- * A PC cannot open a packet
+ * A device with no wallet cannot open a packet
  * ---------------------------------------------------------------------- */
 
-describe('the state a PC gets', () => {
+describe('the state a device with no wallet gets', () => {
   it('is decided by whether a wallet can sign, not by a viewport', () => {
     expect(openAbility('unavailable')).toBe('sealed-only')
     expect(openAbility('real')).toBe('can-open')
@@ -281,7 +366,7 @@ describe('the state a PC gets', () => {
   /** The seal is the seal. The number waits for the device that can act on it. */
   it('keeps the amount concealed, while saying what kind of thing is inside', () => {
     view({ ability: 'sealed-only' })
-    expect(screen.queryByTestId('amount-hero')).toBeNull()
+    expect(screen.queryByTestId('claim-surface')).toBeNull()
     expect(screen.getByTestId('sealed-only').textContent).toMatch(/same size/i)
   })
 
@@ -311,6 +396,12 @@ describe('the state a PC gets', () => {
     expect(screen.getByRole('link', { name: /open in nimiq pay/i })).toBeTruthy()
     expect(screen.getByRole('img', { name: /qr/i })).toBeTruthy()
   })
+
+  /** It is finished, not disabled: there is no dead control anywhere on it. */
+  it('has no disabled control on it', () => {
+    view({ ability: 'sealed-only' })
+    expect(document.querySelectorAll('[disabled], [aria-disabled="true"]')).toHaveLength(0)
+  })
 })
 
 /* -------------------------------------------------------------------------
@@ -319,12 +410,12 @@ describe('the state a PC gets', () => {
 
 describe('the gesture is built for a thumb', () => {
   /**
-   * The three declarations without which the ritual is interrupted by the
-   * platform: a scroll the browser decides to start three seconds in, Android's
+   * The four declarations without which the ritual is interrupted by the
+   * platform: a scroll the browser decides to start two seconds in, Android's
    * context menu, and iOS's callout and magnifier.
    */
   it('refuses to let the platform steal a held contact', () => {
-    const rule = block('.x-rv-env')
+    const rule = block('.nd-env')
     expect(rule).toMatch(/touch-action:\s*none/)
     expect(rule).toMatch(/user-select:\s*none/)
     expect(rule).toMatch(/-webkit-touch-callout:\s*none/)
@@ -339,18 +430,21 @@ describe('the gesture is built for a thumb', () => {
   })
 
   /**
-   * The whole envelope is the target, so there is nothing to aim at: 292px
-   * across at an aspect of 1.45, which is 292x201. jsdom cannot measure it, so
+   * The whole envelope is the target, so there is nothing to aim at: 21rem
+   * across at an aspect of 1.45, which is 336x232. jsdom cannot measure it, so
    * the declaration is what is checked.
    */
   it('makes the envelope itself the target, far past the 44px floor', () => {
-    const rule = block('.x-rv-env')
-    const width = rule.match(/width:\s*min\(100%,\s*(\d+)px\)/)?.[1]
-    const aspect = rule.match(/aspect-ratio:\s*([\d.]+)/)?.[1]
-    expect(Number(width)).toBeGreaterThanOrEqual(44)
-    expect(Number(width) / Number(aspect)).toBeGreaterThanOrEqual(44)
+    const rule = block('.nd-env')
+    const width = Number(rule.match(/width:\s*min\(100%,\s*([\d.]+)rem\)/)?.[1]) * 16
+    const aspect = Number(rule.match(/aspect-ratio:\s*([\d.]+)/)?.[1])
+    expect(width).toBeGreaterThanOrEqual(44)
+    expect(width / aspect).toBeGreaterThanOrEqual(44)
     // And the way out is a control in its own right, not a 20px link.
-    expect(block('.x-rv-escape')).toMatch(/min-height:\s*44px/)
+    expect(block('.nd-env-escape')).toMatch(/min-height:\s*2\.75rem/)
+    // So is every circular affordance on the rail.
+    expect(block('.nd-round')).toMatch(/width:\s*44px/)
+    expect(block('.nd-round')).toMatch(/height:\s*44px/)
   })
 
   /**
@@ -370,8 +464,7 @@ describe('the gesture is built for a thumb', () => {
    * say `evenodd` out loud.
    */
   it('draws the foil crease as an inset, not a self-intersecting outline', () => {
-    const crease = block('.x-rv-flap::after')
-    expect(crease).toMatch(/inset:\s*[\d.]+px/)
+    expect(block('.nd-env-flap::after')).toMatch(/inset:\s*[\d.]+px/)
 
     for (const [, points] of css.matchAll(/clip-path:\s*polygon\(([^)]*(?:\([^)]*\)[^)]*)*)\)/g)) {
       const corners = points.split(',').length
@@ -450,8 +543,13 @@ describe('vibration is garnish, and is detected rather than assumed', () => {
  * ---------------------------------------------------------------------- */
 
 describe('the burst cannot hand the page sideways scroll', () => {
-  it('clips the stage it lives in', () => {
-    expect(block('.x-rv-stage')).toMatch(/overflow:\s*clip/)
+  /**
+   * A fixed element is outside the document's scrollable overflow rectangle, so
+   * the particles have nothing to escape from. That is a stronger guarantee
+   * than clipping the stage, which is what this used to rely on.
+   */
+  it('is fixed, so it is not in the document overflow rectangle at all', () => {
+    expect(block('.nd-burst')).toMatch(/position:\s*fixed/)
   })
 
   it('is bounded in count', () => {
@@ -463,7 +561,7 @@ describe('the burst cannot hand the page sideways scroll', () => {
   /**
    * Bounded in reach as well as in count. A particle that flies 900px costs the
    * compositor a 900px layer for a second, on the phone that can least spare
-   * it, and it is also the thing that would escape the clip on a short screen.
+   * it.
    */
   it('is bounded in reach', () => {
     for (const piece of [...confetti(), ...shards()]) {
@@ -481,7 +579,7 @@ describe('the burst cannot hand the page sideways scroll', () => {
   })
 
   it('animates on transform and opacity only', () => {
-    const frames = css.match(/@keyframes\s+x-rv-fly\s*\{(?:[^{}]|\{[^{}]*\})*\}/)?.[0]
+    const frames = css.match(/@keyframes\s+nd-fly\s*\{(?:[^{}]|\{[^{}]*\})*\}/)?.[0]
     expect(frames).toBeTruthy()
     const properties = [...frames!.matchAll(/([a-z-]+)\s*:/g)].map((m) => m[1])
     expect(properties.length).toBeGreaterThan(0)
@@ -497,41 +595,6 @@ describe('the burst cannot hand the page sideways scroll', () => {
   it('is deterministic, so a screenshot of it is reproducible', () => {
     expect(confetti()).toEqual(confetti())
     expect(confetti(4, 1)).not.toEqual(confetti(4, 2))
-  })
-})
-
-/* -------------------------------------------------------------------------
- * Reduced motion
- * ---------------------------------------------------------------------- */
-
-describe('prefers-reduced-motion', () => {
-  const reduced = css.slice(css.indexOf('@media (prefers-reduced-motion: reduce)'))
-
-  it('is declared at all', () => {
-    expect(css.indexOf('@media (prefers-reduced-motion: reduce)')).toBeGreaterThan(-1)
-  })
-
-  it('crushes the durations', () => {
-    expect(reduced).toMatch(/animation-duration:\s*0\.01ms\s*!important/)
-    expect(reduced).toMatch(/transition-duration:\s*0\.01ms\s*!important/)
-  })
-
-  /**
-   * The trap. Zeroing durations is not enough once anything is delayed: the
-   * reduced-motion user would sit out the delay in front of a screen where
-   * nothing had happened, then have the finished state appear all at once — a
-   * SLOWER reveal than the animated one, made of nothing. Both delays go too,
-   * and on the universal selector, so nothing added later can escape it.
-   */
-  it('zeroes the delays too, on the universal selector', () => {
-    expect(reduced).toMatch(
-      /\*,\s*\.x-rv-stage \*::before,\s*\.x-rv-stage \*::after\s*\{[^}]*animation-delay:\s*0m?s\s*!important/,
-    )
-    expect(reduced).toMatch(/transition-delay:\s*0m?s\s*!important/)
-  })
-
-  it('drops the burst, which is the only thing with no still equivalent', () => {
-    expect(reduced).toMatch(/\.x-rv-burst\s*\{[^}]*display:\s*none/)
   })
 })
 
