@@ -314,7 +314,7 @@ MIT. See [LICENSE](./LICENSE).
 
 ## Contributing and roadmap
 
-The roadmap is in [design §14](./docs/superpowers/specs/2026-07-25-nimdrops-design.md#14-sustainable-roadmap) and it is deliberately demand-led: nothing on it gets built before mainnet reliability is proven and a named partner actually asks for it. In order — campaign operations (creator history, configurable expiry, signed allowlists, external security review), then distribution adapters for a named partner, then merchant campaigns with real purchase verification. Direct tips and group jars may reuse the wallet-auth, funding-verifier and transfer-ledger pieces but get their own domain models and threat reviews; they are not new values of a `kind` column.
+The roadmap is in [design §14](./docs/superpowers/specs/2026-07-25-nimdrops-design.md#14-sustainable-roadmap) and it is deliberately demand-led: nothing on it gets built before mainnet reliability is proven and a named partner actually asks for it. Sponsor-chosen expiry already ships. Next are campaign operations (creator history, incident drills, signed allowlists, external security review), then one distribution adapter for a named partner, then merchant campaigns with real purchase verification. Direct tips and group jars may reuse the wallet-auth, funding-verifier and transfer-ledger pieces but get their own domain models and threat reviews; they are not new values of a `kind` column. The submission-ready maintenance boundary is in [`docs/submission/maintenance.md`](./docs/submission/maintenance.md).
 
 Explicitly not planned until a concrete use case forecloses the simpler path: bot platforms, OAuth identity vendors, indexers, other chains, other assets.
 
