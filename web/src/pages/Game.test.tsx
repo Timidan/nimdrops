@@ -14,7 +14,15 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { BridgeError, getBridge } from '../sdk/adapter'
 import Game, { WALLET_STORAGE_KEY } from './Game'
+
+// The wallet boundary is mocked, never the SDK: `getBridge` is the seam the page
+// actually uses, and stubbing it keeps these tests free of a real provider.
+vi.mock('../sdk/adapter', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../sdk/adapter')>()),
+  getBridge: vi.fn(() => ({ kind: 'unavailable' as const })),
+}))
 
 const PUBLIC_ID = 'Ab3Cd4Ef5Gh6Ij7Kl8Mn9O'
 const PLAYER = 'NQ07 0000 0000 0000 0000 0000 0000 0000 0000'
@@ -118,51 +126,73 @@ afterEach(() => {
 })
 
 describe('Game — which wallet is playing', () => {
-  it('asks for an address before any condition, and only after showing the offer', async () => {
+  it('asks for the wallet before any condition, and only after showing the offer', async () => {
     installFetch({ game: { status: 200, body: gameBody() } })
     mount(null)
 
     const step = await screen.findByTestId('wallet-step')
     expect(step.textContent).toMatch(/which wallet is playing/i)
     // The reason it is asked, said out loud.
-    expect(step.textContent).toMatch(/only that wallet can claim/i)
-    expect(step.textContent).toMatch(/nothing is signed on this page/i)
-
-    // The offer is visible first: a stranger learns what this is before being
-    // asked for anything.
-    const body = document.body.textContent ?? ''
-    expect(body.indexOf('NIM')).toBeLessThan(body.indexOf('Which wallet is playing'))
-
-    // No condition screen yet.
-    expect(screen.queryByTestId('trivia-idle')).toBe(null)
+    expect(step.textContent).toMatch(/only that wallet can\s+claim/i)
+    // And the promise that this is not the signature.
+    expect(step.textContent).toMatch(/nothing is signed here/i)
+    // The offer came first: a stranger learns what this is before being asked.
+    expect(document.body.textContent).toMatch(/2\.5 NIM/)
+    // No condition has started.
+    expect(screen.queryByTestId('trivia-idle')).toBeNull()
   })
 
-  it('refuses something that is not a Nimiq address, without losing what was typed', async () => {
+  it('reads the address from the wallet rather than asking anyone to type it', async () => {
     installFetch({ game: { status: 200, body: gameBody() } })
+    const address = vi.fn().mockResolvedValue(PLAYER)
+    vi.mocked(getBridge).mockReturnValue({
+      kind: 'real',
+      bridge: { ready: async () => {}, address, sign: async () => ({ publicKey: '', signature: '' }), sendWithData: async () => ({ txHash: '' }) },
+    })
     mount(null)
 
-    await screen.findByTestId('wallet-step')
-    fireEvent.change(screen.getByLabelText(/your nimiq address/i), {
-      target: { value: 'not-an-address' },
-    })
-    fireEvent.click(screen.getByRole('button', { name: /continue/i }))
+    // There is no address field to type into. That is the point of the change.
+    expect(screen.queryByLabelText(/your nimiq address/i)).toBeNull()
 
-    expect(screen.getByTestId('wallet-problem').textContent).toMatch(/does not look like/i)
-    expect(screen.queryByTestId('trivia-idle')).toBe(null)
-  })
-
-  it('remembers the address and moves on to the condition', async () => {
-    installFetch({ game: { status: 200, body: gameBody() } })
-    mount(null)
-
-    await screen.findByTestId('wallet-step')
-    fireEvent.change(screen.getByLabelText(/your nimiq address/i), { target: { value: PLAYER } })
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: /continue/i }))
-    })
-
+    fireEvent.click(await screen.findByTestId('connect-wallet'))
     expect(await screen.findByTestId('trivia-idle')).toBeTruthy()
+    expect(address).toHaveBeenCalledTimes(1)
     expect(localStorage.getItem(WALLET_STORAGE_KEY)).toBe(PLAYER)
+  })
+
+  it('does not blame the wallet when the player declines', async () => {
+    installFetch({ game: { status: 200, body: gameBody() } })
+    vi.mocked(getBridge).mockReturnValue({
+      kind: 'real',
+      bridge: {
+        ready: async () => {},
+        address: async () => {
+          throw new BridgeError('provider_error', 'address', 'USER_CANCELED: rejected')
+        },
+        sign: async () => ({ publicKey: '', signature: '' }),
+        sendWithData: async () => ({ txHash: '' }),
+      },
+    })
+    mount(null)
+
+    fireEvent.click(await screen.findByTestId('connect-wallet'))
+    const problem = await screen.findByTestId('wallet-problem')
+    // Declining is a legitimate answer, not a fault to scold.
+    expect(problem.textContent).not.toMatch(/refus|denied|error|invalid/i)
+    expect(problem.textContent).toMatch(/nothing to record|try again/i)
+    // Nothing was remembered and no condition started.
+    expect(localStorage.getItem(WALLET_STORAGE_KEY)).toBeNull()
+    expect(screen.queryByTestId('trivia-idle')).toBeNull()
+  })
+
+  it('tells a plain browser to open the link in the wallet', async () => {
+    installFetch({ game: { status: 200, body: gameBody() } })
+    vi.mocked(getBridge).mockReturnValue({ kind: 'unavailable' })
+    mount(null)
+
+    fireEvent.click(await screen.findByTestId('connect-wallet'))
+    const problem = await screen.findByTestId('wallet-problem')
+    expect(problem.textContent).toMatch(/nimiq pay/i)
   })
 })
 

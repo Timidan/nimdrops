@@ -4,6 +4,7 @@ import { ApiError, submitPassphrase, type GateKind } from '../api'
 import { formatNim } from '../money'
 import { ADDRESS_RE, PASSPHRASE_MAX_ATTEMPTS, useGate } from '../state/gate'
 import { TRIVIA_COOLDOWN_MINUTES, TRIVIA_QUESTION_COUNT, useTriviaSession } from '../state/trivia'
+import { BridgeError, getBridge } from '../sdk/adapter'
 import Screen from '../ui/Screen'
 
 /**
@@ -237,70 +238,74 @@ function Pass({ publicId, amount }: { publicId: string; amount: string }) {
  * The one thing this page has to ask for.
  *
  * It comes after the offer, never before it: a stranger should learn what this
- * is before being asked for anything (`PRODUCT.md` design principle 5). It is
- * also the honest place to say that nothing is signed here, because the reason
- * an address is typed rather than read from the wallet is precisely that this
- * page refuses to spend a native prompt on a condition the player has not met
- * yet.
+ * is before being asked for anything (`PRODUCT.md` design principle 5).
+ *
+ * The address is READ FROM THE WALLET, not typed. This was a text field, on the
+ * reasoning that the page should not spend a native prompt on a condition the
+ * player has not met yet — but the cost of that reasoning was asking someone to
+ * copy thirty-six characters on a phone, and `PRODUCT.md` names "without typing
+ * an address" as part of what success looks like. One tap on a wallet dialog is
+ * cheaper than that for everyone, and it cannot be mistyped.
+ *
+ * The prompt is bought here and nowhere else. `WalletBridge.address()` is not
+ * called from `ready()`, and the ordinary claim path never calls it at all, so a
+ * claimant on an ungated drop still meets exactly one prompt in the whole flow.
  */
 function WalletStep({ onSubmit }: { onSubmit: (address: string) => void }) {
-  const [value, setValue] = useState('')
+  const [busy, setBusy] = useState(false)
   const [problem, setProblem] = useState('')
 
+  async function ask() {
+    setBusy(true)
+    setProblem('')
+    try {
+      const result = getBridge()
+      if (result.kind === 'unavailable') {
+        setProblem('Open this link inside Nimiq Pay to play. Your wallet is what identifies you.')
+        return
+      }
+      onSubmit(await result.bridge.address())
+    } catch (cause) {
+      // Never "your wallet refused you". Declining is a legitimate answer, and
+      // the claimant declining in Nimiq Pay is not an error state we scold.
+      setProblem(
+        cause instanceof BridgeError && cause.type === 'provider_error'
+          ? 'No address was shared, so there is nothing to record this against yet. Try again when you are ready.'
+          : 'We could not read your address. Nothing was sent and nothing was signed.',
+      )
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
-    <form
-      data-testid="wallet-step"
-      className="mt-8"
-      onSubmit={(event) => {
-        event.preventDefault()
-        const trimmed = value.trim()
-        if (!ADDRESS_RE.test(trimmed)) {
-          setProblem(
-            'That does not look like a Nimiq address. It begins with NQ and is 36 characters; the spaces do not matter.',
-          )
-          return
-        }
-        setProblem('')
-        onSubmit(trimmed)
-      }}
-    >
+    <div data-testid="wallet-step" className="mt-8">
       <h1 className="text-lg font-semibold tracking-tight">Which wallet is playing?</h1>
       <p className="mt-2 text-sm leading-relaxed text-ink/65">
-        Whatever this drop asks of you is recorded against the address you give here, and only that
-        wallet can claim the share. It has to be one you hold.
+        Whatever this drop asks of you is recorded against your wallet, and only that wallet can
+        claim the share.
       </p>
       <p className="mt-2 text-sm leading-relaxed text-ink/65">
-        Nothing is signed on this page and nothing leaves your wallet. The signature comes later, on
-        the claim.
+        Your wallet will ask you to share your address. Nothing is signed here and nothing leaves
+        your wallet — the signature comes later, on the claim.
       </p>
 
-      <label htmlFor="gate-wallet" className="mt-6 block text-sm font-medium text-ink/70">
-        Your Nimiq address
-      </label>
-      <input
-        id="gate-wallet"
-        name="walletAddress"
-        value={value}
-        autoComplete="off"
-        spellCheck={false}
-        placeholder="NQ…"
-        onChange={(event) => setValue(event.target.value)}
-        aria-describedby="gate-wallet-hint"
-        className="mt-2 w-full rounded-2xl border border-ink/12 bg-white px-4 py-3 text-base text-ink outline-none placeholder:text-ink/45 focus:border-gold"
-      />
-      <p id="gate-wallet-hint" className="mt-2 text-xs leading-relaxed text-ink/55">
-        Copy it from Nimiq Pay. It starts with NQ.
-      </p>
       {problem ? (
-        <p data-testid="wallet-problem" role="alert" className="mt-2 text-xs leading-relaxed text-ink/75">
+        <p data-testid="wallet-problem" role="alert" className="mt-4 text-xs leading-relaxed text-ink/75">
           {problem}
         </p>
       ) : null}
 
-      <button type="submit" className="nd-primary mt-6 w-full">
-        Continue
+      <button
+        type="button"
+        data-testid="connect-wallet"
+        disabled={busy}
+        onClick={() => void ask()}
+        className="nd-primary mt-6 w-full disabled:opacity-60"
+      >
+        {busy ? 'Waiting for your wallet…' : 'Use my wallet'}
       </button>
-    </form>
+    </div>
   )
 }
 
