@@ -16,7 +16,7 @@ import { DropNotFoundError, type DropPublic } from '../src/services/drops'
  *  1. A chat preview that is campaign-specific but carries NO mutable count
  *     (design §4.1 — previews are cached, so "3 left" becomes a lie).
  *  2. No existence oracle. An unknown but well-formed id and outright junk must
- *     produce the SAME page, byte for byte in the head, so `/d/<guess>` cannot
+ *     produce the SAME page, byte for byte in the head, so `/drop/<guess>` cannot
  *     be used to enumerate live campaigns.
  *  3. It is mounted LAST. Nothing here may shadow an `/api` route.
  */
@@ -100,9 +100,38 @@ afterAll(() => {
   rmSync(assetRoot, { recursive: true, force: true })
 })
 
-describe('GET /d/:publicId — campaign page', () => {
-  it('renders a campaign-specific preview for a live drop', async () => {
+describe('GET /d/:publicId — the path drops used to live on', () => {
+  /**
+   * A drop link's whole job is to be pasted into a group chat and scanned off
+   * somebody's screen. A printed QR cannot be reissued, and a claim link that
+   * dead-ends is a person not receiving money that was sent to them. Nothing
+   * had been shared on mainnet when the path moved, so this catches nothing
+   * today — which is exactly why it needs a test to stop it being deleted as
+   * dead weight later.
+   */
+  it('redirects a legacy drop link permanently, keeping the id', async () => {
     const res = await app.request(`/d/${KNOWN_ID}`)
+    expect(res.status).toBe(301)
+    expect(res.headers.get('location')).toBe(`/drop/${KNOWN_ID}`)
+  })
+
+  it('redirects a legacy QR to the new QR, so printed codes keep resolving', async () => {
+    const res = await app.request(`/d/${KNOWN_ID}/qr.svg`)
+    expect(res.status).toBe(301)
+    expect(res.headers.get('location')).toBe(`/drop/${KNOWN_ID}/qr.svg`)
+  })
+
+  // The redirect must not become a wider oracle than the page it replaced: a
+  // malformed id is refused here exactly as it is on the real route.
+  it('refuses a malformed id rather than redirecting it', async () => {
+    const res = await app.request(`/d/${MALFORMED_ID}`)
+    expect(res.status).toBe(404)
+  })
+})
+
+describe('GET /drop/:publicId — campaign page', () => {
+  it('renders a campaign-specific preview for a live drop', async () => {
+    const res = await app.request(`/drop/${KNOWN_ID}`)
     expect(res.status).toBe(200)
     expect(res.headers.get('content-type')).toMatch(/^text\/html/)
 
@@ -114,7 +143,7 @@ describe('GET /d/:publicId — campaign page', () => {
   })
 
   it('omits every mutable count from the preview metadata', async () => {
-    const html = await body(app, `/d/${KNOWN_ID}`)
+    const html = await body(app, `/drop/${KNOWN_ID}`)
     const description = metaContent(html, 'og:description') ?? ''
 
     expect(description).not.toMatch(/remaining|claimed|left|\bshares?\b.*\d|\d+\s*of\s*\d+/i)
@@ -127,17 +156,17 @@ describe('GET /d/:publicId — campaign page', () => {
   })
 
   it('offers the Nimiq Pay deeplink, a QR and the copyable canonical URL', async () => {
-    const html = await body(app, `/d/${KNOWN_ID}`)
-    const canonical = `${ORIGIN}/d/${KNOWN_ID}`
+    const html = await body(app, `/drop/${KNOWN_ID}`)
+    const canonical = `${ORIGIN}/drop/${KNOWN_ID}`
 
     expect(html).toContain(`nimiqpay://miniapp?url=${encodeURIComponent(canonical)}`)
     expect(html).toContain('Open in Nimiq Pay')
-    expect(html).toContain(`/d/${KNOWN_ID}/qr.svg`)
+    expect(html).toContain(`/drop/${KNOWN_ID}/qr.svg`)
     expect(html).toContain(canonical)
   })
 
   it('loads the built SPA bundle from the dist manifest', async () => {
-    const html = await body(app, `/d/${KNOWN_ID}`)
+    const html = await body(app, `/drop/${KNOWN_ID}`)
     expect(html).toContain('src="/assets/app-fixture.js"')
     expect(html).toContain('href="/assets/app-fixture.css"')
   })
@@ -151,15 +180,15 @@ describe('GET /d/:publicId — campaign page', () => {
       assetRoot,
     })
 
-    const html = await body(hostileApp, `/d/${KNOWN_ID}`)
+    const html = await body(hostileApp, `/drop/${KNOWN_ID}`)
     expect(html).not.toContain('<script>alert(1)</script>')
     expect(metaContent(html, 'og:title')).toContain('&lt;script&gt;')
   })
 })
 
-describe('GET /d/:publicId — no existence oracle', () => {
+describe('GET /drop/:publicId — no existence oracle', () => {
   it('answers an unknown id with a 200 generic shell', async () => {
-    const res = await app.request(`/d/${UNKNOWN_ID}`)
+    const res = await app.request(`/drop/${UNKNOWN_ID}`)
     expect(res.status).toBe(200)
     const html = await res.text()
     expect(metaContent(html, 'og:title')).not.toContain(SPONSOR)
@@ -168,37 +197,37 @@ describe('GET /d/:publicId — no existence oracle', () => {
   })
 
   it('answers a malformed id with the same status and a byte-identical head', async () => {
-    const unknown = await app.request(`/d/${UNKNOWN_ID}`)
-    const malformed = await app.request(`/d/${MALFORMED_ID}`)
+    const unknown = await app.request(`/drop/${UNKNOWN_ID}`)
+    const malformed = await app.request(`/drop/${MALFORMED_ID}`)
 
     expect(malformed.status).toBe(unknown.status)
     expect(head(await malformed.text())).toBe(head(await unknown.text()))
   })
 
   it('differs from the known-drop page only in the OG fields', async () => {
-    const known = head(await body(app, `/d/${KNOWN_ID}`))
-    const unknown = head(await body(app, `/d/${UNKNOWN_ID}`))
+    const known = head(await body(app, `/drop/${KNOWN_ID}`))
+    const unknown = head(await body(app, `/drop/${UNKNOWN_ID}`))
 
     const strip = (h: string): string => h.replace(/<meta\s+property="og:[^>]*>\s*/g, '')
     expect(strip(known)).toBe(strip(unknown))
   })
 })
 
-describe('GET /d/:publicId/qr.svg', () => {
+describe('GET /drop/:publicId/qr.svg', () => {
   it('renders a QR of the canonical URL', async () => {
-    const res = await app.request(`/d/${KNOWN_ID}/qr.svg`)
+    const res = await app.request(`/drop/${KNOWN_ID}/qr.svg`)
     expect(res.status).toBe(200)
     expect(res.headers.get('content-type')).toMatch(/^image\/svg\+xml/)
 
     const svg = await res.text()
     expect(svg).toContain('<svg')
-    expect(svg).toContain(`${ORIGIN}/d/${KNOWN_ID}`)
+    expect(svg).toContain(`${ORIGIN}/drop/${KNOWN_ID}`)
   })
 
   it('does not consult the drop at all — an unknown id still gets a QR', async () => {
-    const res = await app.request(`/d/${UNKNOWN_ID}/qr.svg`)
+    const res = await app.request(`/drop/${UNKNOWN_ID}/qr.svg`)
     expect(res.status).toBe(200)
-    expect(await res.text()).toContain(`${ORIGIN}/d/${UNKNOWN_ID}`)
+    expect(await res.text()).toContain(`${ORIGIN}/drop/${UNKNOWN_ID}`)
   })
 })
 
@@ -254,7 +283,7 @@ describe('registration order', () => {
     expect(res.status).toBe(500)
 
     // …while the SSR route on the same app renders HTML.
-    const page = await full.request(`/d/${KNOWN_ID}`)
+    const page = await full.request(`/drop/${KNOWN_ID}`)
     expect(page.status).toBe(200)
     expect(page.headers.get('content-type')).toMatch(/^text\/html/)
   })

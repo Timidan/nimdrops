@@ -317,7 +317,7 @@ describe('the printed amount', () => {
       `nimiqpay://miniapp?url=${encodeURIComponent(window.location.href)}`,
     )
     expect(screen.getByRole('img', { name: /qr/i }).getAttribute('src')).toBe(
-      `/d/${PUBLIC_ID}/qr.svg`,
+      `/drop/${PUBLIC_ID}/qr.svg`,
     )
     expect(screen.getByRole('button', { name: /copy link/i })).toBeTruthy()
   })

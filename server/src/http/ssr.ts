@@ -267,9 +267,30 @@ export function registerSsr(app: Hono, opts: SsrOptions = {}): void {
     })
   }
 
-  // ---- GET /d/:publicId ------------------------------------------------------------
+  // ---- GET /drop/:publicId ---------------------------------------------------------
 
-  app.get('/d/:publicId', async (c) => {
+  /**
+   * `/d/:publicId` was the original shape and is kept as a permanent redirect
+   * rather than deleted. Nothing forces that: no mainnet link had been shared
+   * when this moved, so the migration is free today. But a drop link's whole
+   * purpose is to be pasted into a group chat and scanned off someone's screen,
+   * and a QR code that has already been printed cannot be edited. A dead claim
+   * link is a person not getting money they were sent, so this redirect stays
+   * even though today it has nothing to catch.
+   */
+  app.get('/d/:publicId', (c) => {
+    const publicId = c.req.param('publicId') ?? ''
+    if (!PUBLIC_ID_RE.test(publicId)) return c.notFound()
+    return c.redirect(`/drop/${publicId}`, 301)
+  })
+
+  app.get('/d/:publicId/qr.svg', (c) => {
+    const publicId = c.req.param('publicId') ?? ''
+    if (!PUBLIC_ID_RE.test(publicId)) return c.notFound()
+    return c.redirect(`/drop/${publicId}/qr.svg`, 301)
+  })
+
+  app.get('/drop/:publicId', async (c) => {
     const publicId = c.req.param('publicId') ?? ''
     const wellFormed = PUBLIC_ID_RE.test(publicId)
 
@@ -299,15 +320,15 @@ export function registerSsr(app: Hono, opts: SsrOptions = {}): void {
     return html(
       shell({
         drop,
-        canonical: wellFormed ? `${base}/d/${publicId}` : null,
+        canonical: wellFormed ? `${base}/drop/${publicId}` : null,
         origin: base,
         assetTags,
-        qrPath: wellFormed ? `/d/${publicId}/qr.svg` : null,
+        qrPath: wellFormed ? `/drop/${publicId}/qr.svg` : null,
       }),
     )
   })
 
-  // ---- GET /d/:publicId/qr.svg -------------------------------------------------------
+  // ---- GET /drop/:publicId/qr.svg ----------------------------------------------------
 
   /**
    * A QR of the canonical URL. It performs NO lookup: encoding an id the caller
@@ -315,11 +336,11 @@ export function registerSsr(app: Hono, opts: SsrOptions = {}): void {
    * free of database latency (and of any timing difference between a live and a
    * dead campaign).
    */
-  app.get('/d/:publicId/qr.svg', async (c) => {
+  app.get('/drop/:publicId/qr.svg', async (c) => {
     const publicId = c.req.param('publicId') ?? ''
     if (!PUBLIC_ID_RE.test(publicId)) return c.notFound()
 
-    const canonical = `${origin()}/d/${publicId}`
+    const canonical = `${origin()}/drop/${publicId}`
     const svg = await QRCode.toString(canonical, {
       type: 'svg',
       // Medium recovery survives a phone screenshot; the margin keeps the quiet

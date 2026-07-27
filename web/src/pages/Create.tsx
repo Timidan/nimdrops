@@ -1319,7 +1319,7 @@ function Live({
           <div data-testid="share-block" className="nd-rise">
             <div className="mt-8 rounded-3xl border border-ink/10 bg-white p-5">
               <img
-                src={`/d/${draft.publicId}/qr.svg`}
+                src={`/drop/${draft.publicId}/qr.svg`}
                 alt="QR code for this drop's link"
                 width={220}
                 height={220}

@@ -24,10 +24,18 @@ describe('router', () => {
     expect(screen.getByLabelText(/NIM per person/i)).toBeTruthy()
   })
 
-  it('renders the campaign page for /d/:publicId', () => {
-    at('/d/abc')
+  it('renders the drop page for /drop/:publicId', () => {
+    at('/drop/abc')
     // The claim flow owns everything past this point; the router's job is only
-    // to hand `/d/:publicId` to it. Behaviour lives in `pages/Drop.test.tsx`.
+    // to hand `/drop/:publicId` to it. Behaviour lives in `pages/Drop.test.tsx`.
+    expect(screen.getByText(/opening this nimdrop/i)).toBeTruthy()
+  })
+
+  // A printed QR cannot be reissued, so the old path has to keep landing on the
+  // drop rather than on the create form. Asserted at the router because that is
+  // the only place a client-side navigation to `/d/…` is still reachable.
+  it('carries a legacy /d/:publicId link through to the drop', () => {
+    at('/d/abc')
     expect(screen.getByText(/opening this nimdrop/i)).toBeTruthy()
   })
 

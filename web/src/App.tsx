@@ -1,4 +1,4 @@
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
+import { BrowserRouter, Navigate, Route, Routes, useParams } from 'react-router-dom'
 import Create from './pages/Create'
 import DirectionA from './pages/design/DirectionA'
 import DirectionB from './pages/design/DirectionB'
@@ -8,8 +8,8 @@ import Preview from './pages/Preview'
 import Spike from './pages/Spike'
 
 /**
- * The three routes the server actually serves a shell for (`http/ssr.ts`):
- * `/`, `/create` and `/d/:publicId`. Anything else is a mistyped or stale link,
+ * The routes the server actually serves a shell for (`http/ssr.ts`): `/`,
+ * `/create` and `/drop/:publicId`. Anything else is a mistyped or stale link,
  * and the useful answer to that is the create screen, not a 404 page.
  *
  * `/preview` is the envelope's states board and must never ship. The guard is
@@ -25,12 +25,24 @@ import Spike from './pages/Spike'
  * `AppRoutes` is exported without the router so tests can mount it inside a
  * `MemoryRouter` at any path.
  */
+/** Carries the id across, so an old link lands on the drop and not on a form. */
+function LegacyDropRedirect() {
+  const { publicId } = useParams()
+  return <Navigate to={publicId ? `/drop/${publicId}` : '/'} replace />
+}
+
 export function AppRoutes() {
   return (
     <Routes>
       <Route path="/" element={<Create />} />
       <Route path="/create" element={<Create />} />
-      <Route path="/d/:publicId" element={<Drop />} />
+      <Route path="/drop/:publicId" element={<Drop />} />
+      {/*
+        The old shape. The server 301s it, so this only catches a client-side
+        navigation, but a claim link that dead-ends is somebody not getting
+        money that was sent to them — cheap to keep, expensive to have missed.
+      */}
+      <Route path="/d/:publicId" element={<LegacyDropRedirect />} />
       {/* Task 7's on-device provider spike page; dev-only in practice. */}
       <Route path="/spike" element={<Spike />} />
       {import.meta.env.DEV ? <Route path="/preview" element={<Preview />} /> : null}

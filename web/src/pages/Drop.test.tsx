@@ -105,10 +105,10 @@ function mount(
   pollMs = 5,
 ) {
   return render(
-    <MemoryRouter initialEntries={[`/d/${PUBLIC_ID}`]}>
+    <MemoryRouter initialEntries={[`/drop/${PUBLIC_ID}`]}>
       <Routes>
         <Route
-          path="/d/:publicId"
+          path="/drop/:publicId"
           element={<Drop discoverBridge={discoverBridge} pollMs={pollMs} />}
         />
       </Routes>
@@ -244,7 +244,7 @@ describe('Drop — opened in a plain browser (no wallet)', () => {
     )
 
     const qr = screen.getByRole('img', { name: /qr/i })
-    expect(qr.getAttribute('src')).toBe(`/d/${PUBLIC_ID}/qr.svg`)
+    expect(qr.getAttribute('src')).toBe(`/drop/${PUBLIC_ID}/qr.svg`)
 
     expect(screen.getByRole('button', { name: /copy link/i })).toBeTruthy()
     // The offer is still visible, so the claimant knows what it is worth.
@@ -373,7 +373,7 @@ describe('Drop — claiming', () => {
   })
 
   /**
-   * The share button used to hand a friend `/d/{publicId}` — the very drop the
+   * The share button used to hand a friend `/drop/{publicId}` — the very drop the
    * claimant had just taken a share out of — under a label that read like a
    * recommendation of the app. Recommending the product and passing on this
    * drop are different acts, and the two adjacent buttons must not blur them.
@@ -397,7 +397,7 @@ describe('Drop — claiming', () => {
     const payload = share.mock.calls[0]![0]
     expect(payload.url).toBe(window.location.origin)
     expect(payload.url).not.toContain(PUBLIC_ID)
-    expect(payload.url).not.toContain('/d/')
+    expect(payload.url).not.toContain('/drop/')
     // WhatsApp routinely drops `title`, so the description travels in `text`.
     expect(payload.text).toMatch(/fixed share of NIM for everyone who opens it/i)
   })

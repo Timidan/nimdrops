@@ -303,7 +303,7 @@ function requireOrigin(): string {
 }
 
 export function shareUrlFor(publicId: string): string {
-  return `${requireOrigin()}/d/${publicId}`
+  return `${requireOrigin()}/drop/${publicId}`
 }
 
 /**

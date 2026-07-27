@@ -378,7 +378,7 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
     expect(draft.fundingMemo).toBe(`ND1:${draft.publicId}`)
     expect(draft.expectedFunding).toBe('5')
     expect(draft.expectedFundingLuna).toBe('500000')
-    expect(draft.shareUrl).toBe(`${ORIGIN}/d/${draft.publicId}`)
+    expect(draft.shareUrl).toBe(`${ORIGIN}/drop/${draft.publicId}`)
 
     // 2. fund
     const txHash = fundingHashFor(draft.publicId)

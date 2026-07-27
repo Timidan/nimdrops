@@ -521,7 +521,7 @@ function NoWallet({ publicId }: { publicId: string }) {
 
       <div className="mt-6 rounded-3xl border border-ink/10 bg-white p-5">
         <img
-          src={`/d/${publicId}/qr.svg`}
+          src={`/drop/${publicId}/qr.svg`}
           alt="QR code for this drop's link"
           width={200}
           height={200}

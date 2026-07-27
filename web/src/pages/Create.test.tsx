@@ -33,7 +33,7 @@ import Create, { type CreateProps } from './Create'
 
 /** 22 base64url chars — the shape `ids.ts` mints and `app.ts` validates. */
 const PUBLIC_ID = 'Ab3Cd4Ef5Gh6Ij7Kl8Mn9O'
-const SHARE_URL = `https://nimdrops.example/d/${PUBLIC_ID}`
+const SHARE_URL = `https://nimdrops.example/drop/${PUBLIC_ID}`
 const CUSTODY_ADDRESS = 'NQ34 248H 2M0X R0LB 9YT4 4BFD 8AXL SN0P R1KL'
 
 /** What `POST /api/drops` answers for 2 NIM × 5 people. */
@@ -937,7 +937,7 @@ describe('Create — share screen', () => {
 
     expect(screen.getByText(SHARE_URL)).toBeTruthy()
     const qr = screen.getByRole('img', { name: /qr/i })
-    expect(qr.getAttribute('src')).toBe(`/d/${PUBLIC_ID}/qr.svg`)
+    expect(qr.getAttribute('src')).toBe(`/drop/${PUBLIC_ID}/qr.svg`)
 
     fireEvent.click(screen.getByRole('button', { name: /copy link/i }))
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(SHARE_URL))
@@ -1026,7 +1026,7 @@ describe('Create — the link is the reward for funding', () => {
     const revealed = shareAffordances()
     expect(revealed.block).toBeTruthy()
     expect(revealed.url).toBeTruthy()
-    expect(revealed.qr?.getAttribute('src')).toBe(`/d/${PUBLIC_ID}/qr.svg`)
+    expect(revealed.qr?.getAttribute('src')).toBe(`/drop/${PUBLIC_ID}/qr.svg`)
     expect(revealed.copy).toBeTruthy()
     // The arrival is animated rather than a field quietly filling in; the class
     // is a plain animation, so reduced motion lands it fully formed.
