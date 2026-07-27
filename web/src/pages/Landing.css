@@ -1,0 +1,688 @@
+/* ===========================================================================
+ * The landing page
+ * ===========================================================================
+ *
+ * The one surface in NimDrops that is genuinely responsive, and the one written
+ * in the brand register rather than the product one. Everything else answers a
+ * browser with an open-in-app gate; this page has to be deliberate on a 320px
+ * phone and on a 1440px monitor, because it is where a stranger finds out what
+ * the product is.
+ *
+ * It reuses the product's material rather than inventing a second one: the same
+ * warm near-black field, the same vermilion bloom, the same recesses, the same
+ * `.nd-action` / `.nd-quiet` button language, the same Mulish. Three departures,
+ * each with a reason:
+ *
+ *  1. **The bloom does not move.** On a claim screen the drift says the drop is
+ *     live and other people are taking shares out of it while you read. Nothing
+ *     on a landing page is live, so the same animation would be decoration — and
+ *     it would run for the whole length of a long scrolling page.
+ *  2. **The light is bounded to the first screen.** `.nd-land-sky` clips it. A
+ *     bloom anchored to the height of a five-fold page would put its core
+ *     somewhere in the middle of the custody copy, and leave the hero unlit.
+ *  3. **Media queries, not container queries.** The product's components are
+ *     sized against the field's own width so they render correctly inside
+ *     `/preview`'s 390px frame. This page is never framed: the viewport IS its
+ *     context, and it is the only place in the codebase where that is true.
+ *
+ * Contrast discipline is unchanged and is the reason so little text here is
+ * muted. Secondary ink never sits unprotected on a lit field; copy on the open
+ * page is full-strength near-white doing its de-emphasis with weight and size,
+ * and muted ink appears only inside a recess. Nothing on the page is blurred —
+ * `GlassSheet` remains the only `backdrop-filter` surface in the product.
+ */
+
+.nd-land {
+  --pad: clamp(1.25rem, 5vw, 3.5rem);
+  --measure: 68rem;
+
+  position: relative;
+  overflow: clip;
+  min-height: 100dvh;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)
+    env(safe-area-inset-left);
+  background-color: var(--color-field);
+  color: var(--nd-on-surface);
+}
+
+.nd-land-wrap {
+  width: 100%;
+  max-width: var(--measure);
+  margin: 0 auto;
+  padding-inline: var(--pad);
+}
+
+/* ---- the light ----------------------------------------------------------- */
+
+/**
+ * A bounded sky. It clips its own bloom, and fades to the page's flat base at
+ * its foot, so the light belongs to the hero and the reading below it happens on
+ * even ground.
+ */
+.nd-land-sky {
+  position: absolute;
+  inset: 0 0 auto 0;
+  height: min(115dvh, 60rem);
+  overflow: clip;
+  pointer-events: none;
+  z-index: var(--nd-z-light);
+  /* Fades the whole band out at the bottom, so there is no visible edge where
+     the light stops. */
+  mask-image: linear-gradient(180deg, #000 0%, #000 62%, transparent 100%);
+}
+
+/**
+ * The bloom, behind and above the photographed packet, which is the light
+ * source's excuse for being where it is: the object is lit from behind.
+ *
+ * Dimmer than the claim field's 0.66. That field carries one number and two
+ * tiles; this page carries five folds of prose, and every line of it is held to
+ * the same contrast floors.
+ */
+.nd-land-bloom {
+  position: absolute;
+  top: 4%;
+  left: 68%;
+  width: 90vmax;
+  height: 90vmax;
+  margin-top: -45vmax;
+  margin-left: -45vmax;
+  border-radius: 50%;
+  filter: blur(40px);
+  opacity: 0.52;
+  background: radial-gradient(
+    closest-side,
+    var(--nd-bloom-core) 0%,
+    var(--nd-bloom-core) 8%,
+    var(--nd-bloom-hot) 19%,
+    var(--nd-bloom-mid) 33%,
+    var(--nd-bloom-deep) 47%,
+    var(--nd-bloom-edge) 68%,
+    var(--nd-bloom-fade) 100%
+  );
+}
+
+/** Static counter-light, so the bloom is not a circle on a rectangle. */
+.nd-land-counter {
+  position: absolute;
+  top: 42%;
+  left: -34vmax;
+  width: 72vmax;
+  height: 72vmax;
+  border-radius: 50%;
+  filter: blur(48px);
+  opacity: 0.34;
+  background: radial-gradient(closest-side, var(--nd-counter-fill), var(--nd-counter-fade) 72%);
+}
+
+/* At phone widths the light sits behind the headline rather than beside a
+   packet that has moved below it, so it comes down and in. */
+@media (max-width: 60rem) {
+  .nd-land-bloom {
+    top: 34%;
+    left: 78%;
+    opacity: 0.46;
+  }
+}
+
+.nd-land > .nd-field-texture {
+  z-index: var(--nd-z-texture);
+}
+
+/* Everything with content sits above the light. */
+.nd-land-top,
+.nd-land-hero,
+.nd-land-sec,
+.nd-land-foot {
+  position: relative;
+  z-index: var(--nd-z-content);
+}
+
+/* ---- the masthead -------------------------------------------------------- */
+
+.nd-land-top-in {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-block: 1.125rem;
+}
+
+.nd-land-brand {
+  margin: 0;
+  font-size: 1.0625rem;
+  font-weight: 800;
+  letter-spacing: -0.015em;
+  color: var(--nd-on-surface);
+}
+
+.nd-land-topcta {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+  padding: 0 0.875rem;
+  border: 1px solid var(--nd-rule-strong);
+  border-radius: 999px;
+  color: var(--nd-on-surface);
+  font-size: 0.875rem;
+  font-weight: 650;
+  text-decoration: none;
+  white-space: nowrap;
+  transition:
+    border-color var(--nd-t-state) var(--nd-ease),
+    background-color var(--nd-t-state) var(--nd-ease);
+}
+
+.nd-land-topcta:hover {
+  border-color: rgb(245 240 238 / 0.5);
+  background-color: rgb(245 240 238 / 0.08);
+}
+
+/* ---- the hero ------------------------------------------------------------ */
+
+.nd-land-hero-in {
+  display: grid;
+  gap: clamp(2rem, 6vw, 3rem);
+  padding-top: clamp(2.5rem, 9vw, 5rem);
+  padding-bottom: clamp(3rem, 9vw, 6rem);
+}
+
+/**
+ * Two type roles, 2.4x apart, and the second one carries the whole claim.
+ *
+ * A modest ratio here would read as uncommitted, and running the sentence at one
+ * size would put a full marketing paragraph at display scale. "One link." is the
+ * shape of the product; the line under it is what the product does.
+ */
+.nd-land-h1 {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  margin: 0;
+  text-wrap: balance;
+}
+
+.nd-land-h1-a {
+  font-size: clamp(2.75rem, 12vw, 5.5rem);
+  font-weight: 800;
+  line-height: 0.92;
+  letter-spacing: -0.045em;
+  color: var(--nd-on-surface);
+}
+
+.nd-land-h1-b {
+  max-width: 18ch;
+  font-size: clamp(1.375rem, 5.2vw, 2.25rem);
+  font-weight: 500;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+  color: var(--nd-on-surface);
+}
+
+/* Full strength, weight-de-emphasised. This paragraph sits on the lit field and
+   secondary alpha cannot clear 4.5:1 there. */
+.nd-land-lede {
+  max-width: 46ch;
+  margin: 1.5rem 0 0;
+  font-size: clamp(0.9375rem, 1.4vw, 1.0625rem);
+  font-weight: 400;
+  line-height: 1.6;
+  color: var(--nd-on-surface);
+  text-wrap: pretty;
+}
+
+.nd-land-cta {
+  margin-top: 1.875rem;
+  max-width: 22rem;
+}
+
+.nd-land-ctanote {
+  margin: 0.75rem 0 0;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  line-height: 1.5;
+  color: var(--nd-on-surface);
+  text-wrap: pretty;
+}
+
+/**
+ * The photographed packet: a real object, lit from behind by the bloom, and the
+ * only image on the page. It is decorative — the page says everything it needs
+ * to in words — so it carries an empty alt and a missing file costs nothing.
+ */
+.nd-land-hero-art {
+  display: flex;
+  justify-content: center;
+}
+
+.nd-land-hero-art .nd-photograph,
+.nd-land-hero-art img {
+  display: block;
+  width: 100%;
+  max-width: min(20rem, 62vw);
+  height: auto;
+}
+
+@media (min-width: 60rem) {
+  .nd-land-hero-in {
+    grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+    align-items: center;
+  }
+  .nd-land-hero-art {
+    justify-content: flex-end;
+  }
+  .nd-land-hero-art .nd-photograph,
+  .nd-land-hero-art img {
+    max-width: 26rem;
+  }
+}
+
+/* ---- shared section furniture -------------------------------------------- */
+
+.nd-land-sec {
+  padding-block: clamp(2.75rem, 7vw, 5rem);
+}
+
+.nd-land-sec h2 {
+  margin: 0;
+  font-size: clamp(1.5rem, 3.4vw, 2rem);
+  font-weight: 800;
+  line-height: 1.15;
+  letter-spacing: -0.025em;
+  color: var(--nd-on-surface);
+  text-wrap: balance;
+}
+
+.nd-land-sec h3 {
+  margin: 0;
+  font-size: 1.0625rem;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  color: var(--nd-on-surface);
+}
+
+/* Every section below the hero is on flat near-black, so its supporting copy
+   can be muted without a recess under it. */
+.nd-land-sec p {
+  text-wrap: pretty;
+}
+
+/* ---- how a drop works ---------------------------------------------------- */
+
+.nd-land-how {
+  border-top: 1px solid var(--nd-rule);
+}
+
+.nd-land-how-in {
+  display: grid;
+  gap: clamp(1.75rem, 4vw, 3.5rem);
+}
+
+.nd-land-how-head > p {
+  max-width: 44ch;
+  margin: 0.875rem 0 0;
+  font-size: 0.9375rem;
+  line-height: 1.6;
+  color: var(--nd-on-surface-muted);
+}
+
+/**
+ * A sequence, so a rail with beats on it — not four equal cards. The rail is a
+ * pseudo-element on each item rather than a border on a container, which is what
+ * lets the last beat stop the line instead of trailing it into empty space.
+ */
+.nd-flow {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nd-flow > li,
+.nd-flow-after {
+  position: relative;
+  padding: 0 0 1.625rem 3.25rem;
+}
+
+.nd-flow > li::before {
+  content: '';
+  position: absolute;
+  top: 2.5rem;
+  bottom: 0.375rem;
+  left: 1.1875rem;
+  width: 1px;
+  background-color: var(--nd-rule);
+}
+
+.nd-flow > li:last-child {
+  padding-bottom: 1.75rem;
+}
+
+.nd-flow-mark {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: grid;
+  place-items: center;
+  width: 2.375rem;
+  height: 2.375rem;
+  border: 1px solid var(--nd-rule-strong);
+  border-radius: 50%;
+  background-color: var(--nd-recess-field);
+  color: var(--nd-on-surface);
+}
+
+.nd-flow > li > h3,
+.nd-flow-after > h3 {
+  padding-top: 0.4375rem;
+}
+
+.nd-flow > li > p,
+.nd-flow-after > p {
+  max-width: 52ch;
+  margin: 0.4375rem 0 0;
+  font-size: 0.9375rem;
+  line-height: 1.6;
+  color: var(--nd-on-surface-muted);
+}
+
+/**
+ * The fourth beat is not a step: nobody performs it. It sits after the rail
+ * ends, set apart by a rule and a quieter mark, which is a truer picture of the
+ * refund than a fourth identical row would be.
+ */
+.nd-flow-after {
+  margin-top: 0.25rem;
+  padding-top: 1.625rem;
+  padding-bottom: 0;
+  border-top: 1px solid var(--nd-rule);
+}
+
+.nd-flow-after > .nd-flow-mark {
+  top: 1.625rem;
+  border-style: dashed;
+  color: var(--nd-on-surface-muted);
+}
+
+@media (min-width: 60rem) {
+  .nd-land-how-in {
+    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+    align-items: start;
+  }
+  .nd-land-how-head {
+    position: sticky;
+    top: 2.5rem;
+  }
+}
+
+/* ---- the figures --------------------------------------------------------- */
+
+.nd-land-figures {
+  border-top: 1px solid var(--nd-rule);
+  background-color: rgb(12 7 6 / 0.4);
+}
+
+.nd-land-figures-in {
+  display: grid;
+  gap: 1.5rem;
+}
+
+.nd-land-figures-head > p {
+  max-width: 60ch;
+  margin: 0.875rem 0 0;
+  font-size: 0.9375rem;
+  line-height: 1.6;
+  color: var(--nd-on-surface-muted);
+}
+
+/**
+ * A ledger, not a metric wall.
+ *
+ * The pilot is capped and the honest figures are tiny. A row of enormous
+ * counters would make that look like a shortfall; a book entry with a timestamp
+ * on it makes the same number look like a record — which is what it is. The
+ * values are right-aligned tabular figures for the same reason a statement's
+ * are: so two of them can be compared down a column.
+ */
+.nd-ledger {
+  margin: 0;
+  border-top: 1px solid var(--nd-rule);
+}
+
+.nd-ledger-lead,
+.nd-ledger-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 0.25rem 1rem;
+  padding: 0.9375rem 0;
+  border-bottom: 1px solid var(--nd-rule);
+}
+
+.nd-ledger dt {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+  grid-column: 1;
+  font-size: 0.9375rem;
+  font-weight: 650;
+  color: var(--nd-on-surface);
+}
+
+.nd-ledger dt svg {
+  flex: 0 0 auto;
+  color: var(--nd-on-surface-muted);
+}
+
+.nd-ledger dd {
+  grid-column: 2;
+  margin: 0;
+  text-align: right;
+}
+
+.nd-ledger dd > b {
+  font-size: 1.375rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: var(--nd-on-surface);
+  overflow-wrap: anywhere;
+}
+
+/* Typed selector, because the note is itself a `dd` and the rule above it sets
+   both `grid-column` and `text-align` on every `dd` in the list. */
+.nd-ledger dd.nd-ledger-note {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--nd-on-surface-muted);
+  text-align: left;
+}
+
+/** The lead entry: the money, one step up, with the signet as its mark. */
+.nd-ledger-lead dt svg {
+  color: var(--nd-accent);
+}
+
+.nd-ledger-lead dd > b {
+  font-size: clamp(1.75rem, 5vw, 2.5rem);
+  line-height: 1.05;
+}
+
+.nd-ledger-unit {
+  margin-left: 0.1875em;
+  font-size: 0.4em;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+}
+
+/**
+ * "Not measured yet" — the rendering of a statistic named in the response's
+ * `unavailable` array, or simply absent from it.
+ *
+ * Deliberately not a number, not a dash and not a zero. A dash reads as nil and
+ * a zero is a claim nobody computed; the words are the only honest option, and
+ * they are set in the same muted ink as a caption so they cannot be mistaken for
+ * a value.
+ */
+.nd-ledger-none {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--nd-on-surface-muted);
+}
+
+/** A figure on its way. A bar rather than a placeholder digit or a dash. */
+.nd-ledger-wait {
+  display: inline-block;
+  width: 3.25rem;
+  height: 0.75rem;
+  border-radius: 999px;
+  background-color: rgb(245 240 238 / 0.14);
+  vertical-align: baseline;
+}
+
+.nd-land-stamp {
+  margin: 0;
+  font-size: 0.8125rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--nd-on-surface-muted);
+}
+
+/* A hairline, because `.nd-panel`'s recess is invisible against this section's
+   own recess band and an outage should still read as an object on the page. */
+.nd-land-figures-down {
+  display: grid;
+  justify-items: start;
+  gap: 0.25rem;
+  border: 1px solid var(--nd-rule);
+}
+
+@media (min-width: 60rem) {
+  .nd-land-figures-in {
+    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+    grid-template-rows: auto auto;
+    gap: 1.5rem clamp(2rem, 5vw, 3.5rem);
+    align-items: start;
+  }
+  .nd-land-figures-head {
+    grid-column: 1;
+    grid-row: 1 / span 2;
+  }
+  .nd-ledger,
+  .nd-land-figures-down {
+    grid-column: 2;
+  }
+  .nd-land-stamp {
+    grid-column: 2;
+  }
+  /* With room to spare the note moves onto the term's own line, which turns the
+     block into a proper two-column statement instead of a stack of pairs. */
+  .nd-ledger dd.nd-ledger-note {
+    grid-column: 1;
+    grid-row: 2;
+    max-width: 42ch;
+  }
+}
+
+/* ---- the uncomfortable part ---------------------------------------------- */
+
+.nd-land-plain {
+  border-top: 1px solid var(--nd-rule);
+}
+
+/**
+ * The disclosure is the one section that is an OBJECT rather than open page.
+ *
+ * Every other section here is copy on the field. Putting this one on a recess
+ * makes it a single thing a reader can point at — which is what a disclosure is
+ * — and it stops the page's last three folds sharing one rhythm. It is a recess
+ * and not a card: light subtracted, one hairline, nothing blurred.
+ */
+.nd-land-plain-in {
+  display: grid;
+  gap: clamp(1.25rem, 3vw, 3rem);
+  padding: clamp(1.25rem, 3vw, 2.25rem);
+  border: 1px solid var(--nd-rule);
+  border-radius: var(--nd-radius-sheet);
+  background-color: var(--nd-recess-field);
+}
+
+/* Mark above heading at every width. Beside it, a five-word heading wraps to
+   two lines against a circle and the indent reads like a mistake. */
+.nd-land-plain-head {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.875rem;
+}
+
+.nd-land-plain-mark {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 2.75rem;
+  height: 2.75rem;
+  border: 1px solid var(--nd-rule-strong);
+  border-radius: 50%;
+  background-color: var(--nd-recess-field);
+  color: var(--nd-accent);
+}
+
+.nd-land-plain-body > p {
+  max-width: 62ch;
+  margin: 0;
+  font-size: 0.9375rem;
+  line-height: 1.65;
+  color: var(--nd-on-surface-muted);
+}
+
+.nd-land-plain-body > p + p {
+  margin-top: 0.875rem;
+}
+
+@media (min-width: 60rem) {
+  .nd-land-plain-in {
+    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+    align-items: start;
+  }
+}
+
+/* ---- the foot ------------------------------------------------------------ */
+
+.nd-land-foot {
+  border-top: 1px solid var(--nd-rule);
+  padding-block: clamp(2.25rem, 5vw, 3.5rem) clamp(2.5rem, 6vw, 4rem);
+}
+
+.nd-land-foot-in {
+  display: grid;
+  gap: 1.75rem;
+  align-items: start;
+}
+
+.nd-land-foot-line {
+  max-width: 34ch;
+  margin: 0;
+  font-size: 0.9375rem;
+  line-height: 1.6;
+  color: var(--nd-on-surface-muted);
+}
+
+.nd-land-foot-cta {
+  max-width: 18rem;
+  margin-top: 1.125rem;
+  text-decoration: none;
+}
+
+.nd-land-foot .nd-getapp {
+  margin-top: 0;
+}
+
+@media (min-width: 60rem) {
+  .nd-land-foot-in {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 24rem);
+    gap: clamp(2rem, 5vw, 4rem);
+  }
+}

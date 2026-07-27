@@ -1,0 +1,98 @@
+.nd-photograph {
+  --nd-photo-radius: 30px;
+  display: inline-grid;
+  position: relative;
+  isolation: isolate;
+  max-width: 100%;
+  line-height: 0;
+}
+
+.nd-photograph picture,
+.nd-photograph img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.nd-photograph img {
+  position: relative;
+  z-index: 1;
+}
+
+.nd-photograph[data-variant='packet-cutout'] {
+  width: min(100%, 26.625rem);
+  aspect-ratio: 426 / 420;
+}
+
+.nd-photograph[data-variant='packet-cutout']::before {
+  content: '';
+  position: absolute;
+  z-index: 0;
+  inset: 12% 5% 6%;
+  border-radius: 50%;
+  background:
+    radial-gradient(
+      circle at 52% 48%,
+      rgb(255 77 20 / 88%) 0 12%,
+      rgb(168 43 13 / 70%) 34%,
+      rgb(122 29 8 / 28%) 58%,
+      transparent 74%
+    );
+  filter: blur(18px);
+  transform: scale(1.16);
+  pointer-events: none;
+}
+
+.nd-photograph[data-variant='packet-cutout'] img {
+  filter: drop-shadow(0 24px 30px rgb(8 3 2 / 48%));
+}
+
+.nd-photograph[data-variant='packet-photo'] {
+  width: min(100%, 26.625rem);
+  aspect-ratio: 426 / 640;
+  overflow: hidden;
+  border-radius: var(--nd-photo-radius);
+  background: #16100e;
+}
+
+.nd-photograph[data-variant='packet-photo'] img {
+  height: 100%;
+  object-fit: cover;
+}
+
+.nd-photograph[data-variant='foil-seal'] {
+  width: min(100%, 16rem);
+  aspect-ratio: 1;
+}
+
+.nd-photograph[data-variant='foil-seal'] img {
+  filter: drop-shadow(0 14px 22px rgb(8 3 2 / 44%));
+}
+
+.nd-photograph[data-variant='red-paper'],
+.nd-photograph[data-variant='gold-foil'] {
+  width: 100%;
+  overflow: hidden;
+  border-radius: var(--nd-photo-radius);
+}
+
+.nd-photograph[data-variant='red-paper'] {
+  aspect-ratio: 1;
+}
+
+.nd-photograph[data-variant='gold-foil'] {
+  aspect-ratio: 2;
+}
+
+.nd-photograph[data-variant='red-paper'] img,
+.nd-photograph[data-variant='gold-foil'] img {
+  height: 100%;
+  object-fit: cover;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .nd-photograph[data-variant='packet-cutout']::before {
+    opacity: 0.72;
+    filter: none;
+  }
+}

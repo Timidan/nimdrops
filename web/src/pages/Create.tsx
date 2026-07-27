@@ -18,6 +18,8 @@ import { nimiqPayDeeplink, resolveBridge, type BridgeResult } from '../sdk/adapt
 import { clearFunding, readFunding, writeFunding } from '../state/funding'
 import AmountInput from '../ui/AmountInput'
 import Envelope from '../ui/Envelope'
+import Field from '../ui/Field'
+import OpenInApp from '../ui/OpenInApp'
 import NdScreen from '../ui/Screen'
 import Sheet from '../ui/Sheet'
 
@@ -205,6 +207,45 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
   useEffect(() => {
     void loadCustody()
   }, [loadCustody])
+
+  /**
+   * Can this device fund a drop at all? Asked on arrival, not at the fund button.
+   *
+   * Funding is one transaction signed in Nimiq Pay, so a browser with no
+   * provider cannot complete this screen no matter what is typed into it.
+   * Discovering that only at the end meant a sponsor filled in an amount, a
+   * headcount, a name and a message, read the whole custody disclosure, pressed
+   * the one button that matters and was then told the screen never worked here.
+   *
+   * Two guards keep the early check from causing harm of its own:
+   *
+   *  - It only ever downgrades from `form`. A resumed draft, a funding
+   *    transaction in flight and a live drop all own the screen already, and a
+   *    late `unavailable` must not throw away a link the sponsor cannot get back.
+   *  - It never upgrades. Nothing here sets a phase on success, so the ordinary
+   *    in-wallet path is byte for byte what it was.
+   *
+   * The wait is the adapter's own 1.5s injection budget, which inside Nimiq Pay
+   * resolves immediately because the provider is seeded before the page script
+   * runs. A plain browser therefore reads the form for a moment before the gate
+   * replaces it — the honest trade against gating a wallet's own sponsor on a
+   * race it could lose.
+   */
+  useEffect(() => {
+    let alive = true
+    void discoverBridge()
+      .then((resolved) => {
+        if (!alive || resolved.kind !== 'unavailable') return
+        setPhase((previous) => (previous === 'form' ? 'no-wallet' : previous))
+      })
+      .catch(() => {
+        // The adapter answers rather than throwing; if it ever does throw, the
+        // form is the safer thing to leave on screen than a gate.
+      })
+    return () => {
+      alive = false
+    }
+  }, [discoverBridge])
 
   const paused = custody?.paused === true
 
@@ -1258,20 +1299,28 @@ function Recover({
   )
 }
 
+/**
+ * The sponsor is in an ordinary browser, so nothing on this screen can be
+ * funded: the funding transaction is signed in Nimiq Pay and nowhere else.
+ *
+ * It is a gate and not a narrower form. The whole surface is replaced, the deep
+ * link is offered first, the page URL second for a phone to type in, and the two
+ * app stores third — because until this screen existed, a visitor without the
+ * wallet installed pressed "Open in Nimiq Pay", watched a `nimiqpay://` link
+ * resolve to nothing, and had no way to learn what to install.
+ */
 function NoWallet() {
   const here = typeof window === 'undefined' ? '' : window.location.href
   return (
-    <Screen>
-      <div className="flex flex-1 flex-col justify-center py-16">
-        <h1 className="text-2xl font-semibold tracking-tight">Open this in Nimiq Pay</h1>
-        <p className="mt-3 text-sm leading-relaxed text-ink/60">
-          NimDrops signs with your own wallet, so the drop has to be funded from inside Nimiq Pay.
+    <Field brand>
+      <OpenInApp title="Fund your drop in Nimiq Pay" deepLink={nimiqPayDeeplink(here)} url={here}>
+        <p>
+          A NimDrop is funded by one transaction from your own wallet, so this step happens inside
+          Nimiq Pay rather than in a browser.
         </p>
-        <a href={nimiqPayDeeplink(here)} className="nd-primary mt-8 block w-full text-center">
-          Open in Nimiq Pay
-        </a>
-      </div>
-    </Screen>
+        <p>You pick the amount per person and the headcount there, and approve once.</p>
+      </OpenInApp>
+    </Field>
   )
 }
 

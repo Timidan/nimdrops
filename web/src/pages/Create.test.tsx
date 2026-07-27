@@ -1238,3 +1238,59 @@ describe('Create — coming back to a funded drop', () => {
     expect(sessionStorage.getItem('nimdrops.idem.create:["Team NimDrops","","2",5]')).toBeNull()
   })
 })
+
+/* -------------------------------------------------------------------------
+ * Opened in an ordinary browser
+ * ---------------------------------------------------------------------- */
+
+/**
+ * Funding is one transaction signed in Nimiq Pay, so a browser with no provider
+ * cannot finish this screen whatever is typed into it. It is told so on arrival
+ * rather than after the form is filled in, and it is given the three ways out —
+ * including the one the product never had: where to GET the wallet.
+ */
+describe('Create — no wallet on this device', () => {
+  const unavailable = async (): Promise<BridgeResult> => ({ kind: 'unavailable' })
+
+  it('replaces the form with the gate instead of letting it be filled in', async () => {
+    installFetch({})
+    renderCreate({ discoverBridge: unavailable })
+
+    await screen.findByTestId('open-in-app')
+    expect(screen.queryByLabelText(/NIM per person/i)).toBeNull()
+    expect(screen.queryByRole('button', { name: /review drop/i })).toBeNull()
+  })
+
+  it('offers the deep link, the link to type, and both app stores', async () => {
+    installFetch({})
+    renderCreate({ discoverBridge: unavailable })
+    await screen.findByTestId('open-in-app')
+
+    expect(
+      screen.getByRole('link', { name: /open in nimiq pay/i }).getAttribute('href'),
+    ).toMatch(/^nimiqpay:\/\/miniapp\?url=/)
+    expect(screen.getByTestId('open-in-app-url').textContent).toContain('http')
+    expect(screen.getByRole('link', { name: /app store/i })).toBeTruthy()
+    expect(screen.getByRole('link', { name: /google play/i })).toBeTruthy()
+    expect(document.querySelectorAll('[disabled], [aria-disabled="true"]')).toHaveLength(0)
+  })
+
+  /**
+   * The gate only ever downgrades a screen that is still a form. A sponsor whose
+   * drop is already funded holds the only copy of its link, and a late
+   * `unavailable` must never take that away from them.
+   */
+  it('never takes a funded drop off the screen', async () => {
+    storeFunded()
+    installFetch({ drops: [{ status: 200, body: dropBody('live') }] })
+    renderCreate({ discoverBridge: unavailable })
+
+    await waitFor(() => screen.getByRole('heading', { name: /your drop is live/i }))
+    // Let the boot-time bridge answer land after the resume already won.
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(screen.getByRole('heading', { name: /your drop is live/i })).toBeTruthy()
+    expect(screen.queryByTestId('open-in-app')).toBeNull()
+  })
+})

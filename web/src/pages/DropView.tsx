@@ -15,6 +15,7 @@ import {
   type IconComponent,
 } from '../ui/icons'
 import { Amount, Pips } from '../ui/Nim'
+import { GetNimiqPay } from '../ui/OpenInApp'
 import SealedEnvelope from '../ui/SealedEnvelope'
 import Sheet from '../ui/Sheet'
 import StatusPill from '../ui/StatusPill'
@@ -218,6 +219,23 @@ export default function DropView({
           {state === 'awaiting-funding' ? null : <CustodyDisclosure />}
         </GlassSheet>
       </SealedEnvelope>
+      {/*
+        The third way out, for the visitor who has neither the wallet open nor a
+        phone that has it. The sealed gate offers the deep link and the QR and
+        stops there; a `nimiqpay://` scheme with no handler does NOTHING — no
+        error, no navigation, nothing to catch — so without this block the
+        stranger who has never installed Nimiq Pay presses a button, sees the
+        page not move, and is finished with the product.
+
+        A sibling rather than a slot: `SealedEnvelope` takes no children on this
+        path and is owned elsewhere. It is rendered on exactly the state that
+        needs it, and `ability` is the adapter's answer, never a viewport width.
+      */}
+      {ability === 'sealed-only' ? (
+        <div className="nd-gate-getapp">
+          <GetNimiqPay />
+        </div>
+      ) : null}
     </Field>
   )
 }
@@ -784,6 +802,9 @@ function NoWallet() {
         Open in Nimiq Pay
       </a>
       <p className="nd-note mt-2.5 text-center">Claiming needs your own wallet to sign.</p>
+      {/* And if there is no wallet to open, the deep link above does nothing at
+          all — silently. This is the same block the sealed gate carries. */}
+      <GetNimiqPay />
     </div>
   )
 }

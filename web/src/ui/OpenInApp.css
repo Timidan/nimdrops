@@ -1,0 +1,290 @@
+/* ===========================================================================
+ * The open-in-app gate
+ * ===========================================================================
+ *
+ * Lives beside its component rather than in `index.css`, for two reasons. The
+ * sealed gate's block in `index.css` is being rewritten by another process and
+ * this must not collide with it; and nothing here is a shared primitive — every
+ * rule below belongs to one component, whereas `index.css` is the design
+ * system's own file.
+ *
+ * Two constraints it inherits from that system and keeps:
+ *
+ *  - **Nothing is blurred.** Exactly one element in the tree is ever a
+ *    `backdrop-filter` surface and it is `GlassSheet`. Every plate here is a
+ *    RECESS: light subtracted from the field, not another pane of glass.
+ *  - **Secondary text never sits unprotected on the field.** A vermilion bloom
+ *    bright enough to read as a light source cannot carry 64%-alpha ink. Copy
+ *    that sits on the bare field here is full-strength near-white and does its
+ *    de-emphasis with weight; muted ink appears only inside a recess.
+ *
+ * Nothing on this screen starts hidden and nothing waits for a transition. With
+ * animation switched off entirely the gate renders complete, which is the same
+ * rule the claim surface is held to and matters for the same reason: this is the
+ * only screen a stranded visitor gets.
+ */
+
+.nd-openin {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  min-height: 0;
+  padding: 1.5rem var(--nd-gutter) 2rem;
+}
+
+/**
+ * One column, and it stays a column at every width.
+ *
+ * A desktop is not given a two-up composition here on purpose. This screen
+ * exists because the device cannot complete the transaction; spreading it into
+ * a poster would dress up a dead end as a destination. It centres, it keeps its
+ * measure, and it points at the phone.
+ */
+.nd-openin-col {
+  width: 100%;
+  max-width: 24rem;
+}
+
+.nd-openin-title {
+  margin: 0;
+  font-size: clamp(1.5rem, 6cqw, 1.875rem);
+  font-weight: 800;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  color: var(--nd-on-surface);
+  text-wrap: balance;
+}
+
+/* Full strength, weight-de-emphasised: see the header note. */
+.nd-openin-lede {
+  margin: 0.625rem 0 0;
+  font-size: 0.9375rem;
+  font-weight: 500;
+  line-height: 1.5;
+  color: var(--nd-on-surface);
+  text-wrap: pretty;
+}
+
+.nd-openin-lede p {
+  margin: 0;
+}
+
+.nd-openin-lede p + p {
+  margin-top: 0.625rem;
+}
+
+.nd-openin-go {
+  margin-top: 1.375rem;
+}
+
+.nd-openin-hint {
+  margin-top: 0.625rem;
+  font-weight: 500;
+  color: var(--nd-on-surface);
+  text-align: center;
+}
+
+/* ---- the QR, and the link that replaces it ------------------------------- */
+
+.nd-openin-qr {
+  margin-top: 1rem;
+  padding: 0.875rem;
+  border-radius: var(--nd-radius-plate);
+  background-color: var(--color-sheet);
+  text-align: center;
+}
+
+.nd-openin-qr img {
+  display: block;
+  width: 100%;
+  max-width: 10.5rem;
+  height: auto;
+  margin: 0 auto;
+}
+
+.nd-openin-qr > p {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  margin: 0.5rem 0 0;
+  font-size: 0.75rem;
+  color: var(--nd-on-surface-muted);
+}
+
+.nd-openin-copy {
+  margin: 1rem 0 0;
+  padding: 0.875rem;
+  border: 1px solid var(--nd-rule);
+  border-radius: var(--nd-radius-plate);
+  background-color: var(--nd-recess-field);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--nd-on-surface-muted);
+}
+
+.nd-openin-copy code {
+  display: block;
+  margin-top: 0.375rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.8125rem;
+  color: var(--nd-on-surface);
+  /* Read one character at a time, so it breaks anywhere rather than pushing the
+     page sideways, and it stays selectable. */
+  overflow-wrap: anywhere;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* ---- get the app --------------------------------------------------------- */
+
+.nd-getapp {
+  margin-top: 1rem;
+  padding: 0.875rem;
+  border: 1px solid var(--nd-rule);
+  border-radius: var(--nd-radius-plate);
+  background-color: var(--nd-recess-field);
+}
+
+.nd-getapp-head {
+  margin: 0 0 0.625rem;
+  font-size: 0.875rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--nd-on-surface);
+}
+
+.nd-getapp-list {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/**
+ * One store, as a row.
+ *
+ * A row and not a button, because there are two of them and neither is the
+ * primary action on this screen — the deep link above is. The likely store is
+ * marked with a brighter edge and comes first; the other is identical in size,
+ * reach and reading order weight, because the guess behind that mark is a user
+ * agent string and it is routinely wrong.
+ */
+.nd-store {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0 0.75rem;
+  min-height: 3.25rem;
+  padding: 0.625rem 0.75rem 0.625rem 0.875rem;
+  border: 1px solid var(--nd-rule-strong);
+  border-radius: 0.875rem;
+  color: var(--nd-on-surface);
+  text-decoration: none;
+  transition:
+    border-color var(--nd-t-state) var(--nd-ease),
+    background-color var(--nd-t-state) var(--nd-ease);
+}
+
+.nd-store[data-likely='true'] {
+  border-color: rgb(245 240 238 / 0.46);
+  background-color: rgb(245 240 238 / 0.07);
+}
+
+.nd-store:hover {
+  border-color: rgb(245 240 238 / 0.52);
+  background-color: rgb(245 240 238 / 0.1);
+}
+
+.nd-store:active {
+  background-color: rgb(245 240 238 / 0.14);
+}
+
+.nd-store-name {
+  grid-column: 1;
+  font-size: 1rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  overflow-wrap: anywhere;
+}
+
+.nd-store-devices {
+  grid-column: 1;
+  font-size: 0.75rem;
+  color: var(--nd-on-surface-muted);
+}
+
+.nd-store svg {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  flex: 0 0 auto;
+  color: var(--nd-on-surface-muted);
+}
+
+.nd-getapp-note {
+  margin-top: 0.75rem;
+}
+
+/* ---- hung under the claim screen's sealed gate --------------------------- */
+
+/**
+ * The sealed gate (`ui/SealedEnvelope.tsx`) already offers the deep link and the
+ * QR. It never offered a way to GET the wallet, and that block is added here as
+ * a sibling rather than by editing the gate, which is owned elsewhere.
+ *
+ * Appending to a bottom-weighted, `flex: 1` column would push this whole block
+ * past the fold on a phone — the exact "visible immediately" property it exists
+ * to have. So the gate is asked to centre its content in whatever space is left
+ * over instead of hugging the bottom edge, and to grow but never SHRINK: on a
+ * short viewport the pair scrolls rather than being clipped by the field's
+ * `overflow: clip`. The rule is scoped by `:has()`, so it applies on exactly the
+ * one screen this block appears on and nowhere else; a renderer without `:has()`
+ * support simply gets the taller, scrolling version.
+ */
+.nd-field-inner:has(> .nd-gate-getapp) > .nd-gate {
+  flex: 1 0 auto;
+  justify-content: center;
+  min-height: auto;
+}
+
+.nd-gate-getapp {
+  display: flex;
+  justify-content: center;
+  padding: 0 var(--nd-gutter) 1.5rem;
+}
+
+.nd-gate-getapp > .nd-getapp {
+  width: 100%;
+  max-width: 25.5rem;
+  margin-top: 0;
+}
+
+/**
+ * Side by side here, stacked everywhere else.
+ *
+ * The sealed gate is already a full screen on a phone before this block is
+ * added, so every row of it is a row further down. Two columns halve the height
+ * and both targets stay well past 44px; the device sub-label is what goes,
+ * because "App Store" and "Google Play" already name their platforms to anyone
+ * who owns one.
+ */
+.nd-gate-getapp .nd-getapp-list {
+  grid-template-columns: 1fr 1fr;
+}
+
+.nd-gate-getapp .nd-store {
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-height: 3rem;
+  padding-inline: 0.75rem 0.5rem;
+}
+
+.nd-gate-getapp .nd-store-devices {
+  display: none;
+}
+
+.nd-gate-getapp .nd-store svg {
+  grid-row: 1;
+}

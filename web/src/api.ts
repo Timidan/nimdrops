@@ -145,6 +145,39 @@ export interface SignedClaim {
   signature: string
 }
 
+/**
+ * `GET /api/stats` — the public aggregates the landing page reads.
+ *
+ * `server/src/services/stats.ts` owns which figures may appear and why. The one
+ * rule that reaches this far: **an absent figure is not a zero.** A statistic
+ * this deployment cannot measure is named in `unavailable` and carries no value,
+ * so a client that substituted `0` would be publishing a number nobody computed.
+ * Every field is therefore optional on this side too, and {@link asStats} drops
+ * anything whose type is wrong rather than coercing it.
+ */
+export interface StatsFigures {
+  /** Settled payouts, exact decimal NIM. Display only; never parsed as a float. */
+  totalPaidOut?: string
+  /** The same amount in luna. `BigInt()` this one for arithmetic. */
+  totalPaidOutLuna?: string
+  uniqueWalletsPaid?: number
+  dropsFunded?: number
+  sharesClaimed?: number
+  /** Absent until the trivia migration lands `trivia_answers`. */
+  questionsAnswered?: number
+}
+
+export interface PublicStats {
+  /** When the figures were computed, ISO 8601. Not the time of the request. */
+  generatedAt: string
+  stats: StatsFigures
+  /** Keys this deployment knows about and cannot currently measure. */
+  unavailable: string[]
+}
+
+/** Every figure the landing page knows how to render, in the order it renders them. */
+export type StatKey = keyof StatsFigures
+
 export interface CreateDropInput {
   sponsorLabel: string
   message?: string
@@ -269,6 +302,68 @@ export function asDisclosure(value: unknown): CustodyDisclosure | null {
 export async function getCustody(): Promise<CustodyDisclosure> {
   const parsed = asDisclosure(await request<unknown>('/custody'))
   if (!parsed) throw new ApiError(200, 'unreadable_disclosure', 'the custody disclosure could not be read')
+  return parsed
+}
+
+// ---- the public statistics -------------------------------------------------------
+
+function asCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
+}
+
+function asMoney(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+/**
+ * Normalise a `/api/stats` body, or return `null` if it is not one.
+ *
+ * Field by field rather than all-or-nothing, which is the opposite of
+ * {@link asDisclosure} and deliberately so. A half-read disclosure would mean a
+ * sponsor was never told something; a figure this build does not recognise is
+ * just a figure it does not draw, and the endpoint is explicitly forward
+ * compatible about that. So a malformed `sharesClaimed` costs its own row and
+ * nothing else — and costs it by becoming ABSENT, which the page renders as
+ * "not measured yet" rather than as zero.
+ */
+export function asStats(value: unknown): PublicStats | null {
+  const body = value as Partial<PublicStats> | null
+  if (!body || typeof body !== 'object') return null
+  if (typeof body.generatedAt !== 'string' || Number.isNaN(Date.parse(body.generatedAt))) return null
+
+  const raw = (body.stats ?? {}) as Record<string, unknown>
+  if (typeof raw !== 'object' || raw === null) return null
+
+  const stats: StatsFigures = {}
+  const paidOut = asMoney(raw.totalPaidOut)
+  if (paidOut !== undefined) stats.totalPaidOut = paidOut
+  const paidOutLuna = asMoney(raw.totalPaidOutLuna)
+  if (paidOutLuna !== undefined) stats.totalPaidOutLuna = paidOutLuna
+  const wallets = asCount(raw.uniqueWalletsPaid)
+  if (wallets !== undefined) stats.uniqueWalletsPaid = wallets
+  const drops = asCount(raw.dropsFunded)
+  if (drops !== undefined) stats.dropsFunded = drops
+  const shares = asCount(raw.sharesClaimed)
+  if (shares !== undefined) stats.sharesClaimed = shares
+  const answered = asCount(raw.questionsAnswered)
+  if (answered !== undefined) stats.questionsAnswered = answered
+
+  return {
+    generatedAt: body.generatedAt,
+    stats,
+    unavailable: Array.isArray(body.unavailable)
+      ? body.unavailable.filter((key): key is string => typeof key === 'string')
+      : [],
+  }
+}
+
+/**
+ * The aggregates, or a throw. Unauthenticated, cached hard on the server, and
+ * the only endpoint on this client that a page is allowed to render nothing for.
+ */
+export async function getStats(): Promise<PublicStats> {
+  const parsed = asStats(await request<unknown>('/stats'))
+  if (!parsed) throw new ApiError(200, 'unreadable_stats', 'the statistics could not be read')
   return parsed
 }
 
