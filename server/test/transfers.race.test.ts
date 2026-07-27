@@ -22,6 +22,7 @@ import {
   CLAIM_MEMO,
   WORKER_LOCK_ID,
   acquireWorkerLock,
+  claimMemo,
   PROVEN_DEAD_RESCAN_GRACE_BLOCKS,
   evaluateProvenDead,
   loadOpenAttempts,
@@ -450,16 +451,23 @@ describe.skipIf(!hasDb)('transfer worker crash windows (real Postgres)', () => {
     expect(await readClaimState(payout.claimId)).toBe('confirming')
   })
 
-  it('signs the payout with the NimDrop memo, inside the 64-byte limit', async () => {
-    expect(Buffer.byteLength(CLAIM_MEMO, 'utf8')).toBeLessThanOrEqual(MEMO_MAX_BYTES)
-
+  it('signs the payout with a per-claim NimDrop memo, inside the 64-byte limit', async () => {
     const payout = await queuedPayout()
     await runWorkerTick(pool, chain, alerts)
 
     const [tx] = custodyPayments()
-    expect(tx.dataUtf8).toBe(CLAIM_MEMO)
+    expect(tx.dataUtf8).toBe(claimMemo(payout.claimId))
     expect(tx.recipient).toBe(payout.recipient)
     expect(tx.valueLuna).toBe(AMOUNT_EACH)
+
+    // It still reads as a NimDrop in the recipient's wallet, and it still fits.
+    expect(tx.dataUtf8).toContain(CLAIM_MEMO)
+    expect(Buffer.byteLength(tx.dataUtf8 ?? '', 'utf8')).toBeLessThanOrEqual(MEMO_MAX_BYTES)
+
+    // The point of carrying the claim: the data field is what stops two equal
+    // payments to one address at one head height from being the same bytes, and
+    // therefore the same hash, which `tx_hash` UNIQUE would reject.
+    expect(tx.dataUtf8).not.toBe(CLAIM_MEMO)
   })
 
   // ---- crash windows ----------------------------------------------------------

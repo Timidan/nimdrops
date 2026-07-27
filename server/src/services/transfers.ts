@@ -57,11 +57,60 @@ import {
  */
 export const WORKER_LOCK_ID = 42
 
-/** Claim payout memo, per Global Constraints. 12 UTF-8 bytes (measured G0). */
+/** Human-readable stem of every outgoing memo. 12 UTF-8 bytes (measured G0). */
 export const CLAIM_MEMO = '🧧 NimDrop'
 
-if (Buffer.byteLength(CLAIM_MEMO, 'utf8') > MEMO_MAX_BYTES) {
-  throw new Error(`claim memo exceeds ${MEMO_MAX_BYTES} UTF-8 bytes`)
+/**
+ * How much of an id goes in the memo. 8 hex characters of a v4 UUID is 32 bits
+ * of the random field — plenty to tell two of our own transactions apart, and
+ * short enough that the whole memo stays well inside the 64-byte limit.
+ */
+const MEMO_ID_CHARS = 8
+
+/**
+ * The data field of a PAYOUT transaction.
+ *
+ * Per-claim, not constant, and that is the whole point. Nimiq basic transactions
+ * carry no account nonce — replay protection is the validity window — so a
+ * payout's bytes are exactly sender, recipient, value, fee, this data field,
+ * validity-start-height and network id.
+ *
+ * With a CONSTANT memo, two payouts of equal value to the same address signed at
+ * the same head height produce identical bytes and therefore an identical hash.
+ * `tx_hash` is UNIQUE on `transaction_attempts`, so the second insert fails, the
+ * signing transaction rolls back, and the next tick re-signs at a new height: no
+ * money can double. What it costs is the whole tick, reconciliation pass
+ * included, plus a Postgres unique violation in the log.
+ *
+ * That was unreachable while amounts varied and one drop was live at a time.
+ * A campaign with a fixed amount per winner, where one address can win twice,
+ * makes it ordinary — so the memo carries the claim.
+ */
+export function claimMemo(claimId: string): string {
+  return `${CLAIM_MEMO} ${claimId.slice(0, MEMO_ID_CHARS)}`
+}
+
+/**
+ * The data field of a REFUND transaction.
+ *
+ * Same collision argument as {@link claimMemo}, keyed on the drop because a
+ * refund has `claim_id IS NULL` (`outgoing_transfers_purpose_claim_shape`) and
+ * there is exactly one per drop (`one_refund_per_drop`). It also says "refund"
+ * so a sponsor reading their own wallet history can tell money coming back from
+ * money going out without opening the app.
+ */
+export function refundMemo(dropId: string): string {
+  return `${CLAIM_MEMO} refund ${dropId.slice(0, MEMO_ID_CHARS)}`
+}
+
+// Boot-time, not per-call: the memo length is a property of this code, so a
+// violation is a programming error to be caught at import rather than a
+// condition to re-test on every signature. Both worst cases are checked, since
+// `refundMemo` is the longer of the two.
+for (const memo of [claimMemo('0'.repeat(MEMO_ID_CHARS)), refundMemo('0'.repeat(MEMO_ID_CHARS))]) {
+  if (Buffer.byteLength(memo, 'utf8') > MEMO_MAX_BYTES) {
+    throw new Error(`outgoing memo "${memo}" exceeds ${MEMO_MAX_BYTES} UTF-8 bytes`)
+  }
 }
 
 /**
@@ -440,7 +489,10 @@ export async function signAndPersistAttempt(
   const built = await chain.buildSignedBasic({
     to: intent.recipientAddress,
     valueLuna: intent.amountLuna,
-    dataUtf8: CLAIM_MEMO,
+    // Per-intent, so two equal payments to one address at one height can never
+    // build identical bytes. A refund is keyed on the drop because its claim_id
+    // is NULL by constraint; a payout on the claim.
+    dataUtf8: intent.claimId === null ? refundMemo(intent.dropId) : claimMemo(intent.claimId),
     validityStartHeight,
   })
 
