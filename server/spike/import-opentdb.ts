@@ -56,6 +56,24 @@
  * `incorrect_answers` — permuting the order they happened to arrive in would
  * make the output depend on their response rather than on the id.
  *
+ * ── breadth is a functional property, not an editorial one ──────────────────
+ * The brief for this feature says "questions from all walks of life", and Open
+ * Trivia DB un-capped does not deliver it: a 60-question sample came back with
+ * `entertainment-video-games` at 22% and the top four categories holding 34 of
+ * 60. But the reason this script CAPS a category rather than merely reporting it
+ * is mechanical. `selectQuestionIds` draws one question from each of five
+ * DISTINCT categories, and `trivia_seen` means a wallet never meets the same
+ * question twice, so what limits how many sessions a wallet can play is HOW MANY
+ * CATEGORIES STILL HOLD AN UNSEEN QUESTION — not the tier's question count. A
+ * tier that is deep in three categories and shallow in twelve stops dealing
+ * while most of its questions are still unseen.
+ *
+ * So `--max-per-category` (default: 15% of a tier) holds each category down, and
+ * the summary prints the distinct-category count per tier plus the session
+ * ceiling that follows from it. Questions past the cap are still FETCHED — the
+ * API cannot be asked to skip a category — and then dropped as `category-full`,
+ * counted like any other drop so the tally stays honest.
+ *
  * ── licence ─────────────────────────────────────────────────────────────────
  * Open Trivia DB is CC BY-SA 4.0. Attribution is a licence condition, so every
  * question carries `source: https://opentdb.com/`. Do not strip it.
@@ -90,6 +108,13 @@ const BATCH = 50
 /** How many times one request may be re-sent after a rate-limit answer. */
 const RATE_LIMIT_RETRIES = 4
 
+/**
+ * Consecutive questions a tier may contribute nothing from before it is treated
+ * as saturated. Two full batches: at a ~15% drop rate from the content filters
+ * alone, a run of this length means the category cap is what is refusing them.
+ */
+const FRUITLESS_LIMIT = 100
+
 /** Transport errors only — an HTTP status is an answer and is never retried. */
 const TRANSPORT_RETRIES = 3
 
@@ -109,6 +134,46 @@ const TIER_NOTE =
 
 /** The longest a prompt or an option may be, in characters. */
 const MAX_TEXT_CHARS = 200
+
+/**
+ * How much of ONE TIER a single category may occupy, before `--max-per-category`
+ * overrides it.
+ *
+ * A share rather than a count, because the right cap depends on how big the bank
+ * is: 15 questions of video games is a fifth of a 75-question tier and a
+ * rounding error in a 600-question one.
+ *
+ * Why cap at all — this is not editorial tidiness. `selectQuestionIds` draws one
+ * question from each of five DISTINCT categories, and `trivia_seen` means a
+ * wallet never meets the same question twice. So the
+ * number of sessions a wallet can play is governed by how many categories still
+ * hold an unseen question, NOT by the tier's question count. A tier that is deep
+ * in three categories and shallow in twelve runs out while most of its questions
+ * are still unseen — the deep categories cannot be drawn from twice in one
+ * session, and there is nothing else to pair them with.
+ *
+ * Un-capped, Open Trivia DB skews hard: an early 60-question sample came back
+ * with `entertainment-video-games` at 13 (22%) and the top four categories
+ * holding 34 of 60.
+ */
+const CATEGORY_SHARE = 0.15
+
+/**
+ * Above this many categories-per-tier, the cap is asking for more breadth than
+ * the source has. Their 24 category names collapse to roughly 19 slugs once
+ * `CATEGORY_SLUGS` merges the ones that merge, and the content filters thin the
+ * small ones further, so a cap that needs much more than half of them will
+ * simply leave the tier short.
+ */
+const CATEGORY_HEADROOM_WARN = 12
+
+/**
+ * Questions in one session, and therefore distinct categories in one session.
+ * `create-gated-drop.ts` refuses any other value and `selectQuestionIds` raises
+ * `SelectionError` below it; restated here because the session arithmetic below
+ * is meaningless without it.
+ */
+const QUESTIONS_PER_SESSION = 5
 
 /**
  * Their long category names, mapped onto the short slugs the example bank uses,
@@ -146,6 +211,7 @@ const DROP_REASONS = [
   'negation',
   'time-sensitive',
   'duplicate-id',
+  'category-full',
 ] as const
 type DropReason = (typeof DROP_REASONS)[number]
 
@@ -193,6 +259,11 @@ import the Open Trivia Database into a local trivia bank file.
   --max <n>          stop after this many kept questions (default ${DEFAULT_MAX})
   --tiers <list>     comma-separated, from ${SOURCE_DIFFICULTIES.join(',')}
                      (default ${SOURCE_DIFFICULTIES.join(',')})
+  --max-per-category <n>
+                     most questions ONE category may hold in ONE tier. Default is
+                     a share, not a count: ${(CATEGORY_SHARE * 100).toFixed(0)}% of the tier's target, i.e.
+                     ceil(${CATEGORY_SHARE} × --max ÷ tiers). Questions past the cap are
+                     fetched and then dropped as \`category-full\`.
   --dry-run          fetch, filter and validate, but write nothing
   --help             print this and exit 0
 
@@ -200,7 +271,7 @@ Their API allows ONE request every 5 seconds, so a full --max ${DEFAULT_MAX} run
 takes roughly ${Math.ceil((DEFAULT_MAX / BATCH) * (MIN_REQUEST_GAP_MS / 1000) / 60)} minutes at best. Leave it running.
 `.trimStart()
 
-const VALUE_FLAGS = new Set(['--out', '--max', '--tiers'])
+const VALUE_FLAGS = new Set(['--out', '--max', '--tiers', '--max-per-category'])
 const SWITCH_FLAGS = new Set(['--dry-run', '--help'])
 
 // ---------------------------------------------------------------------------
@@ -552,13 +623,28 @@ function matches(patterns: readonly RegExp[], texts: readonly string[]): boolean
   return texts.some((t) => patterns.some((p) => p.test(t)))
 }
 
+/** Read-only view of what has been kept so far, for the two "already have it" filters. */
+interface ConvertContext {
+  seen: Set<string>
+  /** tier -> category -> kept so far. Mutated by the CALLER, on success only. */
+  byTierCategory: Map<Difficulty, Map<string, number>>
+  /** Most one category may hold in one tier. */
+  capPerCategory: number
+}
+
 /**
  * Turn one decoded item into a `Question`, or into the reason it was dropped.
  *
- * `seen` is mutated on success only, so a question dropped for length does not
- * also reserve its id against a later, better copy of itself.
+ * Nothing here mutates `ctx`, so a question dropped for length does not reserve
+ * its id — or a slot in its category — against a later, better copy of itself.
+ * The caller records a kept question.
+ *
+ * `category-full` is checked LAST, after every content filter, because the tally
+ * is read as "which filter should I loosen": a question that is both a negation
+ * and in a full category is a bad question first and a surplus one second, and
+ * counting it as surplus would suggest raising the cap would recover it.
  */
-function convert(item: RawItem, seen: Set<string>): { question: Question } | { drop: DropReason } {
+function convert(item: RawItem, ctx: ConvertContext): { question: Question } | { drop: DropReason } {
   const prompt = item.question
   const options = [item.correct_answer, ...item.incorrect_answers]
 
@@ -576,7 +662,11 @@ function convert(item: RawItem, seen: Set<string>): { question: Question } | { d
   if (matches(TIME_SENSITIVE_PATTERNS, texts)) return { drop: 'time-sensitive' }
 
   const id = questionId(prompt)
-  if (seen.has(id)) return { drop: 'duplicate-id' }
+  if (ctx.seen.has(id)) return { drop: 'duplicate-id' }
+
+  const category = categoryFor(item.category)
+  const held = ctx.byTierCategory.get(item.difficulty as Difficulty)?.get(category) ?? 0
+  if (held >= ctx.capPerCategory) return { drop: 'category-full' }
 
   // Sorted, THEN permuted: byte-identical output for the same question, whatever
   // order their API returned the wrong answers in.
@@ -592,12 +682,46 @@ function convert(item: RawItem, seen: Set<string>): { question: Question } | { d
     question: {
       id,
       tier: item.difficulty as Tier,
-      category: categoryFor(item.category),
+      category,
       prompt,
       options: shuffled as [string, string, string, string],
       answerIndex: answerIndex as 0 | 1 | 2 | 3,
       source: SOURCE,
     },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// how long a tier lasts one wallet
+// ---------------------------------------------------------------------------
+
+/**
+ * The most sessions ONE wallet could play in a tier before it cannot be dealt a
+ * set — an UPPER BOUND, not a forecast.
+ *
+ * The rule that makes this non-obvious: a session needs five DISTINCT
+ * categories, so a single category contributes at most one question per session,
+ * and `trivia_seen` means never the same question twice. Across `S` sessions a
+ * category of size `c` can therefore supply at most `min(c, S)` questions, and
+ * `S` sessions are dealable only while
+ *
+ *     Σ min(cᵢ, S)  ≥  5·S
+ *
+ * Each step of `S` adds one to that sum for every category with more than `S`
+ * questions and five to the requirement, so once fewer than five categories are
+ * still deep enough the margin only shrinks — the feasible values of `S` are a
+ * prefix, and counting up from zero finds the largest.
+ *
+ * It is a ceiling because it assumes a perfectly spread deal. Real selection is
+ * an HMAC over the wallet and the drop, which does not optimise anything, so
+ * expect fewer. An operator sizing a bank wants the ceiling: if the ceiling is
+ * three sessions, no amount of luck makes it ten.
+ */
+function sessionCeiling(counts: readonly number[]): number {
+  if (counts.length < QUESTIONS_PER_SESSION) return 0
+  for (let sessions = 1; ; sessions += 1) {
+    const supply = counts.reduce((sum, c) => sum + Math.min(c, sessions), 0)
+    if (supply < QUESTIONS_PER_SESSION * sessions) return sessions - 1
   }
 }
 
@@ -647,12 +771,42 @@ async function run(): Promise<void> {
   assert(new Set(tiers).size === tiers.length, `--tiers ${tiersRaw} repeats a tier`)
   const wanted = tiers as Difficulty[]
 
+  // The cap is per TIER per CATEGORY, so it is derived from the tier's target —
+  // `--max` split across the tiers — not from `--max` itself.
+  const tierTarget = Math.ceil(max / wanted.length)
+  const capRaw = flags.get('--max-per-category')
+  const capPerCategory =
+    capRaw === undefined ? Math.max(1, Math.ceil(CATEGORY_SHARE * tierTarget)) : Number(capRaw)
+  assert(
+    Number.isInteger(capPerCategory) && capPerCategory > 0,
+    `--max-per-category must be a positive whole number, got ${JSON.stringify(capRaw)}`,
+  )
+  // How many categories a tier now NEEDS to reach its target. Reported as part
+  // of the cap field rather than as a warning, because with the default share it
+  // is true on every run: 15% of a tier always needs seven categories to fill it.
+  const categoriesNeeded = Math.ceil(tierTarget / capPerCategory)
+
   const dryRun = flags.get('--dry-run') === 'true'
   const version = `otdb-${new Date().toISOString().slice(0, 10)}`
 
   field('out', outPath + (dryRun ? '  (DRY RUN — nothing will be written)' : ''))
-  field('max kept', max)
+  field('max kept', `${max} (about ${tierTarget} per tier)`)
   field('tiers', wanted.join(', '))
+  field(
+    'category cap',
+    `${capPerCategory} per tier ` +
+      (capRaw === undefined ? `(${(CATEGORY_SHARE * 100).toFixed(0)}% of ${tierTarget})` : '(--max-per-category)') +
+      ` — needs ${categoriesNeeded} categories to fill a tier`,
+  )
+  // Only when the cap asks for more of the source than it reliably has. Their 24
+  // category names collapse to roughly 19 slugs after mapping, and the content
+  // filters thin the small ones, so needing much past half of them is fragile.
+  if (categoriesNeeded > CATEGORY_HEADROOM_WARN) {
+    console.log(
+      `!! a cap of ${capPerCategory} needs ${categoriesNeeded} categories per tier, and Open Trivia DB\n` +
+        '!! has about 19 after mapping. Expect the tiers to fall short of their target.',
+    )
+  }
   field('version', version)
   field('pacing', `1 request / ${(MIN_REQUEST_GAP_MS / 1000).toFixed(1)}s (their limit is 5s/IP)`)
   console.log('')
@@ -670,11 +824,23 @@ async function run(): Promise<void> {
   // roughly twenty of each, which is what passing three tiers asked for.
   const kept: Question[] = []
   const keptByTier = new Map<Difficulty, number>(wanted.map((t) => [t, 0]))
+  const byTierCategory = new Map<Difficulty, Map<string, number>>(
+    wanted.map((t) => [t, new Map<string, number>()]),
+  )
   const seen = new Set<string>()
   const drops = new Map<DropReason, number>(DROP_REASONS.map((r) => [r, 0]))
   const drained = new Set<Difficulty>()
+  /**
+   * Tiers whose categories are all at cap. A tier that keeps nothing from a
+   * hundred consecutive questions is not going to keep anything from the next
+   * hundred either, and the emptiest-tier rule below would otherwise pick it
+   * every single pass — spinning at 5.4s a request until its token drained.
+   */
+  const saturated = new Set<Difficulty>()
+  const fruitless = new Map<Difficulty, number>(wanted.map((t) => [t, 0]))
   let fetched = 0
   let exhaustedEarly = false
+  let saturatedEarly = false
   /**
    * Per-tier ceiling on `amount`, lowered when their code 1 says "there are not
    * that many left". Strictly decreasing, which is what makes the tail drain
@@ -683,7 +849,7 @@ async function run(): Promise<void> {
   const ceilings = new Map<Difficulty, number>(wanted.map((t) => [t, BATCH]))
 
   while (kept.length < max) {
-    const active = wanted.filter((t) => !drained.has(t))
+    const active = wanted.filter((t) => !drained.has(t) && !saturated.has(t))
     if (active.length === 0) break
 
     const tier = active.reduce((a, b) =>
@@ -725,7 +891,7 @@ async function run(): Promise<void> {
         item.difficulty === tier,
         `asked opentdb for difficulty=${tier} and got ${item.difficulty}`,
       )
-      const result = convert(item, seen)
+      const result = convert(item, { seen, byTierCategory, capPerCategory })
       if ('drop' in result) {
         drops.set(result.drop, (drops.get(result.drop) as number) + 1)
         continue
@@ -733,8 +899,30 @@ async function run(): Promise<void> {
       seen.add(result.question.id)
       kept.push(result.question)
       keptHere += 1
+      // Recorded HERE, not in `convert`, so a question rejected by a later filter
+      // never consumes a slot in its category.
+      const counts = byTierCategory.get(tier) as Map<string, number>
+      const held = (counts.get(result.question.category) ?? 0) + 1
+      counts.set(result.question.category, held)
+      if (held === capPerCategory) {
+        log(`${tier}/${result.question.category}: at its cap of ${capPerCategory}`)
+      }
     }
     keptByTier.set(tier, (keptByTier.get(tier) as number) + keptHere)
+
+    // Saturation, tracked in ITEMS rather than batches because `amount` shrinks
+    // to 1 or 2 in the tail and "kept nothing from one question" is no evidence.
+    if (keptHere > 0) fruitless.set(tier, 0)
+    else fruitless.set(tier, (fruitless.get(tier) as number) + batch.items.length)
+    if ((fruitless.get(tier) as number) >= FRUITLESS_LIMIT) {
+      saturated.add(tier)
+      saturatedEarly = true
+      log(
+        `${tier}: saturated — ${fruitless.get(tier)} consecutive questions kept nothing, so its ` +
+          `categories are at the cap of ${capPerCategory}. Not asking for more of this tier.`,
+      )
+    }
+
     log(
       `${tier}: asked ${amount}, +${keptHere}/${batch.items.length} kept — ` +
         `${kept.length}/${max} total, ${fetched} fetched`,
@@ -763,17 +951,78 @@ async function run(): Promise<void> {
     console.log(`  ${reason.padEnd(24)} ${String(drops.get(reason) ?? 0).padStart(6)}`)
   }
 
-  console.log('\nkept, by tier:')
+  // Per TIER per CATEGORY, recomputed from the questions actually kept rather
+  // than read out of the counters the loop maintained — the table an operator
+  // acts on has to describe the FILE, not the bookkeeping.
+  const catsByTier = new Map<string, Map<string, number>>()
+  for (const q of kept) {
+    const counts = catsByTier.get(q.tier) ?? new Map<string, number>()
+    counts.set(q.category, (counts.get(q.category) ?? 0) + 1)
+    catsByTier.set(q.tier, counts)
+  }
+  const sessionsByTier = new Map<string, number>()
+  for (const tier of ['novice', ...SOURCE_DIFFICULTIES]) {
+    sessionsByTier.set(tier, sessionCeiling([...(catsByTier.get(tier)?.values() ?? [])]))
+  }
+
   // `novice` is listed at zero on purpose — an operator reading this report has
   // to see that the tier exists and that this import did not fill it.
+  console.log('\nkept, by tier — a session needs 5 questions from 5 DISTINCT categories:')
+  console.log(
+    `  ${'tier'.padEnd(10)}${'questions'.padStart(10)}${'categories'.padStart(12)}` +
+      `${'sessions'.padStart(10)}`,
+  )
   for (const tier of ['novice', ...SOURCE_DIFFICULTIES]) {
-    console.log(`  ${tier.padEnd(24)} ${String(perTier.get(tier) ?? 0).padStart(6)}`)
+    const categories = catsByTier.get(tier)?.size ?? 0
+    console.log(
+      `  ${tier.padEnd(10)}${String(perTier.get(tier) ?? 0).padStart(10)}` +
+        `${String(categories).padStart(12)}${String(sessionsByTier.get(tier) ?? 0).padStart(10)}`,
+    )
   }
+  console.log(
+    '\n  `sessions` is the CEILING for ONE wallet: `trivia_seen` means a wallet never meets the\n' +
+      '  same question twice, and a category can supply at most one question per session, so the\n' +
+      '  largest S with sum(min(per-category count, S)) >= 5S. Real selection is an HMAC that\n' +
+      '  optimises nothing, so expect fewer — but no wallet gets more.',
+  )
   console.log(`\n  note: ${TIER_NOTE}`)
 
-  console.log(`\nkept, by category (${perCategory.size} distinct):`)
+  // Loud, and about the tiers the OPERATOR asked for. `selectQuestionIds` throws
+  // `SelectionError` below five categories and `create-gated-drop.ts` refuses to
+  // create a drop on such a tier — but a bank written now and pinned later would
+  // surface that only when a stranger tapped Start.
+  const thin = wanted.filter((t) => (catsByTier.get(t)?.size ?? 0) < QUESTIONS_PER_SESSION)
+  if (thin.length > 0) {
+    console.log(
+      `\n${'!'.repeat(74)}\n` +
+        `!! TIER TOO THIN: ${thin.join(', ')} — fewer than ${QUESTIONS_PER_SESSION} distinct ` +
+        'categories.\n' +
+        `!! \`selectQuestionIds\` draws one question from each of ${QUESTIONS_PER_SESSION} distinct\n` +
+        '!! categories and raises SelectionError below that, so NO SESSION CAN BE DEALT from\n' +
+        '!! these tiers. A drop pinned to one would answer `misconfigured` at the first tap.\n' +
+        '!! Raise --max, or --tiers only the tiers you can fill.\n' +
+        `${'!'.repeat(74)}`,
+    )
+  }
+  const zeroSessions = wanted.filter(
+    (t) => (catsByTier.get(t)?.size ?? 0) >= QUESTIONS_PER_SESSION && sessionsByTier.get(t) === 0,
+  )
+  if (zeroSessions.length > 0) {
+    console.log(
+      `\n!! ${zeroSessions.join(', ')} has ${QUESTIONS_PER_SESSION}+ categories but a session ` +
+        'ceiling of 0 — its categories\n!! cannot jointly supply one full set. Raise --max.',
+    )
+  }
+
+  console.log(`\nkept, by category (${perCategory.size} distinct, cap ${capPerCategory}/tier):`)
   for (const [category, count] of [...perCategory].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))) {
-    console.log(`  ${category.padEnd(36)} ${String(count).padStart(6)}`)
+    const share = ((count / kept.length) * 100).toFixed(1)
+    const perTierBreakdown = wanted
+      .map((t) => `${t[0]}${catsByTier.get(t)?.get(category) ?? 0}`)
+      .join(' ')
+    console.log(
+      `  ${category.padEnd(36)} ${String(count).padStart(6)} ${share.padStart(5)}%  ${perTierBreakdown}`,
+    )
   }
 
   if (exhaustedEarly && kept.length < max) {
@@ -781,6 +1030,15 @@ async function run(): Promise<void> {
       `\n!! The session token ran out at ${kept.length} of the requested ${max}. That is the whole\n` +
         '!! of Open Trivia DB that survives these filters for these tiers, not a failure — the\n' +
         '!! bank below is complete and will be written. Re-running will not find more.',
+    )
+  }
+  if (saturatedEarly && kept.length < max) {
+    console.log(
+      `\n!! Stopped at ${kept.length} of the requested ${max} because every category of at least one\n` +
+        `!! tier reached the cap of ${capPerCategory}. This is the cap working, not a failure: the\n` +
+        '!! remaining source questions would all have gone into categories that are already full.\n' +
+        '!! To go deeper, raise --max (which raises the share-derived cap with it) rather than\n' +
+        '!! --max-per-category on its own, which would just re-concentrate the bank.',
     )
   }
 
@@ -823,9 +1081,9 @@ async function run(): Promise<void> {
   console.log('\npoint a deployment at it with TRIVIA_BANK_PATH, then create a drop:')
   console.log(`  TRIVIA_BANK_PATH=${outPath} pnpm tsx spike/create-gated-drop.ts --kind trivia …`)
   console.log(
-    '\nNote: `create-gated-drop.ts` needs at least five DISTINCT CATEGORIES in the tier it is\n' +
-      'given (selectQuestionIds draws one question per category), so check the per-category\n' +
-      'table above before pinning a drop to a tier.',
+    '\nBefore pinning a drop to a tier, read the `categories` and `sessions` columns above:\n' +
+      '`create-gated-drop.ts` refuses a tier with fewer than five distinct categories, and the\n' +
+      'session ceiling is how many games one wallet can play there before it runs dry.',
   )
   console.log(`\nOpen Trivia DB is CC BY-SA 4.0; every question carries source ${SOURCE}`)
   console.log('')

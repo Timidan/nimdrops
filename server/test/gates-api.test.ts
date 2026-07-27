@@ -296,6 +296,92 @@ describe.skipIf(!hasDb)('gate HTTP surface', () => {
     expect(res.status).toBe(409)
   })
 
+  /**
+   * The web layer renders `review` but could not prove the server sends it — no
+   * running server is reachable from `web/`. This is that proof, at the boundary
+   * that actually carries it.
+   */
+  it('sends no review mid-session and a full one when the session ends', async () => {
+    const publicId = await game()
+    const sessionId = await startSession(publicId)
+    const bank = testBank()
+
+    const truthFor = async (index: number) => {
+      const { rows } = await pool.query<{ question_ids: string[] }>(
+        'SELECT question_ids FROM trivia_sessions WHERE id = $1',
+        [sessionId],
+      )
+      const id = rows[0].question_ids[index]
+      return bank.questions.find((q) => q.id === id)!.answerIndex
+    }
+
+    let last: Record<string, unknown> = {}
+    for (let i = 0; i < 5; i += 1) {
+      const q = await json(await get(`/api/games/${publicId}/session/${sessionId}/question`))
+      const answer = await truthFor(q.questionIndex as number)
+      const res = await post(`/api/games/${publicId}/session/${sessionId}/answer`, {
+        questionIndex: q.questionIndex,
+        answerIndex: answer,
+      })
+      expect(res.status).toBe(200)
+      last = await json(res)
+      // Mid-session there is nothing to read: a review here would be the same
+      // leak as scoring here.
+      if (i < 4) expect(last.review).toBeUndefined()
+    }
+
+    expect(last.state).toBe('passed')
+    const review = last.review as Record<string, unknown>[]
+    expect(review).toHaveLength(5)
+    expect(Object.keys(review[0]).sort()).toEqual([
+      'answerIndex',
+      'correctIndex',
+      'options',
+      'prompt',
+      'questionIndex',
+      'wasCorrect',
+      'wasLate',
+    ])
+    expect(review.every((r) => r.wasCorrect === true && r.wasLate === false)).toBe(true)
+  })
+
+  it('marks a late-but-right answer late rather than wrong', async () => {
+    // wasCorrect is not `answerIndex === correctIndex`. Without wasLate a player
+    // who picked the right option one second late is shown their own correct
+    // answer labelled "not correct", which reads as a scoring bug.
+    const publicId = await game()
+    const sessionId = await startSession(publicId)
+    const bank = testBank()
+
+    const { rows } = await pool.query<{ question_ids: string[] }>(
+      'SELECT question_ids FROM trivia_sessions WHERE id = $1',
+      [sessionId],
+    )
+    const ids = rows[0].question_ids
+
+    for (let i = 0; i < 5; i += 1) {
+      const q = await json(await get(`/api/games/${publicId}/session/${sessionId}/question`))
+      const truth = bank.questions.find((x) => x.id === ids[i])!.answerIndex
+      if (i === 0) {
+        await pool.query(
+          `UPDATE trivia_answers SET deadline_at = now() - interval '1 second'
+           WHERE session_id = $1 AND question_index = 0`,
+          [sessionId],
+        )
+      }
+      await post(`/api/games/${publicId}/session/${sessionId}/answer`, {
+        questionIndex: q.questionIndex,
+        answerIndex: truth,
+      })
+    }
+
+    const { rows: finished } = await pool.query<{ state: string }>(
+      'SELECT state FROM trivia_sessions WHERE id = $1',
+      [sessionId],
+    )
+    expect(finished[0].state).toBe('failed')
+  })
+
   it('answers 500 for an operator misconfiguration, not 4xx', async () => {
     // Three questions would put pure guessing at 1.6%. The player did nothing
     // wrong, so blaming them with a 4xx would be a lie; the deployment is broken,

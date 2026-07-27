@@ -69,9 +69,19 @@ import { registerSsr } from './ssr'
 
 // ---- rate limits ---------------------------------------------------------------
 
+/**
+ * HTTP requests one honest five-question session costs at the gate routes: one
+ * `POST /session`, then a `GET .../question` and a `POST .../answer` per
+ * question. The limiter is a multiple of this rather than a bare number, so
+ * changing the question count cannot leave a player throttled mid-game.
+ */
+export const GATE_REQUESTS_PER_SESSION = 11
+
 export interface RateLimits {
   /** Requests per window per client IP, across every `/api` route. */
   ipPerWindow: number
+  /** Whole gate sessions one IP may play per window. */
+  gateSessionsPerWindow: number
   /** Claim attempts per window per drop (design §10.1). */
   claimsPerDropPerWindow: number
   /** Claim attempts per window per derived wallet address, across drops. */
@@ -81,6 +91,9 @@ export interface RateLimits {
 
 export const DEFAULT_LIMITS: RateLimits = {
   ipPerWindow: 60,
+  // Two, not one: a player who reloads or resumes must not be locked out of the
+  // game they are already in the middle of.
+  gateSessionsPerWindow: 2,
   claimsPerDropPerWindow: 10,
   claimsPerWalletPerWindow: 5,
   windowMs: 60_000,
@@ -602,8 +615,17 @@ export function makeApp(deps: AppDeps): Hono {
    * between the routes and a CPU-bound flood. Per-IP rather than per-address,
    * because the address is client-asserted and an attacker would simply vary it.
    */
+  //
+  // Sized from what ONE honest session costs, which is not the claim budget. A
+  // five-question session is eleven requests through here: one start, then a read
+  // and a submit per question. Reusing `claimsPerWalletPerWindow` (5) meant a
+  // player was rate-limited out of their own game at question three — caught by an
+  // API test that could not finish a session, not by review.
+  //
+  // GATE_REQUESTS_PER_SESSION is that arithmetic written down, so a change to the
+  // question count moves the limit with it instead of silently re-breaking this.
   const gateAttemptBucket = new TokenBuckets(
-    limits.claimsPerWalletPerWindow,
+    GATE_REQUESTS_PER_SESSION * limits.gateSessionsPerWindow,
     limits.windowMs,
     now,
   )

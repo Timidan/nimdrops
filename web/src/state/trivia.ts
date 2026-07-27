@@ -12,7 +12,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { getTriviaQuestion, startTriviaSession, submitTriviaAnswer } from '../api'
-import type { TriviaQuestion } from '../api'
+import type { ReviewedQuestion, TriviaQuestion } from '../api'
 
 /**
  * A deliberate mirror of `COOLDOWN_MINUTES` in
@@ -38,6 +38,16 @@ export interface TriviaSession {
   secondsLeft: number
   answered: number
   questionCount: number
+  /**
+   * The finished session, question by question, or `null`.
+   *
+   * `null` for the whole of `idle` and `playing`, because the server sends it
+   * only once the session is over. It stays `null` when the session ended
+   * through a refused submission too: that path never received an outcome
+   * body, and inventing an empty review would read on screen as "we have your
+   * answers and none of them were anything".
+   */
+  review: ReviewedQuestion[] | null
   error: string | null
   start(): Promise<void>
   submit(answerIndex: number): Promise<void>
@@ -53,6 +63,7 @@ export function useTriviaSession(publicId: string, walletAddress: string): Trivi
   const [secondsLeft, setSecondsLeft] = useState(0)
   const [answered, setAnswered] = useState(0)
   const [questionCount, setQuestionCount] = useState(0)
+  const [review, setReview] = useState<ReviewedQuestion[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const sessionId = useRef<string | null>(null)
 
@@ -67,6 +78,7 @@ export function useTriviaSession(publicId: string, walletAddress: string): Trivi
 
   const start = useCallback(async () => {
     setError(null)
+    setReview(null)
     try {
       const started = await startTriviaSession(publicId, walletAddress)
       sessionId.current = started.sessionId
@@ -92,6 +104,13 @@ export function useTriviaSession(publicId: string, walletAddress: string): Trivi
           setQuestion(await getTriviaQuestion(publicId, id))
           return
         }
+        // Set BEFORE the phase, so the render that first shows an outcome
+        // screen already carries the review it belongs to rather than
+        // rendering once without it. Checked for shape rather than trusted:
+        // `review` is optional in the contract, and anything that is not a
+        // non-empty array is treated as "the server sent none", because a
+        // review section is worth showing only when there is something in it.
+        setReview(Array.isArray(outcome.review) && outcome.review.length > 0 ? outcome.review : null)
         setPhase(outcome.state)
       } catch (err) {
         // A refused submission is terminal for this session: the one submission
@@ -110,6 +129,7 @@ export function useTriviaSession(publicId: string, walletAddress: string): Trivi
     secondsLeft,
     answered,
     questionCount,
+    review,
     error,
     start,
     submit,

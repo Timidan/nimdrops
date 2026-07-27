@@ -129,6 +129,16 @@ export interface ReviewedQuestion {
   answerIndex: number | null
   correctIndex: number
   wasCorrect: boolean
+  /**
+   * The answer arrived after its deadline, so it was scored wrong whatever it said.
+   *
+   * Needed because `wasCorrect` is NOT `answerIndex === correctIndex`: a late
+   * answer commits the index the player chose and is still scored wrong. Without
+   * this flag a player who picked the right option one second late is shown their
+   * own correct answer labelled "not correct", which reads as a bug in the
+   * scoring rather than as the clock running out.
+   */
+  wasLate: boolean
 }
 
 export interface TriviaService {
@@ -584,8 +594,12 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
       question_id: string
       answer_index: number | null
       is_correct: boolean | null
+      was_late: boolean
     }>(
-      `SELECT question_index, question_id, answer_index, is_correct
+      `SELECT question_index, question_id, answer_index, is_correct,
+              -- Compared against the row's own stamped deadline, not against
+              -- now(): by review time every deadline is in the past.
+              (answered_at IS NULL OR answered_at > deadline_at) AS was_late
        FROM trivia_answers WHERE session_id = $1 ORDER BY question_index`,
       [sessionId],
     )
@@ -598,6 +612,7 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
         answerIndex: row.answer_index,
         correctIndex: question.answerIndex,
         wasCorrect: row.is_correct === true,
+        wasLate: row.was_late,
       }
     })
   }

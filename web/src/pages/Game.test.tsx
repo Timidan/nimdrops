@@ -7,7 +7,10 @@
  *    anybody toward a signature;
  *  - the countdown comes from the server's deadline, and reaching zero submits
  *    nothing;
- *  - no correct answer is ever displayed, on a pass or a failure;
+ *  - no correct answer is displayed while a question is still in play, and none
+ *    is displayed afterwards either unless the server sent one;
+ *  - the review, when there is one, says right from wrong in WORDS, tells a
+ *    missed deadline apart from a wrong answer, and stays under the claim;
  *  - a failure says what ended it and the wait, and never blames the wallet;
  *  - amounts are exact, and "one tap" appears nowhere.
  */
@@ -54,6 +57,36 @@ function question(index: number, secondsOut = 15) {
     deadlineAt: new Date(Date.now() + secondsOut * 1000).toISOString(),
     questionCount: 5,
   }
+}
+
+/**
+ * One row of the review the server sends back with a finished session.
+ *
+ * The defaults describe a question answered correctly, so a case only has to
+ * spell out the part it is about. `answerIndex: null` is the missed deadline and
+ * nothing else — a wrong answer carries the index the player actually chose.
+ */
+function reviewed(index: number, over: Record<string, unknown> = {}) {
+  return {
+    questionIndex: index,
+    prompt: `Which of these is question ${index + 1}?`,
+    options: ['first', 'second', 'third', 'fourth'],
+    answerIndex: 0,
+    correctIndex: 0,
+    wasCorrect: true,
+    ...over,
+  }
+}
+
+/** Five questions, with question three answered wrongly. */
+function reviewWithOneWrong() {
+  return [
+    reviewed(0),
+    reviewed(1),
+    reviewed(2, { answerIndex: 1, correctIndex: 3, wasCorrect: false }),
+    reviewed(3),
+    reviewed(4),
+  ]
 }
 
 interface Reply {
@@ -407,6 +440,155 @@ describe('Game — trivia outcomes', () => {
       /pass an easier one first/i,
     )
     expect(screen.queryByTestId('trivia-playing')).toBe(null)
+  })
+})
+
+describe('Game — the review of a finished round', () => {
+  const playing = {
+    game: { status: 200, body: gameBody() },
+    session: {
+      status: 200,
+      body: { sessionId: 's-1', questionCount: 5, secondsPerQuestion: 15, deliveredCount: 0 },
+    },
+    question: { status: 200, body: question(0) },
+  }
+
+  async function play(answer: Reply) {
+    installFetch({ ...playing, answer })
+    mount()
+    await screen.findByTestId('trivia-idle')
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^start$/i }))
+    })
+    await screen.findByTestId('trivia-playing')
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'first' }))
+    })
+  }
+
+  it('shows all five questions and the right answer after a failure', async () => {
+    await play({
+      status: 200,
+      body: { state: 'failed', answered: 5, questionCount: 5, review: reviewWithOneWrong() },
+    })
+
+    await screen.findByTestId('trivia-review')
+    for (let index = 0; index < 5; index += 1) {
+      const row = screen.getByTestId(`review-${index}`)
+      expect(row.textContent).toContain(`Which of these is question ${index + 1}?`)
+      // Every row says what the right answer was, including the ones that were.
+      expect(row.textContent).toMatch(/the right answer is/i)
+    }
+
+    const wrong = screen.getByTestId('review-2')
+    expect(wrong.textContent).toMatch(/you chose second/i)
+    expect(wrong.textContent).toMatch(/the right answer is fourth/i)
+  })
+
+  it('shows the review on a pass too, with the claim still there and still above it', async () => {
+    await play({
+      status: 200,
+      body: { state: 'passed', answered: 5, questionCount: 5, review: reviewWithOneWrong() },
+    })
+
+    const pass = await screen.findByTestId('gate-passed')
+    const link = screen.getByRole('link', { name: /go to the claim/i })
+    expect(link.getAttribute('href')).toBe(`/drop/${PUBLIC_ID}`)
+
+    const review = screen.getByTestId('trivia-review')
+    expect(review.textContent).toContain('Which of these is question 1?')
+    // The claim comes FIRST in the document, so five questions never push the
+    // primary action down a phone screen.
+    expect(link.compareDocumentPosition(review) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+
+    // Information, not a trophy: no score, no praise, no reveal.
+    expect(pass.textContent).not.toMatch(/congratulations|well done|nice one|perfect|🎉/i)
+    expect(pass.textContent).not.toMatch(/\b5\s*(\/|out of)\s*5\b|score/i)
+    expect(document.querySelector('.nd-keyline')).toBe(null)
+    expect(document.querySelector('.nd-bloom')).toBe(null)
+  })
+
+  it('reads a question the clock beat as out of time, not as a wrong answer', async () => {
+    await play({
+      status: 200,
+      body: {
+        state: 'failed',
+        answered: 5,
+        questionCount: 5,
+        review: [
+          reviewed(0),
+          reviewed(1, { answerIndex: null, correctIndex: 2, wasCorrect: false }),
+          reviewed(2),
+          reviewed(3),
+          reviewed(4),
+        ],
+      },
+    })
+
+    const row = await screen.findByTestId('review-1')
+    expect(row.textContent).toMatch(/ran out of time/i)
+    // Not scolded for an answer nobody gave, and no answer attributed to them.
+    expect(row.textContent).not.toMatch(/not correct|wrong/i)
+    expect(row.textContent).not.toMatch(/you chose/i)
+    // The right answer is still stated, because that is what a review is for.
+    expect(row.textContent).toMatch(/the right answer is third/i)
+  })
+
+  it('carries correctness in words rather than in colour', async () => {
+    await play({
+      status: 200,
+      body: {
+        state: 'failed',
+        answered: 5,
+        questionCount: 5,
+        review: [
+          reviewed(0),
+          reviewed(1, { answerIndex: 1, correctIndex: 3, wasCorrect: false }),
+          reviewed(2, { answerIndex: null, correctIndex: 0, wasCorrect: false }),
+          reviewed(3),
+          reviewed(4),
+        ],
+      },
+    })
+
+    const right = await screen.findByTestId('review-0-outcome')
+    const wrong = screen.getByTestId('review-1-outcome')
+    const late = screen.getByTestId('review-2-outcome')
+
+    // The word is the carrier. Greyscale and a screen reader both get this.
+    expect(right.textContent).toMatch(/Correct$/)
+    expect(wrong.textContent).toMatch(/Not correct$/)
+    expect(late.textContent).toMatch(/Ran out of time$/)
+
+    // And the styling is IDENTICAL across all three, so nothing about telling
+    // them apart is carried by a hue.
+    expect(wrong.className).toBe(right.className)
+    expect(late.className).toBe(right.className)
+
+    // The glyph beside the word is decoration and is hidden from assistive tech,
+    // so removing it loses nothing.
+    for (const outcome of [right, wrong, late]) {
+      const marks = outcome.querySelectorAll('[aria-hidden="true"]')
+      expect(marks).toHaveLength(1)
+      expect(outcome.textContent?.replace(marks[0].textContent ?? '', '').trim()).not.toBe('')
+    }
+  })
+
+  it('renders no review while a question is still in play', async () => {
+    await play({ status: 200, body: { state: 'in_progress', answered: 1, questionCount: 5 } })
+
+    expect(await screen.findByTestId('trivia-playing')).toBeTruthy()
+    expect(screen.queryByTestId('trivia-review')).toBe(null)
+    expect(document.body.textContent ?? '').not.toMatch(/the right answer is/i)
+  })
+
+  it('renders nothing at all rather than a placeholder when the server sent no review', async () => {
+    await play({ status: 200, body: { state: 'failed', answered: 5, questionCount: 5 } })
+
+    await screen.findByTestId('trivia-failed')
+    expect(screen.queryByTestId('trivia-review')).toBe(null)
+    expect(screen.queryByTestId('review-0')).toBe(null)
+    expect(document.body.textContent ?? '').not.toMatch(/the right answer is|question by question/i)
   })
 })
 

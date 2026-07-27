@@ -221,14 +221,46 @@ export interface TriviaQuestion {
 }
 
 /**
- * The result of one submission. `state` is the only correctness signal a client
- * ever receives: there is no per-question feedback and no reveal of the right
- * answer, on a pass or on a failure.
+ * One question of a FINISHED session, with what the player chose and what was
+ * right.
+ *
+ * Mirrors `ReviewedQuestion` in `server/src/gates/trivia/sessions.ts`. Two
+ * fields are easy to conflate and are not the same thing:
+ *
+ *  - `answerIndex` is `null` only when the deadline passed with nothing
+ *    submitted. It is NOT how a wrong answer is expressed.
+ *  - `wasCorrect` is the server's verdict and is the only one a screen may use.
+ *    A late answer is recorded with the index the player chose and scored
+ *    wrong, so `answerIndex === correctIndex` can be true while `wasCorrect` is
+ *    false. Comparing the two indices here would contradict the scoring.
+ */
+export interface ReviewedQuestion {
+  questionIndex: number
+  prompt: string
+  /** Always four, in the order they were shown. */
+  options: string[]
+  /** What the player chose; `null` if the deadline passed with no submission. */
+  answerIndex: number | null
+  correctIndex: number
+  wasCorrect: boolean
+}
+
+/**
+ * The result of one submission.
+ *
+ * `state` is the only correctness signal WHILE A QUESTION IS STILL IN PLAY:
+ * there is no per-question feedback mid-session, and `review` is absent until
+ * the session is over. Once it is over the server sends the whole set back,
+ * which is safe only because a wallet never meets a question twice — see
+ * `trivia_seen` and `selectQuestionIds` on the server. So a client must never
+ * treat `review` as optional-but-expected mid-play: absent means absent.
  */
 export interface TriviaOutcome {
   state: 'in_progress' | 'passed' | 'failed'
   answered: number
   questionCount: number
+  /** Present ONLY when `state` is `passed` or `failed`. */
+  review?: ReviewedQuestion[]
 }
 
 export interface CreateDropInput {

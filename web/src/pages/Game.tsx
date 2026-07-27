@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { ApiError, submitPassphrase, type GateKind } from '../api'
+import { ApiError, submitPassphrase, type GateKind, type ReviewedQuestion } from '../api'
 import { formatNim } from '../money'
 import { ADDRESS_RE, PASSPHRASE_MAX_ATTEMPTS, useGate } from '../state/gate'
 import { TRIVIA_COOLDOWN_MINUTES, TRIVIA_QUESTION_COUNT, useTriviaSession } from '../state/trivia'
@@ -88,6 +88,14 @@ export default function Game({ walletAddress }: GameProps) {
    * a wallet that cannot claim what they just earned.
    */
   const [metJustNow, setMetJustNow] = useState(false)
+  /**
+   * The finished trivia session, lifted here for the same reason `metJustNow`
+   * is: the pass screen replaces the whole screen, so the `Trivia` component
+   * that held the review has already unmounted by the time the review is shown.
+   * Only `trivia` ever supplies one — the other two kinds meet the condition
+   * with nothing to look back at, so this stays null and nothing renders.
+   */
+  const [review, setReview] = useState<ReviewedQuestion[] | null>(null)
 
   const rememberWallet = useCallback((address: string) => {
     writeStoredWallet(address)
@@ -99,7 +107,13 @@ export default function Game({ walletAddress }: GameProps) {
     setWallet(null)
   }, [])
 
-  const onMet = useCallback(() => setMetJustNow(true), [])
+  const onMet = useCallback((reviewed?: ReviewedQuestion[] | null) => {
+    setMetJustNow(true)
+    // Never cleared by a caller that has none: `Passphrase` and `Attested` pass
+    // nothing, and a trivia pass can arrive in two renders if the phase lands
+    // before the review does.
+    if (reviewed && reviewed.length > 0) setReview(reviewed)
+  }, [])
 
   const amount = gate.amountEachLuna === null ? null : formatNim(BigInt(gate.amountEachLuna))
   const met = gate.granted || metJustNow
@@ -117,7 +131,7 @@ export default function Game({ walletAddress }: GameProps) {
             onRetry={gate.refresh}
           />
         ) : met ? (
-          <Pass publicId={publicId} amount={amount ?? ''} />
+          <Pass publicId={publicId} amount={amount ?? ''} review={review} />
         ) : (
           <>
             <Offer
@@ -212,8 +226,24 @@ function Offer({
  * like one: no keyline, no bloom, no exclamation. It states the fact, says what
  * happens next in the order it happens, and links to the screen that owns the
  * reveal.
+ *
+ * **The review sits BELOW the claim, and that ordering is the whole decision.**
+ * It is information, not a trophy: it carries no score, no "five out of five"
+ * and no praise, because a scoreboard here would turn meeting a condition into
+ * the moment of receiving that `PRODUCT.md` reserves for the payout. Putting it
+ * above the link would also push the primary action off a phone screen behind
+ * five questions nobody has to read, which is the practical half of the same
+ * rule: the claim is what this screen is for.
  */
-function Pass({ publicId, amount }: { publicId: string; amount: string }) {
+function Pass({
+  publicId,
+  amount,
+  review,
+}: {
+  publicId: string
+  amount: string
+  review: ReviewedQuestion[] | null
+}) {
   return (
     <div data-testid="gate-passed" className="mt-9">
       <h1 className="text-2xl font-semibold tracking-tight">You can claim {amount} NIM</h1>
@@ -228,7 +258,119 @@ function Pass({ publicId, amount }: { publicId: string; amount: string }) {
       <p className="mt-3 text-center text-xs leading-relaxed text-ink/50">
         One share per wallet. It has to be the wallet you named here.
       </p>
+
+      <Review questions={review} />
     </div>
+  )
+}
+
+// ---- what the questions were -------------------------------------------------------
+
+/**
+ * The finished session, question by question.
+ *
+ * Rendered identically on a pass and on a failure, because it is the same
+ * information either way and a version that congratulated on one and consoled on
+ * the other would be tone doing the work that facts should.
+ *
+ * **Nothing here is invented.** It renders `review` and only `review`: no score,
+ * no tally, and no fallback prose when the server sent nothing — an absent
+ * review renders an absent section. An option index the server's own `options`
+ * array does not contain drops its line rather than printing `undefined` or
+ * guessing, on the same principle.
+ *
+ * **Correctness is carried by words, not by hue.** Every row states its outcome
+ * in text — "Correct", "Not correct", "Ran out of time" — with a mark beside it
+ * that is `aria-hidden`, so the label is what both a screen reader and a
+ * greyscale render receive. `PRODUCT.md`: assume red and green are
+ * indistinguishable to some claimants. There is no colour coding at all here,
+ * which also means nothing to fix for anyone who cannot see it.
+ *
+ * **There is no reveal.** No transition, no stagger, no expansion — the whole
+ * section is in the first paint, so `prefers-reduced-motion` has nothing to
+ * suppress and nobody gets a version of this screen with information missing
+ * from it.
+ */
+function Review({ questions }: { questions: ReviewedQuestion[] | null }) {
+  if (!questions || questions.length === 0) return null
+
+  return (
+    <section
+      data-testid="trivia-review"
+      aria-labelledby="trivia-review-heading"
+      className="mt-10 border-t border-ink/10 pt-6"
+    >
+      <h2 id="trivia-review-heading" className="text-sm font-semibold tracking-tight text-ink/75">
+        Question by question
+      </h2>
+      <ol className="mt-5 flex flex-col gap-6">
+        {questions.map((question) => (
+          <ReviewRow key={question.questionIndex} question={question} />
+        ))}
+      </ol>
+    </section>
+  )
+}
+
+function ReviewRow({ question }: { question: ReviewedQuestion }) {
+  /**
+   * `answerIndex === null` is the ONLY thing that means the deadline passed with
+   * nothing submitted, and it is not how a wrong answer is expressed. Reading it
+   * as one would tell somebody who never saw the question that they got it wrong.
+   */
+  const outOfTime = question.answerIndex === null
+  const chosen = question.answerIndex === null ? undefined : question.options[question.answerIndex]
+  const correct = question.options[question.correctIndex]
+
+  /**
+   * The server's verdict, never a comparison of the two indices. A late answer
+   * arrives with the index the player picked and is scored wrong, so the indices
+   * can agree while `wasCorrect` is false — and the scoring is what decided the
+   * outcome of this session.
+   */
+  const label = outOfTime ? 'Ran out of time' : question.wasCorrect ? 'Correct' : 'Not correct'
+  const mark = outOfTime ? '–' : question.wasCorrect ? '✓' : '✕'
+
+  return (
+    <li data-testid={`review-${question.questionIndex}`}>
+      <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+        <p className="text-xs font-semibold tabular-nums text-ink/55">
+          Question {question.questionIndex + 1}
+        </p>
+        {/**
+         * One class list for all three outcomes, deliberately. There is nothing
+         * to strip out in greyscale because there is no hue here to begin with,
+         * and a test can prove it by comparing two rows' `className`.
+         */}
+        <p
+          data-testid={`review-${question.questionIndex}-outcome`}
+          className="text-xs font-semibold text-ink/75"
+        >
+          <span aria-hidden="true" className="mr-1">
+            {mark}
+          </span>
+          {label}
+        </p>
+      </div>
+
+      <p className="mt-2 text-sm leading-snug font-medium text-ink">{question.prompt}</p>
+
+      {outOfTime ? (
+        <p className="mt-2 text-sm leading-relaxed text-ink/65">
+          You ran out of time on this one, so no answer was recorded.
+        </p>
+      ) : chosen === undefined ? null : (
+        <p className="mt-2 text-sm leading-relaxed text-ink/65">
+          You chose <span className="font-medium text-ink">{chosen}</span>
+        </p>
+      )}
+
+      {correct === undefined ? null : (
+        <p className="mt-1 text-sm leading-relaxed text-ink/65">
+          The right answer is <span className="font-medium text-ink">{correct}</span>
+        </p>
+      )}
+    </li>
   )
 }
 
@@ -338,17 +480,20 @@ function Trivia({
   publicId: string
   walletAddress: string
   tier: string | null
-  onPass: () => void
+  onPass: (review: ReviewedQuestion[] | null) => void
 }) {
   const session = useTriviaSession(publicId, walletAddress)
   const [submitting, setSubmitting] = useState(false)
 
   // Told upwards rather than rendered here, so the pass screen is the whole
   // screen rather than a panel under the offer it has just been earned from.
+  // The review travels with it: this component unmounts on a pass, and the
+  // review belongs to the screen that replaces it.
   const passed = session.phase === 'passed'
+  const passedReview = passed ? session.review : null
   useEffect(() => {
-    if (passed) onPass()
-  }, [onPass, passed])
+    if (passed) onPass(passedReview)
+  }, [onPass, passed, passedReview])
   if (passed) return null
 
   if (session.phase === 'failed') {
@@ -360,8 +505,9 @@ function Trivia({
          * deadline says so in those words. Otherwise the plain fact: one answer
          * was wrong and the round stops there.
          *
-         * Neither branch says which option was right. The API does not return
-         * it and this screen does not invent it.
+         * Which option was right is said BELOW, and only from `review`. A
+         * refused submission never carries one, so that path still says nothing
+         * about the answers rather than inventing them.
          */}
         <p className="mt-3 text-sm leading-relaxed text-ink/65">
           {session.error ??
@@ -374,6 +520,8 @@ function Trivia({
         <Link to="/games" className="nd-secondary mt-8 block w-full text-center">
           See the other drops
         </Link>
+
+        <Review questions={session.review} />
       </div>
     )
   }
@@ -541,8 +689,10 @@ function Passphrase({
         if (busy || phrase.trim() === '') return
         setBusy(true)
         setNotice(null)
+        // Called with no arguments on purpose. `.then(onGranted)` would hand the
+        // response body straight to a callback that now takes a trivia review.
         void submitPassphrase(publicId, walletAddress, phrase)
-          .then(onGranted)
+          .then(() => onGranted())
           .catch((err: unknown) => {
             if (err instanceof ApiError && err.code === 'bad_attempt') {
               const used = wrong + 1
