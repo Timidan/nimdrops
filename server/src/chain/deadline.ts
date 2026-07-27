@@ -76,9 +76,9 @@ export class ChainCallTimeoutError extends Error {
  *
  * The underlying call is not cancelled — `ChainClient` has no cancellation and
  * the WASM client has none either. It is abandoned: its eventual settlement is
- * swallowed, and the money engine has already moved on with "we could not ask",
- * which is a state every caller handles. Abandoning is safe precisely because
- * every call this wraps is a READ.
+ * swallowed, and the money engine has already moved on with "we do not know".
+ * That is safe because callers either read state or broadcast already-persisted
+ * exact bytes; a timed-out broadcast is reconciled by hash, never replaced.
  */
 export function withChainDeadline<T>(
   label: string,
