@@ -27,6 +27,7 @@
  * becoming a cycle.
  */
 import type { Pool, PoolClient } from 'pg'
+import { normaliseNimiqAddress } from '../../nimiq-address'
 import { issueGrant } from '../grants'
 import { GateError, GateRejectedError, type GateRow, assertGameLive } from '../types'
 import { type Bank, OPTIONS_PER_QUESTION, type Tier } from './bank'
@@ -143,12 +144,17 @@ export interface ReviewedQuestion {
 
 export interface TriviaService {
   startOrResume(gate: GateRow, walletAddress: string): Promise<StartedSession>
-  currentQuestion(sessionId: string, dropId?: string): Promise<DeliveredQuestion>
+  currentQuestion(
+    sessionId: string,
+    dropId?: string,
+    walletAddress?: string,
+  ): Promise<DeliveredQuestion>
   submitAnswer(
     sessionId: string,
     questionIndex: number,
     answerIndex: number,
     dropId?: string,
+    walletAddress?: string,
   ): Promise<AnswerOutcome>
 }
 
@@ -332,11 +338,19 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
    *   session's own wallet either way — but a route whose path segments contradict
    *   each other should say so rather than quietly honour one and ignore the
    *   other.
+   * @param expectWallet when given, the session must belong to this wallet.
+   *   Session ids are v4 uuids and so unguessable, but they are not secrets: they
+   *   sit in URLs, referrers and access logs. Holding one used to be sufficient to
+   *   drive the session, and a single wrong answer imposes a ten-minute cooldown
+   *   on the wallet — so a leaked id was a remote "end that player's run" button.
+   *   Requiring the address does not make it secret (the client asserts it
+   *   anyway); it makes the leaked id alone useless, which is the exposure.
    */
   async function loadSession(
     db: PoolClient,
     sessionId: string,
     expectDropId?: string,
+    expectWallet?: string,
   ): Promise<SessionRow> {
     if (!UUID_RE.test(sessionId)) {
       throw new GateRejectedError('session_not_found', 'no such session')
@@ -360,6 +374,22 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
     // id under the wrong drop learns nothing it did not already have.
     if (expectDropId !== undefined && row.drop_id !== expectDropId) {
       throw new GateRejectedError('session_not_found', 'no such session')
+    }
+    // Also `session_not_found`, and for the same reason: a holder of a leaked
+    // session id must not be able to tell "no such session" from "right session,
+    // wrong wallet", or the route becomes an oracle for which wallet owns an id.
+    //
+    // Both sides are normalised before comparing. The stored value is normalised
+    // on the way in now, but rows written before that was true may hold a spaced
+    // or lowercased spelling of the same address, and locking a player out of
+    // their own session over whitespace would be a worse bug than the one this
+    // parameter closes.
+    if (expectWallet !== undefined) {
+      const expected = normaliseNimiqAddress(expectWallet) ?? expectWallet
+      const owner = normaliseNimiqAddress(row.wallet_address) ?? row.wallet_address
+      if (owner !== expected) {
+        throw new GateRejectedError('session_not_found', 'no such session')
+      }
     }
     return row
   }
@@ -519,12 +549,16 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
    * cannot buy time. That is why the INSERT does not use RETURNING — on the
    * second call it returns nothing — and is paired with a follow-up read.
    */
-  async function currentQuestion(sessionId: string, dropId?: string): Promise<DeliveredQuestion> {
+  async function currentQuestion(
+    sessionId: string,
+    dropId?: string,
+    walletAddress?: string,
+  ): Promise<DeliveredQuestion> {
     const client = await pool.connect()
     let committed = false
     try {
       await client.query('BEGIN')
-      const session = await loadSession(client, sessionId, dropId)
+      const session = await loadSession(client, sessionId, dropId, walletAddress)
       const config = parseTriviaConfig(session.config, bank.version)
 
       if (session.state === 'in_progress' && session.expired) {
@@ -622,6 +656,7 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
     questionIndex: number,
     answerIndex: number,
     dropId?: string,
+    walletAddress?: string,
   ): Promise<AnswerOutcome> {
     if (
       !Number.isInteger(answerIndex) ||
@@ -638,7 +673,7 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
     let committed = false
     try {
       await client.query('BEGIN')
-      const session = await loadSession(client, sessionId, dropId)
+      const session = await loadSession(client, sessionId, dropId, walletAddress)
       const config = parseTriviaConfig(session.config, bank.version)
 
       if (session.state === 'in_progress' && session.expired) {

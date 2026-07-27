@@ -114,11 +114,15 @@ function installFetch(script: Script) {
   const fetchMock = vi.fn(async (input: unknown) => {
     const url = String(input)
     let reply: Reply | undefined
-    if (url.endsWith('/session')) reply = script.session
-    else if (url.endsWith('/question')) reply = script.question
-    else if (url.endsWith('/answer'))
+    // Matched on the PATH, with any query string stripped first. Suffix matching
+    // broke the moment the question route gained `?wallet=`, and it failed as
+    // fourteen unrelated assertions rather than as "the stub stopped matching".
+    const path = String(url).split('?')[0]
+    if (path.endsWith('/session')) reply = script.session
+    else if (path.endsWith('/question')) reply = script.question
+    else if (path.endsWith('/answer'))
       reply = answers ? (answers.length > 1 ? answers.shift() : answers[0]) : script.answer
-    else if (url.endsWith('/passphrase'))
+    else if (path.endsWith('/passphrase'))
       reply = passphrases
         ? passphrases.length > 1
           ? passphrases.shift()
@@ -313,7 +317,9 @@ describe('Game — trivia in play', () => {
 
     expect(await screen.findByTestId('time-up')).toBeTruthy()
     expect(screen.getByTestId('countdown').textContent).toBe('0s')
-    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith('/answer'))).toBe(false)
+    expect(
+      fetchMock.mock.calls.some(([url]) => String(url).split('?')[0].endsWith('/answer')),
+    ).toBe(false)
     // The options stay live: the server refuses a late answer, and refusing on
     // its behalf would spend the player's one submission for them.
     expect((screen.getByRole('button', { name: 'first' }) as HTMLButtonElement).disabled).toBe(false)

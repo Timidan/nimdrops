@@ -561,12 +561,22 @@ export async function startTriviaSession(
   })
 }
 
+/**
+ * The question in play.
+ *
+ * `walletAddress` is required, and not for identification — the session already
+ * knows whose it is. It is there so a LEAKED SESSION ID is useless on its own:
+ * without it, anyone who saw a session id in a log, a referrer or a shared URL
+ * could submit a wrong answer and impose the cooldown on that wallet.
+ */
 export async function getTriviaQuestion(
   publicId: string,
   sessionId: string,
+  walletAddress: string,
 ): Promise<TriviaQuestion> {
+  const wallet = encodeURIComponent(walletAddress)
   return request<TriviaQuestion>(
-    `/games/${encodeURIComponent(publicId)}/session/${encodeURIComponent(sessionId)}/question`,
+    `/games/${encodeURIComponent(publicId)}/session/${encodeURIComponent(sessionId)}/question?wallet=${wallet}`,
   )
 }
 
@@ -580,13 +590,16 @@ export async function submitTriviaAnswer(
   sessionId: string,
   questionIndex: number,
   answerIndex: number,
+  walletAddress: string,
 ): Promise<TriviaOutcome> {
   return request<TriviaOutcome>(
     `/games/${encodeURIComponent(publicId)}/session/${encodeURIComponent(sessionId)}/answer`,
     {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ questionIndex, answerIndex }),
+      // See `getTriviaQuestion`: the address is what makes a leaked session id
+      // worthless by itself.
+      body: JSON.stringify({ questionIndex, answerIndex, walletAddress }),
     },
   )
 }

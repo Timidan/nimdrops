@@ -19,8 +19,22 @@ const CUSTODY = 'NQ07 CUSTODY'
 const SALT = 'q'.repeat(32)
 const PHRASE = 'red panda'
 const HINT = 'said at the 3pm talk'
-/** 36 characters, the shape `ADDRESS_RE` accepts. */
-const PLAYER = 'NQ07 0000 0000 0000 0000 0000 0000 0000 00'
+/**
+ * A checksum-valid address. It used to be `NQ07 0000 … 0000 00`, which was 34
+ * payload-and-prefix characters and a checksum that did not add up — the old
+ * shape-only `ADDRESS_RE` did not care about either. Extending it to a full 32
+ * character payload of zeros makes `07` the CORRECT check digits, so this stays
+ * the same readable fixture and is now an address a wallet could really hold.
+ */
+const PLAYER = 'NQ07 0000 0000 0000 0000 0000 0000 0000 0000'
+/** A second real wallet, for proving one player's session id is useless to another. */
+const STRANGER = 'NQ54 RNSR 6MFK P8LK JVYU 152Y P1FH 30HD 84N4'
+/**
+ * `PLAYER` with its check digits bumped by one: 36 characters, every one of them
+ * from Nimiq's alphabet, and arithmetically impossible. This is exactly the input
+ * the old regex waved through, and every grant written for it was unclaimable.
+ */
+const BAD_CHECKSUM = 'NQ08 0000 0000 0000 0000 0000 0000 0000 0000'
 
 function testBank(): Bank {
   const categories = ['geography', 'science', 'history', 'sport', 'music', 'film']
@@ -168,6 +182,27 @@ describe.skipIf(!hasDb)('gate HTTP surface', () => {
     return (JSON.parse(text) as { sessionId: string }).sessionId
   }
 
+  /**
+   * The session routes take the wallet as well as the session id, so a leaked id
+   * on its own drives nothing. Both helpers default to `PLAYER`; the tests about
+   * the check pass someone else's address explicitly.
+   */
+  const question = (publicId: string, sessionId: string, wallet: string = PLAYER) =>
+    get(
+      `/api/games/${publicId}/session/${sessionId}/question?wallet=${encodeURIComponent(wallet)}`,
+    )
+
+  const answer = (
+    publicId: string,
+    sessionId: string,
+    body: Record<string, unknown>,
+    wallet: string = PLAYER,
+  ) =>
+    post(`/api/games/${publicId}/session/${sessionId}/answer`, {
+      ...body,
+      walletAddress: wallet,
+    })
+
   // ---- the catalogue --------------------------------------------------------
 
   it('lists a listed game and omits an unlisted one', async () => {
@@ -246,8 +281,8 @@ describe.skipIf(!hasDb)('gate HTTP surface', () => {
   it('rejects an answer index outside the four options', async () => {
     const publicId = await game()
     const sessionId = await startSession(publicId)
-    await get(`/api/games/${publicId}/session/${sessionId}/question`)
-    const res = await post(`/api/games/${publicId}/session/${sessionId}/answer`, {
+    await question(publicId, sessionId)
+    const res = await answer(publicId, sessionId, {
       questionIndex: 0,
       answerIndex: 9,
     })
@@ -257,8 +292,8 @@ describe.skipIf(!hasDb)('gate HTTP surface', () => {
   it('rejects a numeric string where a number is required', async () => {
     const publicId = await game()
     const sessionId = await startSession(publicId)
-    await get(`/api/games/${publicId}/session/${sessionId}/question`)
-    const res = await post(`/api/games/${publicId}/session/${sessionId}/answer`, {
+    await question(publicId, sessionId)
+    const res = await answer(publicId, sessionId, {
       questionIndex: 0,
       answerIndex: '1',
     })
@@ -267,7 +302,201 @@ describe.skipIf(!hasDb)('gate HTTP surface', () => {
 
   it('404s a malformed session id rather than describing its shape', async () => {
     const publicId = await game()
-    expect((await get(`/api/games/${publicId}/session/not-a-uuid/question`)).status).toBe(404)
+    expect((await question(publicId, 'not-a-uuid')).status).toBe(404)
+  })
+
+  // ---- the address is checked, not merely shaped -----------------------------
+
+  /**
+   * The loophole this closes. `BAD_CHECKSUM` is 36 characters drawn entirely from
+   * Nimiq's alphabet, so the old shape-only regex accepted it — and every route
+   * that accepted it wrote a row naming a wallet that cannot exist. `reserveClaim`
+   * compares a grant against an address DERIVED from a verified public key, so
+   * nothing could ever match it: the row was orphaned the instant it was written,
+   * and repeating the request accumulated more of them.
+   */
+  it('rejects a well-shaped but checksum-invalid address and writes no row', async () => {
+    const quiz = await game()
+    const phrase = await game({ kind: 'passphrase' })
+
+    const session = await post(`/api/games/${quiz}/session`, { walletAddress: BAD_CHECKSUM })
+    expect(session.status, await session.text()).toBe(400)
+
+    const pass = await post(`/api/games/${phrase}/passphrase`, {
+      walletAddress: BAD_CHECKSUM,
+      phrase: PHRASE,
+    })
+    expect(pass.status, await pass.text()).toBe(400)
+
+    // The point of the fix: nothing reached the database. A 400 that still left a
+    // row behind would close nothing at all.
+    const counts = await pool.query<{ grants: string; sessions: string }>(
+      `SELECT (SELECT count(*) FROM gate_grants) AS grants,
+              (SELECT count(*) FROM trivia_sessions) AS sessions`,
+    )
+    expect(counts.rows[0]).toEqual({ grants: '0', sessions: '0' })
+  })
+
+  it('rejects the checksum-invalid address however it is spaced or cased', async () => {
+    const publicId = await game()
+    for (const spelling of [
+      BAD_CHECKSUM,
+      BAD_CHECKSUM.replace(/ /g, ''),
+      BAD_CHECKSUM.toLowerCase(),
+      `  ${BAD_CHECKSUM}  `,
+    ]) {
+      const res = await post(`/api/games/${publicId}/session`, { walletAddress: spelling })
+      expect(res.status, spelling).toBe(400)
+    }
+    const { rows } = await pool.query<{ count: string }>('SELECT count(*) FROM trivia_sessions')
+    expect(rows[0].count).toBe('0')
+  })
+
+  it('treats spacing and case variants of one wallet as one wallet', async () => {
+    // Two spellings must not become two grants. If they did, a one-play-per-wallet
+    // gate would pay a wallet twice and the claim path could match only one row.
+    const publicId = await game({ kind: 'passphrase' })
+    const first = await post(`/api/games/${publicId}/passphrase`, {
+      walletAddress: PLAYER,
+      phrase: PHRASE,
+    })
+    expect(first.status, await first.text()).toBe(200)
+
+    const { rows } = await pool.query<{ wallet_address: string }>(
+      'SELECT wallet_address FROM gate_grants',
+    )
+    expect(rows).toHaveLength(1)
+    // Stored in ONE canonical spelling, not as it happened to arrive.
+    expect(rows[0].wallet_address).toBe('NQ07' + '0'.repeat(32))
+
+    // Every other spelling of the same wallet reads that same grant back.
+    for (const spelling of [PLAYER, PLAYER.replace(/ /g, ''), PLAYER.toLowerCase()]) {
+      const body = await json(
+        await get(`/api/games/${publicId}?wallet=${encodeURIComponent(spelling)}`),
+      )
+      expect(body.granted, spelling).toBe(true)
+    }
+  })
+
+  // ---- a leaked session id is not enough ------------------------------------
+
+  /**
+   * Session ids are v4 uuids, so unguessable — but they are not secrets. They sit
+   * in URLs, in `Referer` headers and in access logs. Before the wallet check,
+   * anyone holding one could submit a wrong answer and impose the ten-minute
+   * cooldown on somebody else's wallet: a remote "end that player's run" button.
+   */
+  it('refuses the question route to a valid session id presented with the wrong wallet', async () => {
+    const publicId = await game()
+    const sessionId = await startSession(publicId)
+
+    const stranger = await question(publicId, sessionId, STRANGER)
+    const unknown = await question(publicId, '00000000-0000-4000-8000-000000000000', PLAYER)
+
+    // Identical answers. A caller must not be able to tell "no such session" from
+    // "right session, wrong wallet", or the route becomes an ownership oracle.
+    expect(stranger.status).toBe(404)
+    expect(stranger.status).toBe(unknown.status)
+    expect(await stranger.text()).toBe(await unknown.text())
+  })
+
+  it('refuses the answer route to the wrong wallet without touching the session', async () => {
+    const publicId = await game()
+    const sessionId = await startSession(publicId)
+    const q = await json(await question(publicId, sessionId))
+
+    const stranger = await answer(
+      publicId,
+      sessionId,
+      { questionIndex: q.questionIndex, answerIndex: 3 },
+      STRANGER,
+    )
+    const unknown = await answer(
+      publicId,
+      '00000000-0000-4000-8000-000000000000',
+      { questionIndex: 0, answerIndex: 3 },
+      PLAYER,
+    )
+    expect(stranger.status).toBe(404)
+    expect(stranger.status).toBe(unknown.status)
+    expect(await stranger.text()).toBe(await unknown.text())
+
+    // The cooldown was the prize: the session is untouched and the real player can
+    // still answer. Nothing was recorded against their attempt.
+    const { rows } = await pool.query<{ count: string }>(
+      'SELECT count(*) FROM trivia_answers WHERE session_id = $1 AND answer_index IS NOT NULL',
+      [sessionId],
+    )
+    expect(rows[0].count).toBe('0')
+    const { rows: state } = await pool.query<{ state: string }>(
+      'SELECT state FROM trivia_sessions WHERE id = $1',
+      [sessionId],
+    )
+    expect(state[0].state).toBe('in_progress')
+  })
+
+  it('requires the wallet on both session routes rather than defaulting it', async () => {
+    const publicId = await game()
+    const sessionId = await startSession(publicId)
+
+    // Missing entirely.
+    expect((await get(`/api/games/${publicId}/session/${sessionId}/question`)).status).toBe(400)
+    expect(
+      (
+        await post(`/api/games/${publicId}/session/${sessionId}/answer`, {
+          questionIndex: 0,
+          answerIndex: 0,
+        })
+      ).status,
+    ).toBe(400)
+
+    // Present but not an address, which must not be mistaken for absent.
+    expect((await question(publicId, sessionId, 'nope')).status).toBe(400)
+    expect((await question(publicId, sessionId, BAD_CHECKSUM)).status).toBe(400)
+  })
+
+  it('accepts the owner’s wallet in any spelling and plays the session out', async () => {
+    // The end-to-end proof that the check constrains a stranger and not the owner.
+    const publicId = await game()
+    const sessionId = await startSession(publicId)
+    const bank = testBank()
+    const ids = (
+      await pool.query<{ question_ids: string[] }>(
+        'SELECT question_ids FROM trivia_sessions WHERE id = $1',
+        [sessionId],
+      )
+    ).rows[0].question_ids
+
+    // A different spelling per question: compact, spaced, lowercased.
+    const spellings = [
+      PLAYER.replace(/ /g, ''),
+      PLAYER,
+      PLAYER.toLowerCase(),
+      PLAYER.replace(/ /g, '').toLowerCase(),
+      PLAYER,
+    ]
+
+    let last: Record<string, unknown> = {}
+    for (let i = 0; i < 5; i += 1) {
+      const q = await json(await question(publicId, sessionId, spellings[i]))
+      const truth = bank.questions.find((x) => x.id === ids[q.questionIndex as number])!.answerIndex
+      const res = await answer(
+        publicId,
+        sessionId,
+        { questionIndex: q.questionIndex, answerIndex: truth },
+        spellings[i],
+      )
+      expect(res.status, await res.clone().text()).toBe(200)
+      last = await json(res)
+    }
+    expect(last.state).toBe('passed')
+
+    // And the grant landed on the canonical spelling of that one wallet.
+    const { rows } = await pool.query<{ wallet_address: string }>(
+      'SELECT wallet_address FROM gate_grants',
+    )
+    expect(rows).toHaveLength(1)
+    expect(rows[0].wallet_address).toBe('NQ07' + '0'.repeat(32))
   })
 
   // ---- trivia ---------------------------------------------------------------
@@ -275,7 +504,7 @@ describe.skipIf(!hasDb)('gate HTTP surface', () => {
   it('delivers a question with four options and never the answer', async () => {
     const publicId = await game()
     const sessionId = await startSession(publicId)
-    const res = await get(`/api/games/${publicId}/session/${sessionId}/question`)
+    const res = await question(publicId, sessionId)
     expect(res.status).toBe(200)
     const body = await json(res)
     expect(body.options).toHaveLength(4)
@@ -288,8 +517,8 @@ describe.skipIf(!hasDb)('gate HTTP surface', () => {
   it('refuses an answer for a question that is not in play', async () => {
     const publicId = await game()
     const sessionId = await startSession(publicId)
-    await get(`/api/games/${publicId}/session/${sessionId}/question`)
-    const res = await post(`/api/games/${publicId}/session/${sessionId}/answer`, {
+    await question(publicId, sessionId)
+    const res = await answer(publicId, sessionId, {
       questionIndex: 3,
       answerIndex: 0,
     })
@@ -317,11 +546,11 @@ describe.skipIf(!hasDb)('gate HTTP surface', () => {
 
     let last: Record<string, unknown> = {}
     for (let i = 0; i < 5; i += 1) {
-      const q = await json(await get(`/api/games/${publicId}/session/${sessionId}/question`))
-      const answer = await truthFor(q.questionIndex as number)
-      const res = await post(`/api/games/${publicId}/session/${sessionId}/answer`, {
+      const q = await json(await question(publicId, sessionId))
+      const choice = await truthFor(q.questionIndex as number)
+      const res = await answer(publicId, sessionId, {
         questionIndex: q.questionIndex,
-        answerIndex: answer,
+        answerIndex: choice,
       })
       expect(res.status).toBe(200)
       last = await json(res)
@@ -360,7 +589,7 @@ describe.skipIf(!hasDb)('gate HTTP surface', () => {
     const ids = rows[0].question_ids
 
     for (let i = 0; i < 5; i += 1) {
-      const q = await json(await get(`/api/games/${publicId}/session/${sessionId}/question`))
+      const q = await json(await question(publicId, sessionId))
       const truth = bank.questions.find((x) => x.id === ids[i])!.answerIndex
       if (i === 0) {
         await pool.query(
@@ -369,7 +598,7 @@ describe.skipIf(!hasDb)('gate HTTP surface', () => {
           [sessionId],
         )
       }
-      await post(`/api/games/${publicId}/session/${sessionId}/answer`, {
+      await answer(publicId, sessionId, {
         questionIndex: q.questionIndex,
         answerIndex: truth,
       })

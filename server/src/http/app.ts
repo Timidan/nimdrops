@@ -5,6 +5,7 @@ import type { Pool } from 'pg'
 import { addressFromPublicKey } from '../auth/verify'
 import type { ChainClient } from '../chain/types'
 import { CapError, formatNim, lunaFromNim } from '../money'
+import { normaliseNimiqAddress } from '../nimiq-address'
 import { type Alerts, throttled } from '../services/alerts'
 import {
   ClaimNotFoundError,
@@ -282,16 +283,11 @@ const PUBLIC_ID_RE = /^[A-Za-z0-9_-]{22}$/
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 /** Nimiq transaction id: 32 bytes of hex. */
 const TX_HASH_RE = /^[0-9a-fA-F]{64}$/
-/**
- * A Nimiq user-friendly address: `NQ` and 34 base-32 characters, conventionally
- * written in space-separated groups of four.
- *
- * Shape only. It is not a checksum check and must not be mistaken for one — a
- * wallet address that passes this and is still wrong produces a grant nobody can
- * spend, which is why the authoritative comparison happens against an address
- * derived from a verified signature rather than here.
- */
-const ADDRESS_RE = /^NQ[0-9A-Z ]{34,44}$/i
+// A wallet address is checked by its CHECKSUM, in `../nimiq-address`, and there
+// is deliberately no `ADDRESS_RE` at this spot any more. The regex that used to
+// live here matched the shape and nothing else, so it admitted addresses no
+// wallet can hold — see `requireWalletAddress` below and the module comment in
+// `../nimiq-address` for what that cost.
 
 /** The longest phrase a sponsor may set. Long enough for a sentence. */
 const PHRASE_MAX_LENGTH = 120
@@ -425,6 +421,42 @@ function matching(body: Record<string, unknown>, key: string, re: RegExp): strin
   const value = body[key]
   if (typeof value !== 'string' || !re.test(value)) throw invalidRequest()
   return value
+}
+
+/**
+ * A wallet address from a body, checksum-verified and returned in ONE spelling.
+ *
+ * Returning the normalised form is not tidiness. The address is stored as written
+ * — as a `gate_grants` row and a `trivia_sessions` row — and `reserveClaim` later
+ * compares that stored string against an address derived from a verified public
+ * key. If `NQ07 ABCD…` and `nq07abcd…` are allowed to reach the database as two
+ * strings, one wallet gets two grants on a one-play-per-wallet gate and at least
+ * one of them can never be matched by anything derived.
+ */
+function requireWalletAddress(body: Record<string, unknown>, key = 'walletAddress'): string {
+  const value = body[key]
+  if (typeof value !== 'string') throw invalidRequest()
+  const address = normaliseNimiqAddress(value)
+  if (address === null) throw invalidRequest(`${key} is not a valid Nimiq address`)
+  return address
+}
+
+/**
+ * The wallet a session belongs to, from `?wallet=`.
+ *
+ * Required on the session routes, which otherwise identify the caller by session
+ * id alone. A session id is a v4 uuid and so unguessable, but it travels in URLs,
+ * referrers and logs, and on its own it was enough to play out somebody else's
+ * session — one wrong answer imposes the cooldown on THEIR wallet. Presenting the
+ * address alongside it does not make the address a secret; it makes a leaked
+ * session id insufficient, which is the whole exposure.
+ */
+function requireWalletQuery(c: Context): string {
+  const value = c.req.query('wallet')
+  if (value === undefined) throw invalidRequest('a wallet query parameter is required')
+  const address = normaliseNimiqAddress(value)
+  if (address === null) throw invalidRequest('wallet is not a valid Nimiq address')
+  return address
 }
 
 /**
@@ -899,10 +931,16 @@ export function makeApp(deps: AppDeps): Hono {
     requireGates()
     const view = await loadGameView(pool, publicId)
     const wallet = c.req.query('wallet')
+    // An absent OR invalid wallet reads as `granted: false` rather than 400,
+    // unchanged: this route answers a page that may not have a wallet yet, and a
+    // page that cannot act on the difference should not be handed an error. What
+    // did change is that the lookup now uses the NORMALISED address, so a spaced
+    // and a compacted spelling of one wallet no longer disagree about its grant.
+    const address = wallet === undefined ? null : normaliseNimiqAddress(wallet)
     const granted =
-      wallet !== undefined && ADDRESS_RE.test(wallet)
-        ? await hasGrant(pool, (await loadGate(pool, publicId)).dropId, wallet)
-        : false
+      address === null
+        ? false
+        : await hasGrant(pool, (await loadGate(pool, publicId)).dropId, address)
     return c.json({ ...view, granted })
   })
 
@@ -912,7 +950,7 @@ export function makeApp(deps: AppDeps): Hono {
     const publicId = requirePublicId(c)
     const body = await readJsonObject(c)
     only(body, ['walletAddress'])
-    const walletAddress = matching(body, 'walletAddress', ADDRESS_RE)
+    const walletAddress = requireWalletAddress(body)
     enforce(gateAttemptBucket, clientIp(c))
 
     const gate = await loadGate(pool, publicId)
@@ -925,14 +963,16 @@ export function makeApp(deps: AppDeps): Hono {
   app.get('/api/games/:publicId/session/:sessionId/question', async (c) => {
     const publicId = requirePublicId(c)
     const sessionId = requireSessionId(c)
+    const walletAddress = requireWalletQuery(c)
     // Metered like the other gate routes. It looked like a read, but it opens a
     // transaction, locks the session row, writes delivery state and reads the
     // bank — the same work the routes either side of it pay for.
     enforce(gateAttemptBucket, clientIp(c))
-    // Both path segments are honoured. Without the drop id a session belonging to
-    // one drop could be played through another drop's URL.
+    // All THREE identifiers are honoured. Without the drop id a session belonging
+    // to one drop could be played through another drop's URL; without the wallet,
+    // a leaked session id alone was enough to drive somebody else's session.
     const gate = await loadGate(pool, publicId)
-    const question = await requireTrivia().currentQuestion(sessionId, gate.dropId)
+    const question = await requireTrivia().currentQuestion(sessionId, gate.dropId, walletAddress)
     // Note what is NOT here: no answer index, no per-question correctness, no
     // score. See `AnswerOutcome` in `gates/trivia/sessions.ts` for why.
     return c.json({ ...question, deadlineAt: question.deadlineAt.toISOString() })
@@ -944,13 +984,23 @@ export function makeApp(deps: AppDeps): Hono {
     const publicId = requirePublicId(c)
     const sessionId = requireSessionId(c)
     const body = await readJsonObject(c)
-    only(body, ['questionIndex', 'answerIndex'])
+    only(body, ['questionIndex', 'answerIndex', 'walletAddress'])
     const questionIndex = wholeNumberIn(body, 'questionIndex', 0, 9)
     const answerIndex = wholeNumberIn(body, 'answerIndex', 0, 3)
+    // Required, for the reason in `requireWalletQuery`: a wrong answer costs the
+    // session's wallet a ten-minute cooldown, so submitting one must take more
+    // than a session id somebody left in a log.
+    const walletAddress = requireWalletAddress(body)
     enforce(gateAttemptBucket, clientIp(c))
     const gate = await loadGate(pool, publicId)
     return c.json(
-      await requireTrivia().submitAnswer(sessionId, questionIndex, answerIndex, gate.dropId),
+      await requireTrivia().submitAnswer(
+        sessionId,
+        questionIndex,
+        answerIndex,
+        gate.dropId,
+        walletAddress,
+      ),
     )
   })
 
@@ -960,7 +1010,7 @@ export function makeApp(deps: AppDeps): Hono {
     const publicId = requirePublicId(c)
     const body = await readJsonObject(c)
     only(body, ['walletAddress', 'phrase'])
-    const walletAddress = matching(body, 'walletAddress', ADDRESS_RE)
+    const walletAddress = requireWalletAddress(body)
     const phrase = requirePhrase(body)
     enforce(gateAttemptBucket, clientIp(c))
 

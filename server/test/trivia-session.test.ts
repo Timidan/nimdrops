@@ -660,6 +660,122 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
     await expect(svc.currentQuestion('not-a-uuid')).rejects.toThrow(/session_not_found/)
   })
 
+  // ---- a session id alone does not drive a session --------------------------
+  //
+  // Session ids are v4 uuids, so unguessable, but they are not secrets: they
+  // travel in URLs, `Referer` headers and access logs. Before `expectWallet`,
+  // holding one was enough to submit a wrong answer and spend somebody else's
+  // attempt — and a failed attempt costs that wallet a ten-minute cooldown, so a
+  // leaked id was effectively a remote "end that player's run" button. Naming the
+  // wallet does not make it a secret (the client asserts it either way); it makes
+  // the leaked id on its own useless, which is the actual exposure.
+  describe('session ownership', () => {
+    const STRANGER = 'NQ07 STRANGER'
+
+    it('refuses the question to a wallet the session does not belong to', async () => {
+      const svc = service()
+      const s = await svc.startOrResume(await gateFor(), PLAYER)
+      await expect(svc.currentQuestion(s.sessionId, undefined, STRANGER)).rejects.toThrow(
+        GateRejectedError,
+      )
+      // The SAME code as an unknown id, deliberately: a caller must not be able to
+      // tell "no such session" from "right session, wrong wallet", or the method
+      // becomes an oracle for which wallet owns an id.
+      await expect(svc.currentQuestion(s.sessionId, undefined, STRANGER)).rejects.toThrow(
+        /session_not_found/,
+      )
+    })
+
+    it('refuses an answer from a stranger and leaves the attempt untouched', async () => {
+      const svc = service()
+      const gate = await gateFor()
+      const s = await svc.startOrResume(gate, PLAYER)
+      const q = await svc.currentQuestion(s.sessionId, gate.dropId, PLAYER)
+
+      // The cooldown is the prize, so this is the case that mattered.
+      await expect(
+        svc.submitAnswer(s.sessionId, q.questionIndex, 3, gate.dropId, STRANGER),
+      ).rejects.toThrow(/session_not_found/)
+
+      // Nothing was committed against the real player's attempt.
+      expect(await sessionState(s.sessionId)).toBe('in_progress')
+      const { rows } = await pool.query<{ count: string }>(
+        `SELECT count(*) FROM trivia_answers
+         WHERE session_id = $1 AND answer_index IS NOT NULL`,
+        [s.sessionId],
+      )
+      expect(rows[0].count).toBe('0')
+
+      // And the owner can still answer the question that was in play.
+      const ids = await questionIds(s.sessionId)
+      const truth = testBank().questions.find((x) => x.id === ids[q.questionIndex])!.answerIndex
+      await expect(
+        svc.submitAnswer(s.sessionId, q.questionIndex, truth, gate.dropId, PLAYER),
+      ).resolves.toMatchObject({ state: 'in_progress' })
+    })
+
+    it('reports the wrong wallet exactly as it reports an unknown id', async () => {
+      const svc = service()
+      const s = await svc.startOrResume(await gateFor(), PLAYER)
+      const absent = '00000000-0000-4000-8000-000000000000'
+
+      const code = async (run: () => Promise<unknown>) => {
+        try {
+          await run()
+        } catch (err) {
+          return err instanceof GateRejectedError ? err.code : `unexpected: ${String(err)}`
+        }
+        return 'resolved'
+      }
+
+      expect(await code(() => svc.currentQuestion(s.sessionId, undefined, STRANGER))).toBe(
+        await code(() => svc.currentQuestion(absent, undefined, PLAYER)),
+      )
+      expect(await code(() => svc.submitAnswer(s.sessionId, 0, 0, undefined, STRANGER))).toBe(
+        await code(() => svc.submitAnswer(absent, 0, 0, undefined, PLAYER)),
+      )
+    })
+
+    it('lets the owner through, and still works when no wallet is named at all', async () => {
+      // `expectWallet` is optional, so the internal callers that have no wallet to
+      // hand keep their behaviour. The HTTP layer always passes one.
+      const svc = service()
+      const gate = await gateFor()
+      const s = await svc.startOrResume(gate, PLAYER)
+      await expect(
+        svc.currentQuestion(s.sessionId, gate.dropId, PLAYER),
+      ).resolves.toMatchObject({ questionIndex: 0 })
+      await expect(svc.currentQuestion(s.sessionId, gate.dropId)).resolves.toMatchObject({
+        questionIndex: 0,
+      })
+    })
+
+    it('matches the owner however their address is spelled', async () => {
+      // A real, checksum-valid address, stored canonically by the HTTP layer but
+      // presented here spaced and lowercased. Locking a player out of their own
+      // session over whitespace would be a worse bug than the one this closes.
+      const canonical = 'NQ55039X60U7RJXX8SFGNGQHVLBLVJS3NQ4M'
+      const svc = service()
+      const gate = await gateFor()
+      const s = await svc.startOrResume(gate, canonical)
+      for (const spelling of [
+        canonical,
+        canonical.toLowerCase(),
+        'NQ55 039X 60U7 RJXX 8SFG NGQH VLBL VJS3 NQ4M',
+        'nq55 039x 60u7 rjxx 8sfg ngqh vlbl vjs3 nq4m',
+      ]) {
+        await expect(
+          svc.currentQuestion(s.sessionId, gate.dropId, spelling),
+          spelling,
+        ).resolves.toMatchObject({ questionIndex: 0 })
+      }
+      // A different real address is still a different wallet.
+      await expect(
+        svc.currentQuestion(s.sessionId, gate.dropId, 'NQ97 EGUS 3JPF ELP3 TR5N 0L6E 4Y4Y GGX4 540G'),
+      ).rejects.toThrow(/session_not_found/)
+    })
+  })
+
   // Spec §4.6: Novice and Easy are always open; Medium needs a pass at Easy or
   // above on ANY drop; Hard needs Medium. That is the entire level system — no
   // points, no streaks, no randomness.

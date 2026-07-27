@@ -83,7 +83,7 @@ export function useTriviaSession(publicId: string, walletAddress: string): Trivi
       const started = await startTriviaSession(publicId, walletAddress)
       sessionId.current = started.sessionId
       setQuestionCount(started.questionCount)
-      setQuestion(await getTriviaQuestion(publicId, started.sessionId))
+      setQuestion(await getTriviaQuestion(publicId, started.sessionId, walletAddress))
       setPhase('playing')
     } catch (err) {
       setError((err as Error).message)
@@ -97,11 +97,17 @@ export function useTriviaSession(publicId: string, walletAddress: string): Trivi
       if (!id || !current) return
       setError(null)
       try {
-        const outcome = await submitTriviaAnswer(publicId, id, current.questionIndex, answerIndex)
+        const outcome = await submitTriviaAnswer(
+          publicId,
+          id,
+          current.questionIndex,
+          answerIndex,
+          walletAddress,
+        )
         setAnswered(outcome.answered)
         setQuestionCount(outcome.questionCount)
         if (outcome.state === 'in_progress') {
-          setQuestion(await getTriviaQuestion(publicId, id))
+          setQuestion(await getTriviaQuestion(publicId, id, walletAddress))
           return
         }
         // Set BEFORE the phase, so the render that first shows an outcome
