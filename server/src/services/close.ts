@@ -215,12 +215,24 @@ function parseCloseChallenge(message: string, publicId: string): Challenge {
   } catch {
     throw new CloseRejectedError('message_mismatch', 'challenge message is not valid')
   }
-  const mismatch =
-    buildChallengeMessage(parsed) !== message ||
-    parsed.drop !== publicId ||
-    parsed.action !== 'close' ||
-    parsed.aud !== requireAudience() ||
-    parsed.net !== requireNetwork()
+  let mismatch: boolean
+  try {
+    mismatch =
+      buildChallengeMessage(parsed) !== message ||
+      parsed.drop !== publicId ||
+      parsed.action !== 'close' ||
+      parsed.aud !== requireAudience() ||
+      parsed.net !== requireNetwork()
+  } catch (err) {
+    // `buildChallengeMessage` refuses to serialise a challenge it could not
+    // have issued — an unknown version, an unknown action, a non-integer
+    // timestamp. That is a stored row this server did not write, which is a
+    // refusal and not a server fault, so it must not surface as a 500.
+    if (err instanceof ChallengeError) {
+      throw new CloseRejectedError('message_mismatch', 'challenge message is not valid')
+    }
+    throw err
+  }
   if (mismatch) {
     throw new CloseRejectedError('message_mismatch', 'challenge message is not valid for this close')
   }

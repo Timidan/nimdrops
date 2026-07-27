@@ -566,6 +566,20 @@ describe.skipIf(!hasDb)('sponsor-initiated early close (real Postgres)', () => {
     expect(await readRefunds(publicId)).toHaveLength(1)
   })
 
+  it('refuses a stored challenge this server could not have issued', async () => {
+    const { publicId, sponsor } = await liveDrop()
+    const signed = await signClose(publicId, sponsor)
+    // A row rewritten to carry an action no verifier knows. It is a refusal,
+    // not a server fault: nothing here may reach the client as a 500.
+    await pool.query(
+      `UPDATE wallet_challenges SET canonical_message = replace(canonical_message, '"close"', '"transfer"')
+       WHERE id = $1`,
+      [signed.challengeId],
+    )
+    await expect(sendClose(publicId, signed)).rejects.toMatchObject({ code: 'message_mismatch' })
+    expect((await readDrop(publicId)).state).toBe('live')
+  })
+
   it('refuses an expired challenge even with a good signature', async () => {
     const { publicId, sponsor } = await liveDrop()
     const signed = await signClose(publicId, sponsor)
