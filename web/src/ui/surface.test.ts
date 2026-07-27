@@ -161,8 +161,15 @@ describe('the field costs what it says it costs', () => {
    * times a second and re-reading a moved layer.
    */
   it('drifts on transform only, so nothing is re-rasterised per frame', () => {
-    const drifts = css.match(/@keyframes\s+nd-drift-\d\s*\{(?:[^{}]|\{[^{}]*\})*\}/g) ?? []
-    expect(drifts.length).toBe(3)
+    // One bloom, not three lights. Measured: blur is nearly free but drift is
+    // not — a static field with glass holds ~60fps at 6x CPU throttle while a
+    // drifting one falls to ~29fps. Three animated layers cost roughly three
+    // times as much as one, and the reference this palette came from is lit by
+    // a single source anyway, so consolidating buys back frames AND is what the
+    // design wanted. The rule this test defends is unchanged: whatever drifts,
+    // drifts on the compositor.
+    const drifts = css.match(/@keyframes\s+nd-drift\s*\{(?:[^{}]|\{[^{}]*\})*\}/g) ?? []
+    expect(drifts.length).toBe(1)
 
     for (const frames of drifts) {
       const declarations = [...frames.matchAll(/([a-z-]+)\s*:/g)].map((m) => m[1])
@@ -190,12 +197,17 @@ describe('the field costs what it says it costs', () => {
     expect(block('.nd-glass')).toMatch(/max-width:\s*var\(--nd-sheet-w\)/)
   })
 
-  /** `will-change` on many elements is worse than none. Three, and only three. */
-  it('promotes only the three lights', () => {
+  /**
+   * `will-change` on many elements is worse than none: each one is a promise to
+   * the compositor to hold a layer. Only the thing that actually moves gets it,
+   * which is now the bloom alone — the counter-light is static and must not be
+   * promoted just because it is a sibling.
+   */
+  it('promotes only the light that actually moves', () => {
     const hits = [...css.matchAll(/([^{}]*)\{[^{}]*will-change:/g)].map((m) =>
       m[1].trim().split('\n').pop()!.trim(),
     )
-    expect(hits).toEqual(['.nd-field-light'])
+    expect(hits).toEqual(['.nd-field-light.is-bloom'])
   })
 
   /** Cost nobody can see is cost worth removing. */
@@ -220,6 +232,67 @@ describe('the field costs what it says it costs', () => {
       expect(rule).toMatch(/background-color:\s*var\(--color-sheet\)/)
       expect(rule).toMatch(/backdrop-filter:\s*none/)
     }
+  })
+})
+
+/**
+ * The layer stack `surface.contrast.test.ts` computes its floors against.
+ *
+ * That file gives two pieces of secondary copy credit for sitting on a scrim,
+ * and it composites a fully lit grain pixel onto everything. Both are claims
+ * about what the field is physically made of, so both are checked here rather
+ * than assumed there. If the stack changes and these fail, the contrast model
+ * is wrong before any ratio is.
+ */
+describe('the field is stacked the way the contrast model says it is', () => {
+  /**
+   * The scrim has to hold FULL strength across the bands the masthead and the
+   * custody line sit in, not peak at the very edge and immediately fade.
+   * Furniture sits a few percent in from the edge, so a scrim that is already
+   * half gone by then protects nothing — and the contrast model would be
+   * claiming protection that is not there.
+   */
+  it('holds each scrim band at full strength to a real depth', () => {
+    const stops = block('.nd-field-scrim').match(/var\(--nd-scrim-[\w-]+\)\s+\d+%/g) ?? []
+    const at = (token: string) =>
+      stops
+        .filter((s) => s.startsWith(`var(--nd-scrim-${token})`))
+        .map((s) => Number(s.match(/(\d+)%/)![1]))
+
+    // Each band is declared twice, at 0%/10% and at 90%/100%, so it is a held
+    // plateau rather than a point.
+    expect(at('top')).toEqual([0, 10])
+    expect(at('bottom')).toEqual([90, 100])
+    expect(at('clear').length).toBeGreaterThan(0)
+  })
+
+  /**
+   * The grain is the last layer under the content, above both the lights and
+   * the scrim. That ORDER is what makes it part of every floor: it lifts the
+   * scrimmed bands too, not only the bare field. Same z-index as the scrim, so
+   * the order is decided by paint order in `Field.tsx`.
+   */
+  it('paints the grain above the scrim and below the content', () => {
+    for (const selector of ['.nd-field-scrim', '.nd-field-texture']) {
+      expect(block(selector)).toMatch(/z-index:\s*var\(--nd-z-texture\)/)
+    }
+
+    const field = readFileSync(resolve(process.cwd(), 'src/ui/Field.tsx'), 'utf8')
+    expect(field.indexOf('nd-field-scrim')).toBeLessThan(field.indexOf('nd-field-texture'))
+    expect(field.indexOf('nd-field-texture')).toBeLessThan(field.indexOf('nd-field-inner'))
+  })
+
+  /**
+   * The dither is not optional. It is the difference between a 100vmax gradient
+   * that looks printed and one that rings on an 8-bit phone panel, and it is
+   * also the layer that costs four points of bloom opacity. Deleting it to buy
+   * that contrast back would be a real decision; it should not be reachable by
+   * accident.
+   */
+  it('keeps the grain on, at an opacity the contrast model can read', () => {
+    expect(block('.nd-field-texture')).toMatch(/opacity:\s*var\(--nd-grain-o\)/)
+    expect(block('.nd-field-texture')).toContain('feTurbulence')
+    expect(Number(owned.match(/--nd-grain-o:\s*([\d.]+);/)![1])).toBeGreaterThan(0)
   })
 })
 
@@ -308,10 +381,23 @@ describe('prefers-reduced-motion', () => {
   })
 
   /** The field keeps its colour. Only the movement goes. */
-  it('lands the lights on a composed position rather than deleting them', () => {
-    for (const light of ['is-1', 'is-2', 'is-3']) {
-      expect(reduced).toMatch(new RegExp(`\\.nd-field-light\\.${light}\\s*\\{[^}]*transform:`))
-    }
+  /**
+   * Reduced motion must not mean a bare field. The bloom stops moving and holds
+   * a *chosen* position, rather than freezing wherever its `from` frame happens
+   * to sit — the difference between a composed still and an accident.
+   *
+   * The composed position is carried by `:root[data-nd-motion='off']` rather
+   * than by the media block, because the same switch also serves the runtime
+   * performance guard, which has to be able to stop the drift on a weak device
+   * whose owner has expressed no motion preference at all. The media query is
+   * still the thing that honours the preference: it crushes every duration to
+   * 0.01ms, asserted above, so the drift is already dead by the time this
+   * position applies. Both paths land on the same frame.
+   */
+  it('lands the bloom on a composed position rather than deleting it', () => {
+    expect(css).toMatch(
+      /:root\[data-nd-motion='off'\]\s+\.nd-field-light\.is-bloom\s*\{[^}]*transform:/,
+    )
     expect(reduced).not.toMatch(/\.nd-field-light[^{]*\{[^}]*display:\s*none/)
   })
 

@@ -6,8 +6,13 @@ import { useEffect, useRef, type ReactNode } from 'react'
  * Direction C's thesis in one component. A NimDrop is a live surface — while
  * you are reading it, other people are taking shares out of it — and the field
  * is where that liveness lives. It is a backdrop with a job, not decoration:
- * the drift says the drop is still moving, the warm cast says you claimed, and
- * the quiet tone says nothing here is going to be opened.
+ * the drift says the drop is still moving, the hotter cast says you claimed,
+ * and the quiet tone says nothing here is going to be opened.
+ *
+ * The field is one vermilion bloom over warm near-black, plus a static
+ * counter-light that stops the bloom being a circle on a rectangle. It was
+ * three drifting lights; consolidating to one moving layer is where the frame
+ * budget below comes from.
  *
  * Composition, not configuration. The claim screen, the create flow, the
  * landing page and the trivia session all put a `GlassSheet` in `children` and
@@ -31,8 +36,11 @@ import { useEffect, useRef, type ReactNode } from 'react'
  * The field is the moving half of the `backdrop-filter` risk, so it owns three
  * of the four mitigations:
  *
- *   - the lights move on `transform` only, so nothing is re-rasterised per
- *     frame (`index.css`, `.nd-field-light`);
+ *   - exactly ONE layer moves, and it moves on `transform` only, so nothing is
+ *     re-rasterised per frame (`index.css`, `.nd-field-light.is-bloom`). The
+ *     card's blurred region re-reads its backdrop once per moving layer, so
+ *     this is the number that sets the frame cost — not the size of the
+ *     gradient and not the blur radius;
  *   - the drift pauses when the document is hidden or the field is off screen,
  *     via `data-awake`;
  *   - it does not blur anything. Exactly one element in the tree is ever
@@ -43,10 +51,10 @@ import { useEffect, useRef, type ReactNode } from 'react'
  */
 export interface FieldProps {
   /**
-   * `live` while something can still happen. `warm` after a claim: the gold
-   * light comes up and stays up, so the screen remembers. `quiet` for the dead
-   * ends — ended, all claimed, paused — where the field should not promise
-   * anything.
+   * `live` while something can still happen. `warm` after a claim: the bloom
+   * comes up and stays up, so the screen remembers. `quiet` for the dead
+   * ends — ended, all claimed, paused — where the bloom falls back to a
+   * quarter strength and the field stops promising anything.
    */
   tone?: 'live' | 'warm' | 'quiet'
   /**
@@ -111,9 +119,8 @@ export default function Field({
 
   return (
     <div ref={root} className="nd-field" data-tone={tone} data-awake="true">
-      <span className="nd-field-light is-1" aria-hidden="true" />
-      <span className="nd-field-light is-2" aria-hidden="true" />
-      <span className="nd-field-light is-3" aria-hidden="true" />
+      <span className="nd-field-light is-bloom" aria-hidden="true" />
+      <span className="nd-field-light is-counter" aria-hidden="true" />
       <span className="nd-field-scrim" aria-hidden="true" />
       <span className="nd-field-texture" aria-hidden="true" />
 

@@ -16,8 +16,10 @@ import type { ReactNode } from 'react'
  *     not of whatever the field happens to be doing at that instant.
  *   - `prefers-reduced-transparency` swaps the glass for a solid surface
  *     outright, and so does `ui/surface.ts` on a device that cannot pay for it.
- *   - `blur(16px) saturate(160%)`. Saturation is what stops frosted glass
- *     reading as grey plastic.
+ *   - `blur(18px) saturate(120%)`. Saturation is what stops frosted glass
+ *     reading as grey plastic over a GREY backdrop; over a vermilion one it
+ *     runs the backdrop out of gamut instead, so 120% is a computed ceiling,
+ *     not a preference. `index.css` has the arithmetic on `--nd-saturate`.
  *
  * All of that lives in `index.css` under `.nd-glass`, because it is material
  * rather than behaviour. This component is deliberately almost nothing: a

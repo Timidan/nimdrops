@@ -67,9 +67,10 @@
  * FIELD — the NimDrops design system
  * ===========================================================================
  *
- * The drop is a live surface. One sheet of glass over something that is still
- * changing while you read it. Direction C, approved 2026-07-27, specified in
- * `docs/design/direction-options.md`.
+ * The drop is a live surface. One dark, translucent card over something that is
+ * still changing while you read it, lit by a single vermilion bloom. Direction
+ * C, approved 2026-07-27, specified in `docs/design/direction-options.md`;
+ * retuned to the owner's approved palette 2026-07-27.
  *
  * Three rules the whole system is built to keep, in priority order:
  *
@@ -84,59 +85,80 @@
  *   2. THE BLUR IS BUDGETED. `backdrop-filter` over a MOVING backdrop is the
  *      expensive case: the blurred region is recomposited whenever what is
  *      behind it changes, and this runs inside somebody's wallet WebView on
- *      possibly a low-end Android. Four mitigations are built in rather than
- *      hoped for: the lights move on `transform` only so nothing re-rasterises;
- *      exactly one bounded element is ever blurred, never the page; the drift
- *      pauses when the field is off screen or the document is hidden; and
- *      `ui/surface.ts` degrades the whole thing to a solid sheet with static
- *      lights on a coarse pointer with low memory or few cores.
+ *      possibly a low-end Android. Blur itself is nearly free; DRIFT is what
+ *      costs, so the bill is proportional to how many layers move. This palette
+ *      moves ONE. Four mitigations are built in rather than hoped for: the
+ *      bloom moves on `transform` only so nothing re-rasterises; exactly one
+ *      bounded element is ever blurred, never the page; the drift pauses when
+ *      the field is off screen or the document is hidden; and `ui/surface.ts`
+ *      degrades to a solid card with a static bloom on a coarse pointer with
+ *      low memory or few cores.
  *
  *   3. CONTRAST IS COMPUTED, NEVER EYEBALLED. The field moves, so no ratio here
  *      was measured off a screenshot. `--nd-field-max` below is the brightest
  *      pixel the field can physically reach — the base gradient's lightest stop
- *      with all three lights stacked on it at their post-claim peak — and every
- *      foreground is checked against that worst case, composited through the
- *      sheet's `saturate()` and barrier fill. `ui/surface.contrast.test.ts`
- *      recomputes all of it from the tokens below and fails the build if a
- *      value drifts.
+ *      with the counter-light, the bloom's core at its post-claim peak, and a
+ *      fully lit grain pixel on top of all of it — and every foreground is
+ *      checked against that worst case, composited through the card's
+ *      `saturate()` and barrier fill, on ALL THREE card paths rather than only
+ *      the glass one. `ui/surface.contrast.test.ts` recomputes it from the
+ *      tokens below and fails the build if a value drifts.
+ *
+ *      A vermilion bloom bright enough to read as a light source is far too
+ *      bright to carry 60%-alpha text. That is not a token that needs nudging;
+ *      it is arithmetic, and it decides the composition: SECONDARY TEXT NEVER
+ *      SITS UNPROTECTED ON THE FIELD. The two places it does sit on the field —
+ *      the masthead strapline and the custody line — are the first and last
+ *      elements in the field's own flow, and the scrim holds full strength
+ *      across those bands. The scrim is therefore load-bearing now, not just
+ *      composition, and the contrast test computes those two floors against the
+ *      scrimmed field and says so. Full-strength text on the field (the
+ *      countdown, the share count) is still held to the UNSCRIMMED worst case,
+ *      because on a phone it sits mid-screen where there is no scrim.
  */
 
 @theme {
   /**
-   * Nimiq's own palette, read from `nimiq-style/src/theme.css`. This is the
-   * host wallet's identity, not a mood board: the field's radial is Nimiq's
-   * `--nimiq-blue-bg` and the action colour is Nimiq gold.
+   * `--color-ink` is Nimiq's own, read from `nimiq-style/src/theme.css`. It
+   * dresses the create flow's paper and nothing on the claim surface.
    */
   --color-ink: #1f2348;
+  /**
+   * Nimiq gold. It is the CURRENCY MARK's colour and, by default, nothing
+   * else's — see the note on `--nd-accent` for why one hue had to give way.
+   */
   --color-gold: #e9b213;
   /**
-   * Deep gold, for gold-coloured text and focus rings on a light surface.
-   * Was `#c8960b`, which is 2.43:1 on the plate and failed both the 4.5:1 text
-   * floor and the 3:1 non-text floor. `#7c5b04` is 5.67:1 on the plate and
-   * 5.11:1 on the `gold/18` pill wash.
+   * Deep gold, for gold-coloured text and focus rings on a LIGHT surface. The
+   * only light surface left is the create flow's paper, which is the one place
+   * this is still used: `#7c5b04` is 5.67:1 there, where `#e9b213` is 2.43:1
+   * and fails both the 4.5:1 text floor and the 3:1 non-text floor.
    */
   --color-gold-deep: #7c5b04;
 
   /**
-   * The solid neutral. Chroma is near zero and what remains leans very slightly
-   * cool.
+   * The near-white. Warm, and deliberately so: it is the paper colour of a red
+   * packet, it is the amount's colour, and on a vermilion field a cool white
+   * reads as a screen artefact rather than as stock.
    *
-   * That lean used to be justified as agreeing with the field's violet. The
-   * field is warm neutral now, and the plate deliberately does NOT follow it:
-   * `#fbf9f4` — the warm near-white this token replaced — sits in the band
-   * `PRODUCT.md` names as an anti-reference, and the old token name `--paper` is
-   * on the same list. So the reasoning inverts rather than disappears. Warmth in
-   * this brand is carried by the gold light and by the reveal, never by a tinted
-   * off-white background, and a cool-neutral plate is what keeps the gold
-   * reading as gold instead of as a slightly darker version of its backdrop.
+   * This replaces a chroma-0 `#f4f3f7` whose whole justification was that a
+   * cool plate keeps gold reading as gold against a warm-neutral field. Gold is
+   * no longer the field's neighbour — it appears once, on a dark card — so that
+   * argument has expired. What has NOT expired is the anti-reference: `#fbf9f4`
+   * and the token name `--paper` are both on `PRODUCT.md`'s list, and `#f5f0ee`
+   * is a different colour, a neutral-warm near-white rather than the creamy
+   * off-white that band names.
    */
+  --color-chalk: #f5f0ee;
+  /** Text on chalk: the action label, the settled pill. 16.64:1. */
+  --color-chalk-ink: #17100e;
+
+  /** The create flow's paper. Legacy; goes when that flow is redesigned. */
   --color-plate: #f4f3f7;
-  /** Text on the plate, and on the gold action. 16.09:1 and 9.18:1. */
-  --color-plate-ink: #181430;
-  /** The field's darkest base, before the radial and the lights. */
-  --color-field: #14112b;
-  /** What the glass sheet becomes when it cannot be glass. */
-  --color-sheet: #1c1930;
+  /** The field's darkest base, before the radial and the bloom. */
+  --color-field: #0e0a09;
+  /** What the glass card becomes when it cannot be glass. */
+  --color-sheet: #19110f;
 
   /**
    * DEPRECATED, and load-bearing until the create flow is redesigned.
@@ -160,31 +182,44 @@
 :root {
   /* ---- the field ---------------------------------------------------------
    *
-   * A warm neutral, and gold is the only hue on the screen.
+   * Warm near-black, and vermilion is the only hue on the screen.
    *
-   * This used to be Nimiq's own signature background — `radial-gradient(100%
-   * 100% at bottom right, #260133, var(--nimiq-blue))` — pushed a step darker.
-   * Borrowing the host wallet's token was defensible and it is gone on purpose:
-   * the violet-into-blue field put two hues on screen competing with the gold,
-   * and the one thing this product needs a claimant to look at is an amount.
+   * The base is a warm near-black rather than a neutral charcoal, and the
+   * difference is the whole point: a neutral charcoal under a red light reads
+   * as a grey screen with a red light ON it, while a warm base reads as one
+   * material that the light is part of. `#16100e` into `#0e0a09` is about six
+   * points of red over blue at the light end — invisible as a colour, decisive
+   * as a substrate.
    *
-   * What replaces it is charcoal into warm black. No violet, no blue. The warmth
-   * is very slight — enough that the gold reads as belonging to the surface
-   * rather than sitting on top of a cold one, not enough to be a colour in its
-   * own right. The bottom-right anchor stays, because it is what keeps this off
-   * the 135deg two-hue diagonal that every generated landing page uses.
+   * The bottom-right anchor stays, and the reason it stays is unchanged: it is
+   * what keeps this off the 135deg corner-to-corner diagonal that every
+   * generated landing page uses. It now does a second job, which is to agree
+   * with where the bloom sits, so the base darkens away from the light instead
+   * of arguing with it.
    */
-  --nd-field-image: radial-gradient(120% 120% at bottom right, #221c17 0%, #191510 52%, #100e0c 100%);
+  --nd-field-image: radial-gradient(130% 120% at bottom right, #16100e 0%, #120c0b 46%, #0e0a09 100%);
   /** The lightest stop of the image above. Every contrast floor starts here. */
-  --nd-field-base-max: #221c17;
+  --nd-field-base-max: #16100e;
 
   /**
-   * Three lights: two neutral lifts and gold.
+   * ONE bloom, and a counter-light behind it.
    *
-   * Lights 1 and 2 were light blue and purple, from Nimiq's palette. They are
-   * now near-neutral warm greys — they still shape the field, they no longer
-   * tint it. Gold is untouched and is the only light carrying a hue, which is
-   * the whole point of the change: one accent, and it means something.
+   * This replaces three drifting lights — two neutral lifts and gold — and the
+   * replacement is a performance decision as much as a visual one. Blur is
+   * nearly free on this surface; DRIFT is what costs, because a moving layer
+   * makes the card's blurred region re-read a changed backdrop. Three moving
+   * layers measured ~29fps at 6x CPU throttle. One moves here.
+   *
+   * The bloom is six stops, not two, and that is not decoration. A two-stop
+   * wash from vermilion to black is a gradient; a fall-off that passes through
+   * a deep oxblood on the way down is a light source, because that is what the
+   * inverse-square of a real bloom looks like once the bright core has clipped.
+   * The stops are front-loaded — most of the alpha is spent in the first 40% of
+   * the radius — so the core stays a core rather than smearing into a haze.
+   *
+   * The counter-light is a dim oxblood pool with no drift at all. It exists so
+   * the field is not one perfect circle on a rectangle, and it costs nothing
+   * per frame because a static layer is composited once.
    *
    * Each is declared as a literal `rgb(… / α)` rather than assembled from a hex
    * with relative colour syntax. `rgb(from …)` is Chrome 119 / Safari 16.4 and
@@ -193,88 +228,169 @@
    * apart because `surface.contrast.test.ts` multiplies them to derive the
    * brightest pixel the field can reach.
    */
-  --nd-light-1-fill: rgb(122 112 100 / 0.34);
-  --nd-light-1-fade: rgb(122 112 100 / 0);
-  --nd-light-1-o: 0.38;
-  --nd-light-2-fill: rgb(96 84 72 / 0.4);
-  --nd-light-2-fade: rgb(96 84 72 / 0);
-  --nd-light-2-o: 0.3;
-  --nd-light-3-fill: rgb(233 178 19 / 0.5);
-  --nd-light-3-fade: rgb(233 178 19 / 0);
-  --nd-light-3-o: 0.3;
-  /** The warmer cast the field keeps after a claim. The screen remembers. */
-  --nd-light-3-o-warm: 0.44;
-
+  --nd-bloom-core: rgb(255 77 20 / 0.9);
+  --nd-bloom-hot: rgb(236 66 16 / 0.72);
+  --nd-bloom-mid: rgb(190 48 12 / 0.44);
+  --nd-bloom-deep: rgb(148 36 10 / 0.24);
+  --nd-bloom-edge: rgb(122 29 8 / 0.1);
+  --nd-bloom-fade: rgb(122 29 8 / 0);
+  --nd-bloom-o: 0.66;
   /**
-   * The brightest pixel the field can reach: `--nd-field-base-max` with all
-   * three lights stacked at their peak, gold at its post-claim value. Derived,
-   * not chosen — the test recomputes it from the eight tokens above and fails
-   * if this constant no longer matches.
+   * The hotter cast the field keeps after a claim. The screen remembers.
    *
-   * Warmer and lighter than the `#515456` it replaces, because gold is now the
-   * only light with a hue and there is no blue left to pull the mix back toward
-   * neutral. Every contrast floor in `surface.contrast.test.ts` is computed
-   * against this value and all of them still hold.
+   * 0.74, and the missing 0.04 is the grain's. This is the field's single
+   * brightest state, so it is the one the countdown's floor is computed at, and
+   * the grain sits ON TOP of the bloom: a near-white noise pixel at
+   * `--nd-grain-o` lifts the composite before any text is drawn on it. At 0.78
+   * near-white on the field lands at 4.43:1, under the 4.5 the countdown is
+   * held to whatever its size. This is the token that gave way, because the
+   * alternative was either dropping the grain — which bands — or relaxing a
+   * money floor. Four points of opacity on one state is the cheapest thing on
+   * the page to spend.
    */
-  --nd-field-max: #5b4a22;
+  --nd-bloom-o-warm: 0.74;
+  /** Dead ends. The light is still there; it has stopped promising anything. */
+  --nd-bloom-o-quiet: 0.24;
+
+  --nd-counter-fill: rgb(122 29 8 / 0.5);
+  --nd-counter-fade: rgb(122 29 8 / 0);
+  --nd-counter-o: 0.4;
 
   /**
-   * A scrim over the lights and under the content, in the two bands where the
-   * poster furniture sits. It is composition first — a poster wants its edges
-   * weighted — and contrast headroom second. The furniture clears 4.5:1 on the
-   * unscrimmed worst case anyway; this buys back the margin the drift eats.
+   * The grain's opacity, held as a token because it is not decoration: the
+   * grain is the LAST layer under the content, so it is part of every contrast
+   * floor computed against the field, and `surface.contrast.test.ts` reads it
+   * from here. See `.nd-field-texture` for why it has to exist at all.
    */
-  --nd-scrim-top: rgb(11 9 26 / 0.48);
-  --nd-scrim-bottom: rgb(11 9 26 / 0.55);
-  --nd-scrim-clear: rgb(11 9 26 / 0);
+  --nd-grain-o: 0.05;
 
-  /* ---- the sheet ---------------------------------------------------------
+  /**
+   * The brightest pixel the field can reach: `--nd-field-base-max`, the
+   * counter-light, the bloom's core at its post-claim peak, then a fully lit
+   * grain pixel on top. Derived, not chosen — the test recomputes it from the
+   * tokens above and fails if this constant no longer matches.
+   *
+   * It moved a long way. The greys it replaces topped out at `#5b4a22`, a dim
+   * olive; this is a lit vermilion, and it is the single value that forced
+   * every other decision on this page. Near-white on it is 4.70:1, which clears
+   * the countdown's floor. Nimiq gold on it is 2.74:1, which does NOT clear the
+   * 3:1 non-text floor — that number is why the gold hexagon lives on the card
+   * and never on the field.
+   */
+  --nd-field-max: #bb431d;
+
+  /**
+   * A scrim over the bloom and under the content, in the two bands where the
+   * poster furniture sits.
+   *
+   * This used to be composition first and contrast headroom second. The order
+   * has swapped and the tokens with it: at this field brightness, secondary
+   * text on the bare field cannot reach 4.5:1 at ANY alpha short of solid, so
+   * the scrim is what makes the masthead strapline and the custody line legal
+   * rather than what gives them margin. Warm-black now, matching the base
+   * instead of the cool navy the violet field wanted, and both bands hold full
+   * strength to a fixed depth rather than starting to fade at the very edge —
+   * furniture sits a few percent in from the edge, not on it.
+   */
+  --nd-scrim-top: rgb(10 6 5 / 0.62);
+  --nd-scrim-bottom: rgb(10 6 5 / 0.7);
+  --nd-scrim-clear: rgb(10 6 5 / 0);
+
+  /* ---- the card ----------------------------------------------------------
    *
    * The barrier fill goes under the blur, so text contrast is a property of
-   * the sheet rather than of whatever happens to be behind it at that instant.
+   * the card rather than of whatever happens to be behind it at that instant.
    * A moving backdrop is exactly the case where "check it against the
    * screenshot" is wrong. `-bottom` is the thinner end, and it is the one every
    * contrast floor is computed against.
    *
+   * Around 55% alpha, which is thin enough that the bloom is visibly PRESENT
+   * through the card — you can see the light change across its width — rather
+   * than the card being a flat dark fill that pretends. Warm-black rather than
+   * the cool navy the violet field used, because a cool card over a red bloom
+   * turns the composite mauve.
+   *
    * `-flat` is what a renderer with no `backdrop-filter` gets: nearly opaque,
-   * so the sheet is a surface rather than a wash. Its composite is within a
+   * so the card is a surface rather than a wash. Its composite is within a
    * hair of `--color-sheet`, which is what Reduce Transparency swaps in, so all
    * three paths land on the same reading.
    */
-  --nd-barrier-glass-top: rgb(20 15 42 / 0.58);
-  --nd-barrier-glass-bottom: rgb(20 15 42 / 0.46);
-  --nd-barrier-flat-top: rgb(20 15 42 / 0.9);
-  --nd-barrier-flat-bottom: rgb(20 15 42 / 0.84);
-  --nd-blur: 16px;
-  /* Saturation is what stops frosted glass reading as grey plastic. */
-  --nd-saturate: 160%;
+  --nd-barrier-glass-top: rgb(30 20 18 / 0.6);
+  --nd-barrier-glass-bottom: rgb(26 17 15 / 0.52);
+  --nd-barrier-flat-top: rgb(30 20 18 / 0.94);
+  --nd-barrier-flat-bottom: rgb(26 17 15 / 0.9);
+  --nd-blur: 18px;
+  /**
+   * Saturation is what stops frosted glass reading as grey plastic — over a
+   * GREY backdrop. Over this one it does the opposite. Pushing the field's
+   * brightest pixel through the filter: 120% takes `#bb431d` to `#cf3f11`,
+   * 160% takes it to `#f63600` with the blue channel clipped flat to zero, and
+   * the glass over it goes fluorescent. That is not only a look. Secondary copy
+   * on the card's thin end is 4.73:1 at 120% and 4.30:1 at 160%, so the higher
+   * value does not merely cost margin, it fails the floor. 120% is the most
+   * this backdrop will take, and it is a computed limit rather than a taste.
+   */
+  --nd-saturate: 120%;
 
   /* ---- ink roles ---------------------------------------------------------
    * Computed against the worst case, never against a screenshot. The figures
    * in each comment are the ratios `surface.contrast.test.ts` asserts.
    */
-  /** On the sheet: 13.25:1. On the field: 6.92:1. */
-  --nd-on-surface: #f4f3f7;
-  /** Secondary body copy. On the sheet: 8.28:1. On the field: 5.13:1. */
-  --nd-on-surface-muted: rgb(244 243 247 / 0.76);
+  /** On the card: 9.30:1. On the bare field: 4.70:1. */
+  --nd-on-surface: #f5f0ee;
+  /**
+   * Secondary body copy. On the card: 4.73:1. In the top scrim band: 5.50:1.
+   *
+   * 64%, not the 60% the palette suggested. The card is thin and the field
+   * behind it is bright, and 60% lands at 4.43:1 on the card's thin end — under
+   * the floor. This is the token that moved to make the colour work, which is
+   * the correct thing to move: the alternative was thickening the card until
+   * the bloom stopped showing through it, which would have deleted the point.
+   */
+  --nd-on-surface-muted: rgb(245 240 238 / 0.64);
   /** Hairlines and dividers. Not text; not a state carrier. */
-  --nd-rule: rgb(244 243 247 / 0.16);
-  --nd-rule-strong: rgb(244 243 247 / 0.3);
-  /** On the plate: 16.09:1 and 7.76:1. */
-  --nd-on-plate: #181430;
-  --nd-on-plate-muted: rgb(24 20 48 / 0.76);
+  --nd-rule: rgb(245 240 238 / 0.1);
+  --nd-rule-strong: rgb(245 240 238 / 0.28);
 
-  /* ---- action ------------------------------------------------------------ */
-  --nd-action: var(--color-gold);
-  --nd-on-action: var(--color-plate-ink);
-  --nd-focus: var(--color-gold);
+  /* ---- accent, and the one collision this palette has --------------------
+   *
+   * Nimiq gold `#e9b213` and vermilion `#ff4d14` are 30 degrees apart. On a
+   * field of the second, the first stops being gold and becomes a lighter
+   * patch of the background: 2.80:1 on the field's brightest pixel, under even
+   * the 3:1 non-text floor.
+   *
+   * The resolution shipped is the thematically stronger one and it is also the
+   * cheaper one: gold appears EXACTLY ONCE, on the NIM currency mark, which
+   * sits in the amount's dark well where it is 7.22:1 and reads as foil on
+   * lacquer. That is the red-packet-and-gold-leaf pairing this product is named
+   * after. Every other job gold used to do — the action, the focus ring, the
+   * share marks — goes to near-white, which is louder on this field than gold
+   * ever was.
+   *
+   * `[data-nd-accent='bright']` is the alternative the owner asked to see
+   * built: keep one accent doing every job, and push it to `#ffce45` so it
+   * separates from vermilion by lightness instead of by hue. It is a decision
+   * switch, not a theme, and it goes when the owner picks. See
+   * `docs/design/palette/` for both captured.
+   */
+  --nd-accent: var(--color-gold);
+  --nd-action: var(--color-chalk);
+  --nd-on-action: var(--color-chalk-ink);
+  --nd-focus: var(--color-chalk);
+  /** The share marks, and anything else counting a fact on the bare field. */
+  --nd-mark: var(--color-chalk);
+  /** Live, hot, warning. On a dark card only: a hard edge, never a bloom. */
+  --nd-hot: #ff4d14;
 
-  /* ---- geometry ---------------------------------------------------------- */
-  /** The sheet's true size. It does not grow on a desktop; the field does. */
+  /* ---- geometry ----------------------------------------------------------
+   * Generous. 28px on the card, because a translucent surface with a tight
+   * radius reads as a dialog and this one is meant to read as an object.
+   */
+  /** The card's true size. It does not grow on a desktop; the field does. */
   --nd-sheet-w: 28.75rem;
-  --nd-radius-sheet: 1.5rem;
-  --nd-radius-plate: 1.125rem;
-  --nd-radius-control: 0.9375rem;
+  --nd-radius-sheet: 1.75rem;
+  --nd-radius-plate: 1.25rem;
+  --nd-radius-control: 1rem;
   /** 16px at 320px, 24px from ~400px up. */
   --nd-gutter: clamp(1rem, 5vw, 1.5rem);
 
@@ -294,10 +410,12 @@
   --nd-t-enter: 260ms;
   /** Page choreography. The only duration allowed past 300ms, used once. */
   --nd-t-reveal: 900ms;
-  /** The field's drift. Weather, not a screensaver. */
-  --nd-t-drift-1: 46s;
-  --nd-t-drift-2: 58s;
-  --nd-t-drift-3: 52s;
+  /**
+   * The bloom's drift. Weather, not a screensaver, and slower than the three
+   * lights it replaces were: a single large light that moves quickly reads as
+   * a torch being waved, where three small ones read as air.
+   */
+  --nd-t-drift: 72s;
 
   /* ---- z-index -----------------------------------------------------------
    * Semantic, and the whole scale. No component invents a number.
@@ -318,6 +436,31 @@
   --nd-headroom: calc(var(--nd-flap-h) * 0.68);
   --nd-open-angle: -132deg;
   --nd-wax-size: 3.5rem;
+}
+
+/**
+ * The alternative resolution to the gold-versus-vermilion collision, kept
+ * switchable so the owner can decide from evidence rather than from prose.
+ *
+ * Option 2: one accent doing every job, as before, pushed brighter until it
+ * separates from the field by LIGHTNESS. `#ffce45` is 3.58:1 on the field's
+ * brightest pixel where `#e9b213` is 2.74:1, so unlike Nimiq gold it may sit on
+ * the bare field at all.
+ *
+ * Two costs, and the second is the one that decided it. The first is that it is
+ * no longer Nimiq's gold, and a currency mark that is nearly the brand's colour
+ * is worse than one that is plainly not. The second is that 3.58:1 clears the
+ * 3:1 non-text floor and NOT the 4.5:1 the countdown is held to, so the money
+ * facts on the field stay near-white either way. Option 2 does not buy a
+ * one-accent system; it puts a second bright next to the first, in the same
+ * `.nd-facts` row. Delete this block when the choice is made.
+ */
+:root[data-nd-accent='bright'] {
+  --nd-accent: #ffce45;
+  --nd-action: #ffce45;
+  --nd-on-action: var(--color-chalk-ink);
+  --nd-focus: #ffce45;
+  --nd-mark: #ffce45;
 }
 
 html {
@@ -361,85 +504,94 @@ body {
 }
 
 /**
- * Three lights, moved with `transform` only.
+ * The bloom and its counter-light. One of them moves, and it moves with
+ * `transform` only.
  *
- * This is the single most important performance decision on the screen. A
- * gradient animated by changing its position or size is re-rasterised every
- * frame; a gradient animated by transform is painted once and moved by the
- * compositor. With a `backdrop-filter` sheet on top of it, the difference is
- * between "the blurred region re-reads a freshly painted backdrop 60 times a
- * second" and "it re-reads a moved layer", which is the whole WebView risk.
+ * This is the single most important performance decision on the screen, and it
+ * has two halves. A gradient animated by changing its position or size is
+ * re-rasterised every frame; a gradient animated by transform is painted once
+ * and moved by the compositor. That is the first half and it has not changed.
+ * The second half is new: with a `backdrop-filter` card on top, the blurred
+ * region re-reads its backdrop whenever ANY layer behind it moves, so the bill
+ * scales with how many layers move, not with how big they are. Three drifting
+ * lights measured ~29fps at 6x CPU throttle. One large bloom is a bigger
+ * gradient and a cheaper frame.
+ *
+ * The counter-light never moves and therefore never contributes to that bill.
  */
 .nd-field-light {
   position: absolute;
   z-index: var(--nd-z-light);
-  width: 78vmax;
-  height: 78vmax;
   border-radius: 50%;
-  filter: blur(44px);
   pointer-events: none;
-  /* Bounded to three elements, and only these three. */
-  will-change: transform;
   animation-timing-function: ease-in-out;
   animation-iteration-count: infinite;
   animation-direction: alternate;
 }
 
-.nd-field-light.is-1 {
-  top: -32vmax;
-  left: -24vmax;
-  opacity: var(--nd-light-1-o);
-  background: radial-gradient(closest-side, var(--nd-light-1-fill), var(--nd-light-1-fade) 70%);
-  animation-name: nd-drift-1;
-  animation-duration: var(--nd-t-drift-1);
-}
-
-.nd-field-light.is-2 {
-  top: 4%;
-  right: -28vmax;
-  opacity: var(--nd-light-2-o);
-  background: radial-gradient(closest-side, var(--nd-light-2-fill), var(--nd-light-2-fade) 70%);
-  animation-name: nd-drift-2;
-  animation-duration: var(--nd-t-drift-2);
-}
-
-.nd-field-light.is-3 {
-  bottom: -34vmax;
-  left: -8%;
-  opacity: var(--nd-light-3-o);
-  background: radial-gradient(closest-side, var(--nd-light-3-fill), var(--nd-light-3-fade) 70%);
-  animation-name: nd-drift-3;
-  animation-duration: var(--nd-t-drift-3);
+/**
+ * The bloom. Centred low and right of the middle, so it reads as a source
+ * BEHIND the content rather than a vignette around it, and so the field
+ * darkens up and to the left, which is where the masthead lives.
+ *
+ * `blur(56px)` on top of a six-stop gradient looks redundant and is not: the
+ * stops give the fall-off its shape, the blur kills the concentric stepping
+ * that an 8-bit panel finds in any smooth radial. The grain layer above
+ * finishes the job.
+ */
+.nd-field-light.is-bloom {
+  top: 88%;
+  left: 58%;
+  width: 100vmax;
+  height: 100vmax;
+  margin-top: -50vmax;
+  margin-left: -50vmax;
+  filter: blur(56px);
+  opacity: var(--nd-bloom-o);
+  background: radial-gradient(
+    closest-side,
+    var(--nd-bloom-core) 0%,
+    var(--nd-bloom-hot) 14%,
+    var(--nd-bloom-mid) 29%,
+    var(--nd-bloom-deep) 45%,
+    var(--nd-bloom-edge) 66%,
+    var(--nd-bloom-fade) 100%
+  );
+  /* The one promoted element on the page, and the only one that drifts. */
+  will-change: transform;
+  animation-name: nd-drift;
+  animation-duration: var(--nd-t-drift);
   transition: opacity var(--nd-t-reveal) ease-out;
 }
 
-/* The screen remembers that you claimed: the gold light stays up afterwards. */
-.nd-field[data-tone='warm'] .nd-field-light.is-3 {
-  opacity: var(--nd-light-3-o-warm);
+/** Static. It breaks the circle and costs nothing per frame. */
+.nd-field-light.is-counter {
+  top: 6%;
+  right: -30vmax;
+  width: 74vmax;
+  height: 74vmax;
+  filter: blur(48px);
+  opacity: var(--nd-counter-o);
+  background: radial-gradient(closest-side, var(--nd-counter-fill), var(--nd-counter-fade) 72%);
+}
+
+/* The screen remembers that you claimed: the bloom comes up and stays up. */
+.nd-field[data-tone='warm'] .nd-field-light.is-bloom {
+  opacity: var(--nd-bloom-o-warm);
 }
 
 /* Dead ends — ended, all claimed, paused. Nothing here is going to be opened,
    and the field says so before the sentence does. */
-.nd-field[data-tone='quiet'] .nd-field-light.is-3 {
-  opacity: 0.1;
+.nd-field[data-tone='quiet'] .nd-field-light.is-bloom {
+  opacity: var(--nd-bloom-o-quiet);
 }
-.nd-field[data-tone='quiet'] .nd-field-light.is-1 {
+.nd-field[data-tone='quiet'] .nd-field-light.is-counter {
   opacity: 0.24;
 }
 
-@keyframes nd-drift-1 {
+@keyframes nd-drift {
   to {
-    transform: translate3d(16vmax, 10vmax, 0) scale(1.12);
-  }
-}
-@keyframes nd-drift-2 {
-  to {
-    transform: translate3d(-14vmax, 12vmax, 0) scale(1.08);
-  }
-}
-@keyframes nd-drift-3 {
-  to {
-    transform: translate3d(12vmax, -9vmax, 0) scale(1.14);
+    transform: translate3d(-9vmax, -6vmax, 0) scale(1.1);
   }
 }
 
@@ -460,36 +612,53 @@ body {
 :root[data-nd-motion='off'] .nd-field-light {
   animation: none;
 }
-/* Static, but composed: the lights hold a deliberate position rather than all
-   sitting at their `from` frame in a corner. */
-:root[data-nd-motion='off'] .nd-field-light.is-1 {
-  transform: translate3d(8vmax, 5vmax, 0);
-}
-:root[data-nd-motion='off'] .nd-field-light.is-2 {
-  transform: translate3d(-7vmax, 6vmax, 0);
-}
-:root[data-nd-motion='off'] .nd-field-light.is-3 {
-  transform: translate3d(6vmax, -4vmax, 0);
+/* Static, but composed: the bloom holds a deliberate position rather than
+   sitting at its `from` frame. */
+:root[data-nd-motion='off'] .nd-field-light.is-bloom {
+  transform: translate3d(-5vmax, -3vmax, 0);
 }
 
 /**
  * Grain, as an inline SVG data URI.
  *
- * A large flat field of one colour bands on an 8-bit phone panel, and a
- * gradient over it bands worse. Three octaves of fractal noise at 4% kills
- * both, costs one composited layer, and is the difference between a surface
- * that looks printed and one that looks like a CSS gradient.
+ * Required, and more so than before. A large flat field of one colour bands on
+ * an 8-bit phone panel; a soft gradient over it bands worse; and a soft
+ * gradient a full 100vmax across, which is what the bloom is, bands worst of
+ * all — the steps get wide enough to see as rings. Three octaves of fractal
+ * noise kills it, costs one composited layer that never changes, and is the
+ * difference between a surface that looks printed and one that looks like a
+ * CSS gradient. 5% rather than 4.5%, because the bloom is a longer ramp than
+ * the greys it replaces and needs slightly more dither to break up.
+ *
+ * It is also the last layer under the content, above both the lights and the
+ * scrim, so it is part of every contrast floor rather than a finish applied
+ * afterwards. `feTurbulence` can emit a near-white pixel, and at 5% that lifts
+ * the composite by about three points per channel — enough, on a field this
+ * bright, to move near-white text from 4.56:1 to 4.43:1 and put the countdown
+ * under its floor. `surface.contrast.test.ts` therefore composites a fully lit
+ * grain pixel onto the field before it computes anything, which is why the
+ * bloom's post-claim peak is 0.74 and not 0.78. The dither is not free and it
+ * is not optional; it is simply paid for in the right currency.
  */
 .nd-field-texture {
   position: absolute;
   inset: 0;
   z-index: var(--nd-z-texture);
-  opacity: 0.045;
+  opacity: var(--nd-grain-o);
   pointer-events: none;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23g)'/%3E%3C/svg%3E");
 }
 
-/* Weighted edges: a poster wants them, and the furniture reads on them. */
+/**
+ * Weighted edges. A poster wants them; on this field the secondary copy also
+ * NEEDS them, which is why both bands hold their declared strength to a fixed
+ * depth instead of peaking at the very edge and immediately fading. The
+ * masthead is the field's first element and the custody line is its last, and
+ * both sit a few percent in from the edge, so a scrim that is already half
+ * gone by then protects nothing. `surface.contrast.test.ts` computes those two
+ * floors against these alphas and `surface.test.ts` checks the held bands are
+ * still declared.
+ */
 .nd-field-scrim {
   position: absolute;
   inset: 0;
@@ -498,8 +667,10 @@ body {
   background-image: linear-gradient(
     180deg,
     var(--nd-scrim-top) 0%,
-    var(--nd-scrim-clear) 20%,
-    var(--nd-scrim-clear) 72%,
+    var(--nd-scrim-top) 10%,
+    var(--nd-scrim-clear) 34%,
+    var(--nd-scrim-clear) 62%,
+    var(--nd-scrim-bottom) 90%,
     var(--nd-scrim-bottom) 100%
   );
 }
@@ -524,9 +695,9 @@ body {
   pointer-events: none;
   background-image: radial-gradient(
     closest-side,
-    rgb(233 178 19 / 0) 54%,
-    rgb(233 178 19 / 0.3) 68%,
-    rgb(233 178 19 / 0) 80%
+    rgb(245 240 238 / 0) 54%,
+    rgb(245 240 238 / 0.26) 68%,
+    rgb(245 240 238 / 0) 80%
   );
   animation: nd-ripple var(--nd-t-reveal) var(--nd-ease) 1 both;
 }
@@ -640,7 +811,7 @@ body {
 }
 
 /* ===========================================================================
- * The sheet
+ * The card
  * ======================================================================== */
 
 /**
@@ -650,23 +821,27 @@ body {
  * particular is never translucent.
  *
  * The barrier fill is declared FIRST, in the non-`@supports` branch, so a
- * renderer with no `backdrop-filter` gets a nearly opaque sheet instead of a
+ * renderer with no `backdrop-filter` gets a nearly opaque card instead of a
  * washed one. Everything downstream reads correctly on both.
+ *
+ * The hairline is 10% white, not 20%. On a near-black field a 20% edge is a
+ * drawn outline; at 10% it is the reflection off a real edge, and the 1px
+ * inset highlight above it is the lit top of that edge catching the bloom.
+ * Those two lines are the entire difference between a pane of glass and a dark
+ * rounded rectangle, and they are cheaper than any amount of extra blur.
  */
 .nd-glass {
   position: relative;
   width: 100%;
   max-width: var(--nd-sheet-w);
   margin-inline: auto;
-  padding: 1.375rem 1.25rem 1.25rem;
-  border: 1px solid rgb(244 243 247 / 0.2);
+  padding: 1.5rem 1.375rem 1.375rem;
+  border: 1px solid rgb(245 240 238 / 0.1);
   border-radius: var(--nd-radius-sheet);
   background-image: linear-gradient(var(--nd-barrier-flat-top), var(--nd-barrier-flat-bottom));
-  /* The 1px inner highlight is the tell that separates a sheet of glass from a
-     dark rectangle: it is the lit top edge of a physical pane. */
   box-shadow:
-    inset 0 1px 0 rgb(255 255 255 / 0.16),
-    0 1.125rem 2.5rem -1.5rem rgb(0 0 0 / 0.9);
+    inset 0 1px 0 rgb(255 255 255 / 0.14),
+    0 1.5rem 3rem -1.5rem rgb(0 0 0 / 0.85);
 }
 
 @supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
@@ -704,17 +879,36 @@ body {
  * ======================================================================== */
 
 /**
- * The only fully opaque element on the screen is the amount. That is the
- * hierarchy statement of the whole direction, and it is also rule 1 in its
- * physical form: the number a stranger is deciding about cannot depend on what
- * happens to be behind it.
+ * The amount sits in a well: a RECESS inside the card, with a lit top edge,
+ * rather than the near-white slab this used to be.
+ *
+ * A recess and not a lift, and that is a contrast decision before it is a
+ * material one. Every nested surface on a translucent card has to choose a
+ * direction, and lifting one by adding near-white raises the floor under every
+ * piece of secondary text on it — the plate note landed at 4.38:1 that way.
+ * Subtracting light instead buys headroom back on the one surface that carries
+ * the number, and it is also what a well physically is.
+ *
+ * The slab existed to keep rule 1 physical. The amount was dark ink on light
+ * paper, so if that paper had been translucent the number's legibility would
+ * have depended on whatever the field was doing behind it — a real risk, and
+ * opacity was the cheap defence. That risk has inverted. The amount is
+ * near-white now, so the dangerous direction is a BRIGHT backdrop, and the
+ * brightest this one can get is the bloom's core seen through the card and then
+ * through this well: 12.38:1 at the card's thinnest, against a floor of 4.5.
+ * The number is safe by arithmetic instead of by opacity, and
+ * `surface.contrast.test.ts` is what keeps that true rather than this comment.
+ *
+ * Rule 1's other half is untouched: the amount is a plain declaration, it
+ * starts visible, and no transition is between a claimant and the number.
  */
 .nd-plate {
-  margin-top: 1.375rem;
-  padding: 1.125rem 1rem 0.875rem;
+  margin-top: 1.5rem;
+  padding: 1.25rem 1rem 1rem;
   border-radius: var(--nd-radius-plate);
-  background-color: var(--color-plate);
-  color: var(--nd-on-plate);
+  background-color: rgb(12 7 6 / 0.34);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.07);
+  color: var(--nd-on-surface);
   text-align: center;
 }
 
@@ -754,18 +948,28 @@ body {
   font-size: 1.9375rem;
 }
 
+/**
+ * The currency mark, and the only gold on the screen.
+ *
+ * It is gold BECAUSE it is the only one: on a vermilion field a second gold
+ * element would make both of them read as warm noise, and a single one reads
+ * as foil. It is held to the body floor rather than the large-text allowance
+ * even though it renders around 18px bold, because it is half of the money.
+ * 7.22:1 on the well over the field's brightest pixel, and it is checked on all
+ * three card paths, not just the glass one.
+ */
 .nd-unit {
   font-size: 0.3em;
-  font-weight: 600;
+  font-weight: 700;
   letter-spacing: 0.14em;
-  color: var(--nd-on-plate-muted);
+  color: var(--nd-accent);
 }
 
 .nd-plate-note {
   margin: 0.625rem 0 0;
   font-size: 0.8125rem;
   line-height: 1.5;
-  color: var(--nd-on-plate-muted);
+  color: var(--nd-on-surface-muted);
   text-wrap: pretty;
 }
 
@@ -786,13 +990,14 @@ body {
 }
 
 /* The one celebratory beat in the product, and it lands only after the backend
-   has said `paid`. */
+   has said `paid`. Vermilion rather than gold: on a dark card a hard 2px line
+   of the field's own hot colour reads as a spark, and it keeps gold rare. */
 .nd-keyline {
   width: 3.25rem;
   height: 2px;
   margin: 0.75rem auto 0;
   border-radius: 999px;
-  background-color: var(--color-gold);
+  background-color: var(--nd-hot);
   animation: nd-keyline var(--nd-t-enter) var(--nd-ease) 1 both;
 }
 
@@ -810,6 +1015,10 @@ body {
  * One primary per screen, and it always looks like this: a solid fill, never
  * glass. The control whose label a claimant checks against the number they are
  * about to accept is the last place to put a translucent surface.
+ *
+ * Near-white, not gold. Gold on this field is a warm patch on a warm field;
+ * near-white is the single loudest thing that can be put on it, and the primary
+ * action should be the loudest thing on the screen after the amount.
  */
 .nd-action {
   display: block;
@@ -861,12 +1070,12 @@ body {
 }
 
 .nd-quiet:hover {
-  border-color: rgb(244 243 247 / 0.5);
-  background-color: rgb(244 243 247 / 0.06);
+  border-color: rgb(245 240 238 / 0.46);
+  background-color: rgb(245 240 238 / 0.06);
 }
 
 .nd-quiet:active {
-  background-color: rgb(244 243 247 / 0.1);
+  background-color: rgb(245 240 238 / 0.1);
 }
 
 /**
@@ -883,8 +1092,8 @@ body {
   min-height: 3rem;
   padding: 0.75rem 0.9375rem;
   border: 1px solid var(--nd-rule-strong);
-  border-radius: 0.8125rem;
-  background-color: rgb(244 243 247 / 0.1);
+  border-radius: 0.875rem;
+  background-color: rgb(245 240 238 / 0.1);
   color: var(--nd-on-surface);
   font: inherit;
   font-size: 1rem;
@@ -896,10 +1105,13 @@ body {
     background-color var(--nd-t-state) var(--nd-ease);
 }
 
+/* Selection is border, fill AND weight — never colour alone. The fill is the
+   same near-white as everything else on the card, one step brighter, because a
+   hue here would be a second accent competing with the currency mark. */
 .nd-option[aria-pressed='true'],
 .nd-option[aria-checked='true'] {
-  border-color: var(--color-gold);
-  background-color: rgb(233 178 19 / 0.22);
+  border-color: rgb(245 240 238 / 0.52);
+  background-color: rgb(245 240 238 / 0.18);
   font-weight: 600;
 }
 
@@ -929,9 +1141,10 @@ body {
   outline-offset: 2px;
 }
 
-/* Inside the plate and the create flow's paper, gold is 2.4:1. Deep gold is
-   5.7:1 and is the ring there. */
-:where(.nd-plate, .nd-face) :where(button, a, input, [tabindex]):focus-visible {
+/* The create flow's paper is the one light surface left, and a near-white ring
+   is invisible on it. Deep gold is 5.7:1 there and is the ring. The amount's
+   well is a dark surface now and keeps the default. */
+:where(.nd-face) :where(button, a, input, [tabindex]):focus-visible {
   outline-color: var(--color-gold-deep);
 }
 
@@ -952,34 +1165,46 @@ body {
   letter-spacing: 0.01em;
 }
 
-/* Gold = something is happening. */
+/* Hot = something is happening. A hard vermilion edge on a dark card, which is
+   the one place the field's own colour can be used as a line rather than as a
+   bloom and still read as deliberate. */
 .nd-pill[data-tone='live'] {
-  border-color: rgb(233 178 19 / 0.45);
-  background-color: rgb(233 178 19 / 0.16);
+  border-color: rgb(255 77 20 / 0.55);
+  background-color: rgb(255 77 20 / 0.16);
   color: var(--nd-on-surface);
 }
 /* Solid = a settled fact. */
 .nd-pill[data-tone='settled'] {
-  background-color: var(--color-plate);
-  color: var(--nd-on-plate);
+  background-color: var(--color-chalk);
+  color: var(--color-chalk-ink);
 }
-/* Quiet = a dead end, or nothing has started. */
+/* Quiet = a dead end, or nothing has started.
+   A RECESS, matching the well and the explanation panel, and for the same
+   arithmetic: a 7% near-white lift raised the surface under this pill's muted
+   label to 4.13:1 on the glass card, under the floor. Every nested surface on
+   this palette has to pick a direction, and on a card this thin over a field
+   this bright the only direction with headroom in it is down. 5.82:1. */
 .nd-pill[data-tone='quiet'] {
   border-color: var(--nd-rule);
-  background-color: rgb(244 243 247 / 0.08);
+  background-color: rgb(12 7 6 / 0.32);
   color: var(--nd-on-surface-muted);
 }
 
 /** An inset block of explanation. One surface, no card inside a card. */
+/** An inset block of explanation, recessed for the same reason the well is. */
 .nd-panel {
   padding: 0.9375rem;
-  border-radius: 1rem;
-  background-color: rgb(244 243 247 / 0.07);
+  border-radius: 1.125rem;
+  background-color: rgb(12 7 6 / 0.32);
 }
 
+/* A warning still needs a hue, and gold is spoken for. Vermilion as a HARD
+   1px edge on a dark card cannot be confused with the soft bloom behind it.
+   The wash goes on as a background IMAGE over the panel's own recess, so the
+   panel stays a recess and the hue is a tint on it rather than a lift. */
 .nd-panel--warn {
-  border: 1px solid rgb(233 178 19 / 0.4);
-  background-color: rgb(233 178 19 / 0.12);
+  border: 1px solid rgb(255 77 20 / 0.5);
+  background-image: linear-gradient(rgb(255 77 20 / 0.11), rgb(255 77 20 / 0.11));
 }
 
 .nd-note {
@@ -1000,7 +1225,7 @@ body {
   gap: 0.875rem;
   margin: 0;
   padding: 0.625rem 0;
-  border-bottom: 1px solid rgb(244 243 247 / 0.1);
+  border-bottom: 1px solid rgb(245 240 238 / 0.09);
   font-size: 0.8125rem;
 }
 
@@ -1031,7 +1256,10 @@ body {
   font-size: 0.8125rem;
   font-weight: 500;
   /* Full strength, not muted: a countdown is a money fact and is held to AA
-     regardless of size. 6.92:1 on the field's brightest possible pixel. */
+     regardless of size. 4.70:1 on the field's brightest possible pixel, grain
+     included, and UNSCRIMMED, because on a phone this sits mid-screen where no
+     scrim reaches it. It is the pair that decided how bright the bloom is
+     allowed to be — literally: `--nd-bloom-o-warm` is set by this number. */
   color: var(--nd-on-surface);
   font-variant-numeric: tabular-nums;
 }
@@ -1046,14 +1274,15 @@ body {
   width: 1rem;
   height: 0.25rem;
   border-radius: 999px;
-  /* 3.95:1 on the field's brightest pixel, past the 3:1 non-text floor. The
-     count beside it carries the same fact in words, so the marks are never the
-     only carrier. */
-  background-color: var(--color-gold);
+  /* Near-white, at 4.70:1 on the field's brightest pixel. Gold would be 2.74:1
+     here and fails the 3:1 non-text floor outright — the marks sit on the bare
+     field, which is the one place Nimiq gold cannot go. The count beside them
+     carries the same fact in words, so they are never the only carrier. */
+  background-color: var(--nd-mark);
 }
 
 .nd-marks > i[data-taken='true'] {
-  background-color: rgb(244 243 247 / 0.26);
+  background-color: rgb(245 240 238 / 0.24);
 }
 
 @container nd-field (min-width: 54rem) {
@@ -1142,18 +1371,12 @@ body {
   }
 
   /* The field keeps every bit of its colour. Only the movement goes. */
-  .nd-field-light.is-1 {
-    transform: translate3d(8vmax, 5vmax, 0);
-  }
-  .nd-field-light.is-2 {
-    transform: translate3d(-7vmax, 6vmax, 0);
-  }
-  .nd-field-light.is-3 {
-    transform: translate3d(6vmax, -4vmax, 0);
+  .nd-field-light.is-bloom {
+    transform: translate3d(-5vmax, -3vmax, 0);
   }
 
   /* A ring crossing the screen has no reduced-motion equivalent worth having.
-     The warmer cast the field keeps is the part that carries the meaning, and
+     The hotter cast the field keeps is the part that carries the meaning, and
      it survives as a plain state. */
   .nd-ripple {
     display: none;
