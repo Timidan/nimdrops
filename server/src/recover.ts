@@ -807,11 +807,16 @@ export interface SolvencyView {
   outstandingPrincipalLuna: string
   inFlightOutgoingLuna: string
   feeReserveLuna: string
-  maxLivePrincipalLuna: string
+  /** The operator kill switch, or `null` when no principal ceiling is set. */
+  maxLivePrincipalLuna: string | null
   /** `ledger − outstanding − fee reserve`. Negative = every money path fails closed. */
   solvencyHeadroomLuna: string
-  /** `cap − outstanding`. New principal beyond this is refused by the cap. */
-  livePrincipalHeadroomLuna: string
+  /**
+   * `cap − outstanding`, or `null` when no cap is set. Note that `null` here is
+   * not "no room" — it is "the cap is not the thing that limits a new drop".
+   * `solvencyHeadroomLuna` is.
+   */
+  livePrincipalHeadroomLuna: string | null
   lastReconciledAt: string | null
   lastReconciledHeight: number | null
   /** Chain balance as of the last `reconcile()`; `null` before the first one. */
@@ -888,13 +893,16 @@ function toSolvencyView(o: {
     outstandingPrincipalLuna: o.outstandingLuna.toString(),
     inFlightOutgoingLuna: o.inFlightLuna.toString(),
     feeReserveLuna: controls.configuredFeeReserveLuna.toString(),
-    maxLivePrincipalLuna: controls.maxLivePrincipalLuna.toString(),
+    maxLivePrincipalLuna: controls.maxLivePrincipalLuna?.toString() ?? null,
     solvencyHeadroomLuna: (
       ledgerLuna -
       o.outstandingLuna -
       controls.configuredFeeReserveLuna
     ).toString(),
-    livePrincipalHeadroomLuna: (controls.maxLivePrincipalLuna - o.outstandingLuna).toString(),
+    livePrincipalHeadroomLuna:
+      controls.maxLivePrincipalLuna === null
+        ? null
+        : (controls.maxLivePrincipalLuna - o.outstandingLuna).toString(),
     lastReconciledAt: controls.lastReconciledAt?.toISOString() ?? null,
     lastReconciledHeight: controls.lastReconciledHeight,
     lastReconciledChainBalanceLuna: controls.reconciledConfirmedBalanceLuna?.toString() ?? null,

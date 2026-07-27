@@ -6,7 +6,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { FakeChain } from '../src/chain/fake'
 import type { ChainClient, ChainTx } from '../src/chain/types'
 import { migrate } from '../src/db/migrate'
-import { CapError } from '../src/money'
+import { DropShapeError } from '../src/money'
 import {
   DropNotFoundError,
   FundingRejectedError,
@@ -132,7 +132,8 @@ async function readDrop(publicId: string) {
 
 async function setControls(o: {
   paused?: boolean
-  capLuna?: bigint
+  /** Migration 015: the optional kill switch. `null`/omitted means no ceiling. */
+  capLuna?: bigint | null
   feeReserveLuna?: bigint
   /** Operator-attested float; the ledger credit the fee reserve is spent from. */
   operatorFloatLuna?: bigint
@@ -146,7 +147,7 @@ async function setControls(o: {
      WHERE singleton`,
     [
       o.paused ?? false,
-      (o.capLuna ?? 10_000_000n).toString(),
+      o.capLuna === undefined || o.capLuna === null ? null : o.capLuna.toString(),
       (o.feeReserveLuna ?? FEE_FLOAT).toString(),
       (o.operatorFloatLuna ?? FEE_FLOAT).toString(),
       o.maxLiveDrops ?? null,
@@ -249,12 +250,16 @@ describe.skipIf(!hasDb)('drop drafts and exact funding activation (real Postgres
     expect(pub.expiresAt).toBeNull()
   })
 
-  it('enforces the launch caps at draft time', async () => {
-    await expect(draft({ claimCount: 1 })).rejects.toBeInstanceOf(CapError)
-    await expect(draft({ claimCount: 21 })).rejects.toBeInstanceOf(CapError)
-    await expect(draft({ amountEachLuna: 1_000_000n, claimCount: 20 })).rejects.toBeInstanceOf(CapError)
+  it('enforces the one shape rule at draft time, and no size ceiling', async () => {
+    await expect(draft({ claimCount: 1 })).rejects.toBeInstanceOf(DropShapeError)
+    await expect(draft({ amountEachLuna: 0n })).rejects.toBeInstanceOf(DropShapeError)
     const { rows } = await pool.query<{ count: string }>('SELECT count(*)::text AS count FROM drops')
     expect(rows[0].count).toBe('0')
+
+    // Both of these were refused before the caps came out: 21 people, and a
+    // 200 NIM total. Neither is anyone's business but the sponsor's now.
+    await expect(draft({ claimCount: 21 })).resolves.toBeDefined()
+    await expect(draft({ amountEachLuna: 1_000_000n, claimCount: 20 })).resolves.toBeDefined()
   })
 
   it('rejects funding for an unknown drop', async () => {

@@ -163,7 +163,11 @@ async function insertAttempt(
 
 async function setControls(o: {
   paused?: boolean
-  capLuna?: bigint
+  /**
+   * Migration 015: the principal ceiling is an optional operator kill switch.
+   * Omitted or `null` means no ceiling, which is what a real deployment runs.
+   */
+  capLuna?: bigint | null
   feeReserveLuna?: bigint
   /**
    * Operator-attested float: custody money that is not any drop's funding.
@@ -196,7 +200,7 @@ async function setControls(o: {
      WHERE singleton`,
     [
       o.paused ?? false,
-      (o.capLuna ?? 10_000_000n).toString(),
+      o.capLuna === undefined || o.capLuna === null ? null : o.capLuna.toString(),
       (o.feeReserveLuna ?? 100_000n).toString(),
       balance === null ? null : balance.toString(),
       agoMs,
@@ -294,7 +298,105 @@ describe.skipIf(!hasDb)('solvency and custody controls (real Postgres)', () => {
     expect(await outstandingPrincipalLuna(pool)).toBe(500n)
   })
 
-  it('rejects an activation whose principal would exceed the live cap', async () => {
+  // ---- migration 015: the cap is a kill switch, solvency is the invariant ----
+  //
+  // These two tests are a pair, and the pair is the point. The first shows that
+  // a drop far past every ceiling this system used to have goes through; the
+  // second shows that the thing which stopped being a policy question is still
+  // an arithmetic one. If the second ever passes for a reason the first also
+  // explains, the invariant has been turned into a formality.
+
+  it('activates a drop far larger than every ceiling that used to exist', async () => {
+    // 2 NIM each × 100 people = 200 NIM. Three separate old rules forbade this:
+    // the 20-claim schema constraint, the 100 NIM launch cap in money.ts, and
+    // the mainnet pilot's 2 NIM aggregate ceiling.
+    const AMOUNT_EACH = 200_000n
+    const CLAIMS = 100
+    const PRINCIPAL = AMOUNT_EACH * BigInt(CLAIMS)
+    expect(PRINCIPAL, '200 NIM').toBe(20_000_000n)
+
+    await setControls({ operatorFloatLuna: 100_000n, feeReserveLuna: 100_000n })
+
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      const controls = await lockControls(client)
+      expect(controls.maxLivePrincipalLuna, 'no ceiling is set').toBeNull()
+      // The funding credit and the new liability arrive together, so a float
+      // that only has to cover the fee reserve is enough for any size of drop.
+      await assertSolvent(client, controls, PRINCIPAL)
+      const drop = await insertDrop(client, { claimCount: CLAIMS, amountEachLuna: AMOUNT_EACH })
+      await client.query('COMMIT')
+
+      expect(await outstandingPrincipalLuna(pool)).toBe(PRINCIPAL)
+      expect(drop.id).toBeTruthy()
+    } finally {
+      client.release()
+    }
+
+    // …and every one of its 100 payouts still passes the invariant.
+    const paying = await pool.connect()
+    try {
+      await paying.query('BEGIN')
+      const controls = await lockControls(paying)
+      await expect(assertSolvent(paying, controls, 0n)).resolves.toBeUndefined()
+      await paying.query('ROLLBACK')
+    } finally {
+      paying.release()
+    }
+  })
+
+  it('still refuses a drop the ledger cannot cover, at any size', async () => {
+    // Same 200 NIM drop, but the fee reserve is no longer backed. Nothing about
+    // removing the cap touches this: the ledger has to be able to pay.
+    await setControls({ operatorFloatLuna: 99_999n, feeReserveLuna: 100_000n })
+
+    const client = await pool.connect()
+    try {
+      await client.query('BEGIN')
+      const controls = await lockControls(client)
+      expect(controls.maxLivePrincipalLuna, 'the refusal is not the cap').toBeNull()
+      const err = await assertSolvent(client, controls, 20_000_000n).then(
+        () => null,
+        (e: unknown) => e,
+      )
+      expect(err).toBeInstanceOf(InsolventError)
+      expect(err).not.toBeInstanceOf(CapExceededError)
+      await client.query('ROLLBACK')
+    } finally {
+      client.release()
+    }
+
+    // The same size of drop, refused for the other reason a big drop can be
+    // unaffordable: a live drop is already outstanding and real fees have come
+    // out of custody since, so the books no longer cover what is owed.
+    await setControls({ operatorFloatLuna: 100_000n, feeReserveLuna: 100_000n })
+    const live = await insertDrop(pool, { claimCount: 100, amountEachLuna: 200_000n })
+    const claim = await insertClaim(pool, live.id, 0)
+    const paid = await insertTransfer(pool, {
+      purpose: 'payout',
+      dropId: live.id,
+      claimId: claim.id,
+      amountLuna: 200_000n,
+      state: 'confirmed',
+    })
+    await insertAttempt(pool, { transferId: paid.id, state: 'confirmed', feeLuna: 1n })
+
+    const second = await pool.connect()
+    try {
+      await second.query('BEGIN')
+      const controls = await lockControls(second)
+      // One luna of fee is the whole gap: the float was exactly the reserve.
+      await expect(assertSolvent(second, controls, 20_000_000n)).rejects.toBeInstanceOf(
+        InsolventError,
+      )
+      await second.query('ROLLBACK')
+    } finally {
+      second.release()
+    }
+  })
+
+  it('rejects an activation whose principal would exceed the live cap, when one is set', async () => {
     await setControls({ capLuna: 900n })
     await insertDrop(pool, { claimCount: 5, amountEachLuna: 100n })
 

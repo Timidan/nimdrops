@@ -94,7 +94,7 @@ const CASES: Case[] = [
   },
   {
     name: 'ready · 10000.00000 NIM',
-    note: 'longest amount the create cap allows to be typed',
+    note: 'a long amount against a large headcount; nothing caps either',
     state: 'ready',
     drop: drop({ amountEach: '10000.00000', claimCount: 100, remaining: 97 }),
   },

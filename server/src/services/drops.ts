@@ -3,7 +3,7 @@ import { MEMO_MAX_BYTES, type ChainClient, type ChainTx } from '../chain/types'
 import { errorMessage, requireNetwork } from '../config'
 import type { Queryable } from '../db/pool'
 import { newPublicId } from '../ids'
-import { assertCaps, formatNim } from '../money'
+import { assertDropShape, formatNim } from '../money'
 import {
   type CapacitySnapshot,
   assertCapacityFor,
@@ -222,7 +222,7 @@ export async function createDraft(
   chain: ChainClient,
   o: CreateDraftInput,
 ): Promise<Draft> {
-  assertCaps(o.amountEachLuna, o.claimCount)
+  assertDropShape(o.amountEachLuna, o.claimCount)
   const expectedFundingLuna = o.amountEachLuna * BigInt(o.claimCount)
   const publicId = newPublicId()
   const fundingMemo = fundingMemoFor(publicId)

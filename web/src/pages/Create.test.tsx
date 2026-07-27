@@ -62,31 +62,43 @@ function disclosure(over: Partial<CustodyDisclosure> = {}): CustodyDisclosure {
     expiryHours: 24,
     fundingWindowMinutes: 30,
     limits: {
-      perDropMax: '100',
-      perDropMaxLuna: '10000000',
       aggregateMax: '250',
       aggregateMaxLuna: '25000000',
       remaining: '250',
       remainingLuna: '25000000',
+      atRisk: '0',
+      atRiskLuna: '0',
       maxLiveDrops: null,
       liveDrops: 0,
       reservedDrafts: 0,
       remainingDrops: null,
     },
     summary:
-      'Your NIM goes to a wallet the operator controls, not to an escrow contract. Up to 250 NIM can be live at once.',
+      'Your NIM goes to a wallet the operator controls, not to an escrow contract. 0 NIM is sitting there unclaimed right now.',
     points: [
       {
         id: 'not_escrow',
         text: 'This is not an escrow contract. Your NIM goes to one wallet the operator runs, and no code on chain holds it for you.',
       },
       {
+        id: 'why_no_contract',
+        text: 'A Nimiq HTLC pays one named recipient. A drop pays a list of people nobody knows yet, so no contract on this chain can hold the money. A person holds it instead.',
+      },
+      {
         id: 'operator_key',
         text: 'The operator holds the only key to that wallet and can move everything in it, including your funding.',
       },
       {
+        id: 'exposure',
+        text: 'Nothing limits the size of a drop, so the amount at risk is whatever sponsors have funded and nobody has claimed yet. That is 0 NIM right now, and your drop adds to it.',
+      },
+      {
+        id: 'mitigations',
+        text: 'What stands in the way is not cryptography. The books are checked against the chain before anything is signed, only one process is ever allowed to sign, the operator can stop every payment at once, and funding does not count until the network has buried it 64 blocks deep.',
+      },
+      {
         id: 'limits',
-        text: 'One drop can hold up to 100 NIM. All live drops together can hold 250 NIM, and 250 NIM of that is free right now.',
+        text: 'The operator has capped all live drops together at 250 NIM, and 250 NIM of that is free right now.',
       },
       {
         id: 'destination',
@@ -106,7 +118,7 @@ function disclosure(over: Partial<CustodyDisclosure> = {}): CustodyDisclosure {
       },
       {
         id: 'funding_window',
-        text: 'This drop holds its room in the cap for 30 minutes. Fund it in this session, or check the limits again before you send.',
+        text: 'This drop holds its room for 30 minutes. Fund it in this session, or check the limits again before you send.',
       },
     ],
     ...over,
@@ -114,9 +126,10 @@ function disclosure(over: Partial<CustodyDisclosure> = {}): CustodyDisclosure {
 }
 
 /**
- * The mainnet pilot: 2 NIM of live principal, one drop at a time, real money.
- * The cap bites two orders of magnitude below the 100 NIM launch cap, which is
- * the whole reason the ceiling has to be on screen before an amount is typed.
+ * A deployment with the operator's kill switch ON: 2 NIM of live principal, one
+ * drop at a time, real money. Nothing caps a drop by default any more, so this
+ * fixture is the case where a number CAN be refused for a reason the sponsor
+ * could have read first — which is the only case the form still checks.
  */
 function pilotDisclosure(over: Partial<CustodyDisclosure> = {}): CustodyDisclosure {
   const base = disclosure()
@@ -127,8 +140,6 @@ function pilotDisclosure(over: Partial<CustodyDisclosure> = {}): CustodyDisclosu
     mainnetPilot: true,
     limits: {
       ...base.limits,
-      perDropMax: '2',
-      perDropMaxLuna: '200000',
       aggregateMax: '2',
       aggregateMaxLuna: '200000',
       remaining: '2',
@@ -139,12 +150,12 @@ function pilotDisclosure(over: Partial<CustodyDisclosure> = {}): CustodyDisclosu
       remainingDrops: 1,
     },
     summary:
-      'Your NIM goes to a wallet the operator controls, not to an escrow contract. Up to 2 NIM can be live at once.',
+      'Your NIM goes to a wallet the operator controls, not to an escrow contract. 0 NIM is sitting there unclaimed right now.',
     points: [
-      ...base.points.slice(0, 2),
+      ...base.points.slice(0, 5),
       {
         id: 'limits',
-        text: 'One drop can hold up to 2 NIM. All live drops together can hold 2 NIM, and 2 NIM of that is free right now. Only one drop can run at a time.',
+        text: 'The operator has capped all live drops together at 2 NIM, and 2 NIM of that is free right now. Only one drop can run at a time.',
       },
       {
         id: 'destination',
@@ -154,8 +165,40 @@ function pilotDisclosure(over: Partial<CustodyDisclosure> = {}): CustodyDisclosu
         id: 'first_mainnet_run',
         text: 'This is the first run with real NIM. Send a small amount and expect to watch it.',
       },
-      ...base.points.slice(5),
+      ...base.points.slice(8),
     ],
+    ...over,
+  }
+}
+
+/**
+ * What a sponsor actually meets: no ceiling of any kind. There is no `limits`
+ * point, no `funding_window` point, and nothing on the form to check a total
+ * against — the server's solvency invariant is the only thing that can refuse.
+ */
+function uncappedDisclosure(over: Partial<CustodyDisclosure> = {}): CustodyDisclosure {
+  const base = disclosure()
+  return {
+    ...base,
+    limits: {
+      ...base.limits,
+      aggregateMax: null,
+      aggregateMaxLuna: null,
+      remaining: null,
+      remainingLuna: null,
+      atRisk: '412.5',
+      atRiskLuna: '41250000',
+    },
+    points: base.points
+      .filter((p) => p.id !== 'limits' && p.id !== 'funding_window')
+      .map((p) =>
+        p.id === 'exposure'
+          ? {
+              ...p,
+              text: 'Nothing limits the size of a drop, so the amount at risk is whatever sponsors have funded and nobody has claimed yet. That is 412.5 NIM right now, and your drop adds to it.',
+            }
+          : p,
+      ),
     ...over,
   }
 }
@@ -416,10 +459,12 @@ describe('Create — "Drop one back" prefill', () => {
     expect(totalNim()).toBe('12.5 NIM')
   })
 
-  it('accepts an amount that only just fits under the total cap', () => {
-    // 20 × the default 5 people is exactly the 100 NIM launch cap.
-    renderCreate({ discoverBridge: bridgeOf(new MockBridge()) }, '/create?amount=20')
-    expect(amountField().value).toBe('20')
+  it('accepts an amount that the old launch cap would have refused', () => {
+    // 21 × the default 5 people is 105 NIM, one NIM past the ceiling that used
+    // to live in `money.ts`. There is no ceiling to be past any more.
+    renderCreate({ discoverBridge: bridgeOf(new MockBridge()) }, '/create?amount=21')
+    expect(amountField().value).toBe('21')
+    expect(totalNim()).toBe('105 NIM')
   })
 
   it('leaves the seeded amount fully editable', () => {
@@ -445,7 +490,6 @@ describe('Create — "Drop one back" prefill', () => {
     ['zero written out', '0.00000'],
     ['an empty value', ''],
     ['more than five decimals', '0.123456'],
-    ['a total over the 100 NIM cap at the default count', '21'],
     ['an absurd number', '99999999999999999999'],
     ['whitespace', '  2  '],
   ]
@@ -458,9 +502,9 @@ describe('Create — "Drop one back" prefill', () => {
       )
       expect(amountField().value).toBe('')
       expect(totalNim()).toBe('0 NIM')
-      // The default form has no complaint on it; the cap note is for a total the
-      // sponsor actually built.
-      expect(screen.queryByText(/A drop can hold up to 100 NIM/i)).toBeNull()
+      // The default form has no complaint on it; the capacity note is for a
+      // total the sponsor actually built.
+      expect(screen.queryByTestId('over-cap')).toBeNull()
       expect(document.body.textContent ?? '').not.toMatch(/invalid|not a valid|error/i)
     })
   }
@@ -528,11 +572,12 @@ describe('Create — review sheet', () => {
 
 /**
  * The single most important honesty surface in the product. NimDrops is a
- * custodial hot wallet with a disclosed cap and no on-chain escrow, and the
- * sponsor has to understand that BEFORE a wallet asks them to approve anything.
+ * custodial hot wallet with no on-chain escrow and, since the caps came out, no
+ * ceiling on how much of a stranger's money it is holding. The sponsor has to
+ * understand that BEFORE a wallet asks them to approve anything.
  *
- * The server owns the words — it enforces the caps and holds the key, so any
- * sentence written on this side could drift away from what is actually true.
+ * The server owns the words — it holds the key and knows the live numbers, so
+ * any sentence written on this side could drift away from what is true.
  * These tests defend the two properties that follow from that: every point it
  * sends is rendered, and it is rendered in the order it sent them.
  */
@@ -593,37 +638,84 @@ describe('Create — the custody disclosure', () => {
 })
 
 describe('Create — the live cap', () => {
-  it('shows the ceiling and the headroom before an amount is typed', async () => {
+  it('shows the headroom before an amount is typed, when there is a ceiling', async () => {
     installFetch({ custody: { status: 200, body: pilotDisclosure() } })
     renderCreate({ discoverBridge: bridgeOf(new MockBridge()) })
 
     const limits = await screen.findByTestId('live-limits')
-    expect(within(limits).getByText('2 NIM')).toBeTruthy()
     expect(within(limits).getByText('2 of 2 NIM')).toBeTruthy()
     expect(within(limits).getByText('0 of 1')).toBeTruthy()
     // On screen before the field it constrains, not after a refusal.
     expect(amountField().value).toBe('')
   })
 
-  it('refuses a total over the cap on this screen rather than at the server', async () => {
+  it('refuses a total over the free headroom here rather than at the server', async () => {
     installFetch({ custody: { status: 200, body: pilotDisclosure() } })
     renderCreate({ discoverBridge: bridgeOf(new MockBridge()) })
     await screen.findByTestId('live-limits')
 
     fillForm({ amount: '2', people: '5' })
     expect(screen.getByTestId('over-cap').textContent).toMatch(
-      /a drop can hold up to 2 NIM right now/i,
+      /2 NIM is free across all drops right now/i,
     )
     expect((screen.getByRole('button', { name: /review drop/i }) as HTMLButtonElement).disabled).toBe(
       true,
     )
 
-    // Back under the cap and the flow reopens.
+    // Back under the headroom and the flow reopens.
     fillForm({ amount: '0.4', people: '5' })
     expect(screen.queryByTestId('over-cap')).toBeNull()
     expect((screen.getByRole('button', { name: /review drop/i }) as HTMLButtonElement).disabled).toBe(
       false,
     )
+  })
+})
+
+/**
+ * The default deployment, and the shape of the product the caps were removed
+ * for: 2 NIM each to 100 people is one signature and 200 NIM, and nothing on
+ * this screen may stand in its way.
+ */
+describe('Create — no ceiling', () => {
+  async function renderUncapped() {
+    installFetch({ custody: { status: 200, body: uncappedDisclosure() } })
+    renderCreate({ discoverBridge: bridgeOf(new MockBridge()) })
+    await screen.findByRole('button', { name: /review drop/i })
+  }
+
+  it('shows no limits box, because there is nothing to be limited by', async () => {
+    await renderUncapped()
+    expect(screen.queryByTestId('live-limits')).toBeNull()
+  })
+
+  it('lets a 100-person, 200 NIM drop through to review', async () => {
+    await renderUncapped()
+    fillForm({ amount: '2', people: '100' })
+    expect(totalNim()).toBe('200 NIM')
+    expect(screen.queryByTestId('over-cap')).toBeNull()
+    expect((screen.getByRole('button', { name: /review drop/i }) as HTMLButtonElement).disabled).toBe(
+      false,
+    )
+  })
+
+  it('still holds the floor at two people', async () => {
+    await renderUncapped()
+    fillForm({ amount: '2', people: '1' })
+    // The stepper clamps rather than letting an invalid count reach the server.
+    expect((screen.getByLabelText(/how many people/i) as HTMLInputElement).value).toBe('2')
+    expect((screen.getByRole('button', { name: /review drop/i }) as HTMLButtonElement).disabled).toBe(
+      false,
+    )
+  })
+
+  it('tells the sponsor what is actually at risk instead of a ceiling', async () => {
+    await renderUncapped()
+    fireEvent.click(screen.getByTestId('custody-card'))
+    const sheet = screen.getByRole('dialog')
+    expect(sheet.textContent).toMatch(/nobody has claimed yet/i)
+    expect(sheet.textContent).toMatch(/412\.5 NIM right now/)
+    expect(sheet.textContent, 'say why no contract can hold it').toMatch(/HTLC/)
+    expect(sheet.textContent, 'no ceiling may be promised').not.toMatch(/can hold up to/i)
   })
 })
 
@@ -722,9 +814,9 @@ describe('Create — capacity refusals', () => {
     await fundWith(bridge)
 
     const screen_ = await screen.findByTestId('drop-too-large')
-    expect(within(screen_).getByRole('heading', { name: /over the cap/i })).toBeTruthy()
+    expect(within(screen_).getByRole('heading', { name: /over the operator/i })).toBeTruthy()
     // The live ceiling, and the two things that change it.
-    expect(screen_.textContent).toMatch(/a drop can hold up to 2 NIM right now/i)
+    expect(screen_.textContent).toMatch(/the operator has capped all live drops at 2 NIM/i)
     expect(screen_.textContent).toMatch(/lower the amount per person or the number of people/i)
     // No retry: this request cannot succeed later, and a retry button would
     // walk the sponsor into the same 422.
@@ -778,7 +870,7 @@ describe('Create — capacity refusals', () => {
 
     const screen_ = await screen.findByTestId('no-capacity')
     expect(screen_.textContent).toMatch(/another drop is already running/i)
-    expect(screen_.textContent).toMatch(/this pilot runs one at a time/i)
+    expect(screen_.textContent).toMatch(/this deployment runs one at a time/i)
   })
 
   it('re-reads the limits after a refusal so the numbers on screen are current', async () => {

@@ -13,7 +13,7 @@ import {
   type DropState,
   type PilotLimits,
 } from '../api'
-import { capProblem, formatNim, lunaFromNim, MAX_CLAIMS, MIN_CLAIMS } from '../money'
+import { formatNim, lunaFromNim, MAX_CLAIM_COUNT, MIN_CLAIMS, shapeProblem } from '../money'
 import { nimiqPayDeeplink, resolveBridge, type BridgeResult } from '../sdk/adapter'
 import { clearFunding, readFunding, writeFunding } from '../state/funding'
 import AmountInput from '../ui/AmountInput'
@@ -109,15 +109,15 @@ const DEFAULT_CLAIM_COUNT = 5
  * number already in the field.
  *
  * A link is not typed input, but it is held to exactly the same rules — the same
- * `lunaFromNim` parse and the same `capProblem` caps the form itself uses. A
- * param that fails any of them is dropped in silence and the field opens empty:
+ * `lunaFromNim` parse and the same `shapeProblem` check the form itself uses. A
+ * param that fails either is dropped in silence and the field opens empty:
  * a stale or hand-edited link is not a mistake the claimant made, so it is not a
  * mistake they are shown. Only the amount travels; the people count is the
  * sponsor's own decision and stays at its default.
  */
 function prefillAmount(raw: string | null): string {
   if (raw === null) return ''
-  return capProblem(lunaFromNim(raw), DEFAULT_CLAIM_COUNT) === null ? raw : ''
+  return shapeProblem(lunaFromNim(raw), DEFAULT_CLAIM_COUNT) === null ? raw : ''
 }
 
 type Phase =
@@ -283,7 +283,7 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
   const paused = custody?.paused === true
 
   const amountLuna = lunaFromNim(amountEach)
-  const problem = capProblem(amountLuna, claimCount)
+  const problem = shapeProblem(amountLuna, claimCount)
   const totalLuna = amountLuna === null ? null : amountLuna * BigInt(claimCount)
   /**
    * The figure the field prints, with no unit on it: `Amount` sets the mark and
@@ -293,14 +293,19 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
   const totalFigure = totalLuna === null || problem === 'amount' ? '0' : formatNim(totalLuna)
   const totalText = `${totalFigure} NIM`
   /**
-   * The deployment's own ceiling, which on the mainnet pilot is two orders of
-   * magnitude under the 100 NIM launch cap in `money.ts`. Checked here so a
-   * sponsor meets the limit while they are still choosing a number, rather than
-   * as a 422 after they have committed to one.
+   * How much room this deployment has left, or `null` when the operator has set
+   * no ceiling — which is the default, and the case a sponsor is normally in.
+   *
+   * Nothing here bounds the size of a drop. The one check the form still makes
+   * is against the ROOM THAT IS ACTUALLY FREE, and it exists for a single
+   * reason: a sponsor must never fill in a whole form and be refused at the
+   * fund button for something that was knowable while they were still choosing
+   * a number. It is a live figure and it can go stale between the read and the
+   * tap, which is what the `no-capacity` screen is for.
    */
-  const capLuna = custody === null ? null : lunaOf(custody.limits.perDropMaxLuna)
-  const overCap = totalLuna !== null && capLuna !== null && totalLuna > capLuna
-  const ready = problem === null && sponsorLabel.trim().length > 0 && !overCap && !paused
+  const freeLuna = custody?.limits.remainingLuna == null ? null : lunaOf(custody.limits.remainingLuna)
+  const overCapacity = totalLuna !== null && freeLuna !== null && totalLuna > freeLuna
+  const ready = problem === null && sponsorLabel.trim().length > 0 && !overCapacity && !paused
 
   // A draft that has already been created is reused on retry: the sponsor is
   // approving THE SAME funding request, not a new one.
@@ -603,7 +608,8 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
   }
 
   /**
-   * 422. The requested total is larger than the whole cap, so there is no
+   * 422. Reachable only when the operator has put the principal cap back on as
+   * a kill switch: the total is larger than the whole ceiling, so there is no
    * later at which it would work and no retry button on this screen.
    */
   if (phase === 'too-large') {
@@ -611,11 +617,11 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
       <Recover
         testId="drop-too-large"
         mark="info"
-        title="That total is over the cap"
+        title="That total is over the operator's limit"
         body={
-          custody
-            ? `A drop can hold up to ${custody.limits.perDropMax} NIM right now. Lower the amount per person or the number of people, then review it again.`
-            : 'This drop is larger than the cap allows. Lower the amount per person or the number of people, then review it again.'
+          custody?.limits.aggregateMax
+            ? `The operator has capped all live drops at ${custody.limits.aggregateMax} NIM. Lower the amount per person or the number of people, then review it again.`
+            : 'The operator has capped how much can be live at once. Lower the amount per person or the number of people, then review it again.'
         }
         action="Change the amount"
         onAction={() => setPhase('form')}
@@ -774,13 +780,11 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
         {/* The money the sponsor is about to send, derived as they type. */}
         <Money nim={totalFigure} caption={`total for ${claimCount} people`} testId="derived-total" />
 
-        {overCap && custody ? (
+        {overCapacity && custody ? (
           <Alert testId="over-cap">
-            A drop can hold up to {custody.limits.perDropMax} NIM right now. Lower the amount or the
-            number of people.
+            {custody.limits.remaining} NIM is free across all drops right now. Lower the amount or
+            the number of people.
           </Alert>
-        ) : problem === 'total' ? (
-          <Alert>A drop can hold up to 100 NIM while NimDrops is new.</Alert>
         ) : null}
 
         {/* The ceiling, before a number is typed against it — or, when the
@@ -1004,22 +1008,26 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
 // ---- the custody disclosure ----------------------------------------------------
 
 /**
- * The live ceiling, on the form, above the fields.
+ * What this deployment has left, on the form, above the fields — and nothing at
+ * all when there is nothing to be left of.
  *
- * A sponsor choosing an amount needs the number they are choosing against. The
- * mainnet pilot's aggregate cap is two orders of magnitude under the 100 NIM
- * launch cap, so this is the difference between typing a total that works and
- * typing one the server has to refuse.
+ * There is no ceiling on a drop any more, so most of the time the honest answer
+ * to "what am I choosing against" is "nothing", and a box saying so would be a
+ * box saying nothing. It renders only when the operator has actually set a
+ * ceiling or a drop limit, which is the only case where a sponsor's number can
+ * be refused for a reason they could have seen first.
  */
 function LiveLimits({ limits }: { limits: PilotLimits }) {
+  if (limits.aggregateMax === null && limits.maxLiveDrops === null) return null
   return (
     <div data-testid="live-limits" className="nd-limits">
       <p>Limits right now</p>
       <dl className="nd-rows">
-        <Row label="Most in one drop">{limits.perDropMax} NIM</Row>
-        <Row label="Free across all drops">
-          {limits.remaining} of {limits.aggregateMax} NIM
-        </Row>
+        {limits.aggregateMax === null ? null : (
+          <Row label="Free across all drops">
+            {limits.remaining} of {limits.aggregateMax} NIM
+          </Row>
+        )}
         {limits.maxLiveDrops === null ? null : (
           <Row label="Drops running">
             {limits.liveDrops} of {limits.maxLiveDrops}
@@ -1160,7 +1168,16 @@ function ReservationNote({
   onLapsed: () => void
 }) {
   const deadline = Date.parse(expiresAt)
-  const usable = Number.isFinite(deadline)
+  /**
+   * A reservation is only worth telling a sponsor about when it is holding
+   * something back from somebody else. With no principal ceiling and no drop
+   * limit it holds nothing — the row still has its expiry, and the moment an
+   * operator arms either limit it starts mattering again, so the server keeps
+   * writing it. Saying "your room is held" when there is no room to hold would
+   * be a sentence about nothing.
+   */
+  const reserves = custody.limits.aggregateMax !== null || custody.limits.maxLiveDrops !== null
+  const usable = reserves && Number.isFinite(deadline)
   const [now, setNow] = useState(() => Date.now())
   const lapsed = usable && deadline <= now
 
@@ -1177,11 +1194,15 @@ function ReservationNote({
   if (!usable) return null
 
   const minutesLeft = Math.max(1, Math.ceil((deadline - now) / 60_000))
+  const free =
+    custody.limits.remaining === null
+      ? ''
+      : ` ${custody.limits.remaining} NIM of the ${custody.limits.aggregateMax} NIM cap is free right now.`
   const text = lapsed
-    ? `The ${windowMinutes} minute hold on your room has ended. ${custody.limits.remaining} NIM of the ${custody.limits.aggregateMax} NIM cap is free right now, so funding may still work — it is just no longer held for you.`
+    ? `The ${windowMinutes} minute hold on your room has ended.${free} Funding may still work — it is just no longer held for you.`
     : minutesLeft <= 1
-      ? 'Your room in the cap is held for less than a minute more.'
-      : `Your room in the cap is held for another ${minutesLeft} minutes.`
+      ? 'Your room is held for less than a minute more.'
+      : `Your room is held for another ${minutesLeft} minutes.`
 
   return (
     <p data-testid="reservation-note" role="status" className="nd-note mt-4">
@@ -1206,18 +1227,27 @@ function noCapacityBody(o: {
       : 'try again shortly'
   if (custody && custody.limits.remainingDrops === 0) {
     const sentence = wait.charAt(0).toUpperCase() + wait.slice(1)
-    return `Another drop is already running, and this pilot runs one at a time. ${sentence}.`
+    const many = custody.limits.maxLiveDrops === 1 ? 'one at a time' : `${custody.limits.maxLiveDrops} at a time`
+    return `Another drop is already running, and this deployment runs ${many}. ${sentence}.`
   }
-  if (custody) {
+  if (custody && custody.limits.remaining !== null) {
     return `This drop needs ${totalText}, and ${custody.limits.remaining} NIM of the ${custody.limits.aggregateMax} NIM cap is free right now. Lower the total, or ${wait}.`
   }
   const sentence = wait.charAt(0).toUpperCase() + wait.slice(1)
-  return `Someone else is holding the room in the cap. ${sentence}.`
+  return `Someone else is holding the room. ${sentence}.`
 }
 
+/**
+ * How many people, with a floor and no ceiling.
+ *
+ * The ceiling used to be twenty, and twenty is the number that made the product
+ * pointless: one signature paying a hundred people is the whole idea. What is
+ * left is the floor — a one-person drop is a Cashlink — and the width of the
+ * column the count is stored in, which is not a limit anyone will type.
+ */
 function PeopleStepper({ value, onChange }: { value: number; onChange: (n: number) => void }) {
   const id = useId()
-  const clamp = (n: number) => Math.min(MAX_CLAIMS, Math.max(MIN_CLAIMS, n))
+  const clamp = (n: number) => Math.min(MAX_CLAIM_COUNT, Math.max(MIN_CLAIMS, n))
   return (
     <div>
       <label htmlFor={id} className="nd-lab">
@@ -1235,7 +1265,7 @@ function PeopleStepper({ value, onChange }: { value: number; onChange: (n: numbe
           type="number"
           inputMode="numeric"
           min={MIN_CLAIMS}
-          max={MAX_CLAIMS}
+          max={MAX_CLAIM_COUNT}
           value={value}
           onChange={(event) => {
             const next = Number.parseInt(event.target.value, 10)
@@ -1243,12 +1273,10 @@ function PeopleStepper({ value, onChange }: { value: number; onChange: (n: numbe
           }}
           className="nd-input"
         />
-        <StepButton label="One more person" onClick={() => onChange(clamp(value + 1))} disabled={value >= MAX_CLAIMS}>
+        <StepButton label="One more person" onClick={() => onChange(clamp(value + 1))} disabled={value >= MAX_CLAIM_COUNT}>
           +
         </StepButton>
-        <p className="nd-range">
-          {MIN_CLAIMS}–{MAX_CLAIMS}
-        </p>
+        <p className="nd-range">{MIN_CLAIMS} or more</p>
       </div>
     </div>
   )

@@ -30,6 +30,25 @@ import {
  * lock alongside signing, not in a second scheduler (PLAN.md kill criterion).
  */
 
+/**
+ * THROUGHPUT, since a drop may now have any number of claims.
+ *
+ * `runWorkerTick` signs at most ONE queued transfer per tick, and only when no
+ * open attempt changed state in that same tick — so signing and progressing
+ * alternate. Measured against real Postgres (`claims.race.test.ts`, the
+ * 100-person drop): 100 payouts take 200 ticks, i.e. almost exactly two ticks
+ * per payout, which at this interval is about four seconds of settlement per
+ * claimant. A 100-person drop therefore takes roughly seven minutes to pay out
+ * in full, plus one finality tail; a 20-person drop takes under two.
+ *
+ * This is a scheduling property, not a correctness one: the database is the
+ * queue, every invariant is re-checked per signature, and a restart resumes.
+ * It is written down because a sponsor funding a large drop is entitled to
+ * know the shape of the wait, and because lowering this number is the obvious
+ * lever if the wait ever matters more than the load on the RPC node — each
+ * tick also polls every open attempt, so a large drop mid-settlement makes one
+ * `getTransaction` call per unconfirmed payout per tick.
+ */
 export const TICK_INTERVAL_MS = 2_000
 export const SOLVENCY_RECONCILE_INTERVAL_MS = 60_000
 export const HEARTBEAT_INTERVAL_MS = 24 * 60 * 60 * 1_000

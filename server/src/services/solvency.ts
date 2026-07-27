@@ -79,7 +79,17 @@ export class UnreconciledShortfallError extends InsolventError {}
  */
 export class IndeterminateBroadcastError extends InsolventError {}
 
-/** The requested addition would push live principal past `max_live_principal_luna`. */
+/**
+ * The requested addition would push live principal past `max_live_principal_luna`.
+ *
+ * That ceiling is OPTIONAL and off by default (migration 015): how much a drop
+ * holds is the sponsor's decision, and what the deployment can actually pay is
+ * decided by the solvency invariant against the ledger, not by a policy number.
+ * The cap survives only as an operator kill switch — a way to stop new
+ * liabilities during an incident while the payouts already owed keep settling,
+ * which `pause` cannot express because it stops those too. Nothing in this file
+ * throws this while the column is NULL.
+ */
 export class CapExceededError extends SolvencyError {}
 
 /**
@@ -109,9 +119,34 @@ export class NoHeadroomError extends CapacityError {}
 
 export interface Controls {
   paused: boolean
-  maxLivePrincipalLuna: bigint
-  /** Ceiling on live + reserved drops, or `null` for "principal cap only". */
+  /**
+   * Operator kill switch: the most principal all live drops may owe at once, or
+   * `null` for no ceiling — which is the default since migration 015. See
+   * {@link CapExceededError}.
+   */
+  maxLivePrincipalLuna: bigint | null
+  /** Ceiling on live + reserved drops, or `null` for no count limit. */
   maxLiveDrops: number | null
+  /**
+   * A FLAT floor the ledger may not fall below, and deliberately not a
+   * per-claim number.
+   *
+   * It does not scale with claim count, and since the caps came out a drop can
+   * have any number of claims — so the arithmetic is worth writing down.
+   * Network fees are paid out of {@link operatorFloatLuna}, so `assertSolvent`
+   * reduces to `float − fees spent so far >= this reserve`. At
+   * `NIMIQ_FEE_LUNA = 0`, which is the default AND what `docker-compose.yml`
+   * gives both containers, fees are zero and no claim count can exhaust
+   * anything. At a fee of `f`, a deployment can sign
+   * `(float − reserve) / f` outgoing transactions for the life of that float,
+   * across every drop.
+   *
+   * Nothing here knows `f`: it belongs to the chain client. An operator who
+   * sets a non-zero fee has to size the float for the drops they expect, and
+   * the failure mode if they do not is a drop that funds and then stops paying
+   * part-way through, with the worker deferring and alerting rather than
+   * signing. See the README's note on `NIMIQ_FEE_LUNA`.
+   */
   configuredFeeReserveLuna: bigint
   /**
    * Operator-attested custody money that is not any drop's funding — the
@@ -141,7 +176,7 @@ export interface Controls {
 
 interface ControlsRow {
   paused: boolean
-  max_live_principal_luna: string
+  max_live_principal_luna: string | null
   max_live_drops: number | null
   configured_fee_reserve_luna: string
   operator_float_luna: string
@@ -156,7 +191,8 @@ interface ControlsRow {
 function toControls(row: ControlsRow): Controls {
   return {
     paused: row.paused,
-    maxLivePrincipalLuna: BigInt(row.max_live_principal_luna),
+    maxLivePrincipalLuna:
+      row.max_live_principal_luna === null ? null : BigInt(row.max_live_principal_luna),
     maxLiveDrops: row.max_live_drops,
     configuredFeeReserveLuna: BigInt(row.configured_fee_reserve_luna),
     operatorFloatLuna: BigInt(row.operator_float_luna),
@@ -359,13 +395,14 @@ export async function liveDropCount(db: Queryable): Promise<number> {
 
 /** Everything a create screen needs to say what will and will not fit. */
 export interface CapacitySnapshot {
-  maxLivePrincipalLuna: bigint
+  /** The operator kill switch, or `null` when no principal ceiling is set. */
+  maxLivePrincipalLuna: bigint | null
   /** Principal of drops whose funding was accepted and is not yet settled. */
   outstandingLuna: bigint
   /** Principal promised to drafts that have not activated. */
   reservedLuna: bigint
-  /** `max − outstanding − reserved`, floored at zero. */
-  remainingLuna: bigint
+  /** `max − outstanding − reserved`, floored at zero; `null` when uncapped. */
+  remainingLuna: bigint | null
   maxLiveDrops: number | null
   liveDrops: number
   reservedDrafts: number
@@ -389,13 +426,14 @@ export async function readCapacity(
   const reserved = await reservedPrincipalLuna(db)
   const liveDrops = await liveDropCount(db)
   const committedLuna = outstandingLuna + reserved.luna
-  const remainingLuna = controls.maxLivePrincipalLuna - committedLuna
+  const remainingLuna =
+    controls.maxLivePrincipalLuna === null ? null : controls.maxLivePrincipalLuna - committedLuna
   const committedDrops = liveDrops + reserved.drafts
   return {
     maxLivePrincipalLuna: controls.maxLivePrincipalLuna,
     outstandingLuna,
     reservedLuna: reserved.luna,
-    remainingLuna: remainingLuna > 0n ? remainingLuna : 0n,
+    remainingLuna: remainingLuna === null ? null : remainingLuna > 0n ? remainingLuna : 0n,
     maxLiveDrops: controls.maxLiveDrops,
     liveDrops,
     reservedDrafts: reserved.drafts,
@@ -416,6 +454,14 @@ export async function readCapacity(
  *
  * Both carry the snapshot they were decided from, so the HTTP layer can state
  * the actual numbers instead of "temporarily unavailable".
+ *
+ * SINCE MIGRATION 015 both principal refusals are CONDITIONAL on a cap being
+ * set. With `max_live_principal_luna` NULL there is no size a draft can be too
+ * big for and no headroom to run out of, so a draft of any total is issued
+ * instructions and the only thing that can still refuse it is the solvency
+ * invariant at activation — which is the honest place for it, because it is
+ * the only check that speaks about money this deployment can actually pay.
+ * `max_live_drops`, which is a different question, is unaffected.
  */
 export async function assertCapacityFor(
   db: Queryable,
@@ -424,13 +470,14 @@ export async function assertCapacityFor(
 ): Promise<CapacitySnapshot> {
   if (addLuna <= 0n) throw new SolvencyError('addLuna must be positive')
   const capacity = await readCapacity(db, controls)
+  const { maxLivePrincipalLuna: cap, remainingLuna: free } = capacity
 
-  if (addLuna > capacity.maxLivePrincipalLuna) {
+  if (cap !== null && addLuna > cap) {
     throw new DropTooLargeError(
       capacity,
       addLuna,
       `a drop of ${addLuna} luna cannot run here: the whole deployment is capped at ` +
-        `${capacity.maxLivePrincipalLuna} luna of live principal`,
+        `${cap} luna of live principal`,
     )
   }
   if (capacity.maxLiveDrops !== null && capacity.maxLiveDrops < 1) {
@@ -440,12 +487,12 @@ export async function assertCapacityFor(
       'this deployment is configured to hold no live drops at all (max_live_drops = 0)',
     )
   }
-  if (addLuna > capacity.remainingLuna) {
+  if (free !== null && addLuna > free) {
     throw new NoHeadroomError(
       capacity,
       addLuna,
-      `a drop of ${addLuna} luna does not fit: ${capacity.remainingLuna} luna of the ` +
-        `${capacity.maxLivePrincipalLuna} luna cap is free (${capacity.outstandingLuna} live, ` +
+      `a drop of ${addLuna} luna does not fit: ${free} luna of the ` +
+        `${cap} luna cap is free (${capacity.outstandingLuna} live, ` +
         `${capacity.reservedLuna} reserved by drafts)`,
     )
   }
@@ -797,12 +844,19 @@ export async function resolveIndeterminateBroadcasts(
 }
 
 /**
- * Enforce both design §10.2 invariants before adding `addLuna` of new principal
- * (a funding activation passes the drop's expected funding; allocation and
- * outgoing signatures pass `0n`, since that principal is already outstanding):
+ * Enforce design §10.2 before adding `addLuna` of new principal (a funding
+ * activation passes the drop's expected funding; allocation and outgoing
+ * signatures pass `0n`, since that principal is already outstanding):
  *
  *   ledger balance + addLuna        >= outstanding principal + addLuna + fee reserve
- *   outstanding principal + addLuna <= max_live_principal_luna
+ *   outstanding principal + addLuna <= max_live_principal_luna   (only if set)
+ *
+ * THE TWO LINES ARE NOT THE SAME KIND OF THING, and migration 015 turned the
+ * second one off by default without touching the first. The balance requirement
+ * is arithmetic truth: it is what stops this system creating a liability it
+ * cannot cover, and it is the ONLY thing now standing between a sponsor and a
+ * drop nobody can pay. The cap comparison is a policy ceiling — an operator kill
+ * switch — and it is skipped entirely while `max_live_principal_luna` is NULL.
  *
  * `addLuna` appears in the balance requirement because of G1 review finding 3:
  * checking only `balance >= outstanding + reserve` let an activation pass while
@@ -882,11 +936,16 @@ export async function assertSolvent(
     )
   }
 
-  const projected = outstanding + addLuna
-  if (projected > controls.maxLivePrincipalLuna) {
-    throw new CapExceededError(
-      `projected live principal ${projected} exceeds cap ${controls.maxLivePrincipalLuna}`,
-    )
+  // The policy ceiling, and only when an operator has set one. Deliberately
+  // AFTER the balance requirement: when both would refuse, "the ledger cannot
+  // cover this" is the more important sentence.
+  if (controls.maxLivePrincipalLuna !== null) {
+    const projected = outstanding + addLuna
+    if (projected > controls.maxLivePrincipalLuna) {
+      throw new CapExceededError(
+        `projected live principal ${projected} exceeds cap ${controls.maxLivePrincipalLuna}`,
+      )
+    }
   }
 }
 
@@ -1418,14 +1477,18 @@ async function bindNetwork(pool: Pool, chain: ChainClient): Promise<NetworkName>
  * These are DEFAULTS, not limits an operator cannot change — `recover.ts` and
  * plain SQL can raise them afterwards. What they are is the values a mainnet
  * deployment starts with when nobody remembers to set anything, and the whole
- * point is the direction of that forgetting. Migration 001 seeds a 100 NIM cap,
- * no drop-count limit and `paused = false`, which is a reasonable testnet
- * sandbox and an unreasonable first day with real money.
+ * point is the direction of that forgetting. Migration 001 seeds no drop-count
+ * limit and `paused = false`, which is a reasonable testnet sandbox and an
+ * unreasonable first day with real money.
  *
- *  - `maxLivePrincipalLuna` 200000 luna = 2 NIM. The largest total this pilot
- *    can owe claimants at any moment.
- *  - `maxLiveDrops` 1. Two 1 NIM drops fit inside a 2 NIM cap, and the first
- *    run is meant to be one drop watched by a human.
+ *  - `maxLivePrincipalLuna` null. NO principal ceiling: how much a drop holds
+ *    is the sponsor's decision (migration 015), and what the deployment can
+ *    actually pay is decided by the solvency invariant against the ledger. This
+ *    used to be 200000 luna = 2 NIM, which made a 100-person packet impossible
+ *    to express — the one thing the product exists to do.
+ *  - `maxLiveDrops` 1. Unchanged, and now the only ceiling a fresh mainnet
+ *    database has: the first run is meant to be one drop watched by a human.
+ *    Set it to NULL to let drops run concurrently.
  *  - `configuredFeeReserveLuna` 100000 luna = 1 NIM, unchanged from 001. It has
  *    to be covered by an attested operator float before anything can activate.
  *  - `paused` true. Opening the deployment is then a deliberate `unpause` after
@@ -1433,7 +1496,7 @@ async function bindNetwork(pool: Pool, chain: ChainClient): Promise<NetworkName>
  *    rather than the default state of a container that just started.
  */
 export const MAINNET_PILOT_DEFAULTS = {
-  maxLivePrincipalLuna: 200_000n,
+  maxLivePrincipalLuna: null,
   maxLiveDrops: 1,
   configuredFeeReserveLuna: 100_000n,
   paused: true,
@@ -1460,13 +1523,13 @@ async function applyPilotDefaults(pool: Pool, network: NetworkName): Promise<voi
      WHERE singleton`,
     [
       MAINNET_PILOT_DEFAULTS.paused,
-      MAINNET_PILOT_DEFAULTS.maxLivePrincipalLuna.toString(),
+      MAINNET_PILOT_DEFAULTS.maxLivePrincipalLuna,
       MAINNET_PILOT_DEFAULTS.maxLiveDrops,
       MAINNET_PILOT_DEFAULTS.configuredFeeReserveLuna.toString(),
     ],
   )
   logWarn('mainnet_pilot_defaults_applied', {
-    maxLivePrincipalLuna: MAINNET_PILOT_DEFAULTS.maxLivePrincipalLuna.toString(),
+    maxLivePrincipalLuna: MAINNET_PILOT_DEFAULTS.maxLivePrincipalLuna,
     maxLiveDrops: MAINNET_PILOT_DEFAULTS.maxLiveDrops,
     configuredFeeReserveLuna: MAINNET_PILOT_DEFAULTS.configuredFeeReserveLuna.toString(),
     paused: MAINNET_PILOT_DEFAULTS.paused,

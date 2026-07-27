@@ -181,12 +181,12 @@ interface DisclosureBody {
   expiryHours: number
   fundingWindowMinutes: number
   limits: {
-    perDropMax: string
-    perDropMaxLuna: string
-    aggregateMax: string
-    aggregateMaxLuna: string
-    remaining: string
-    remainingLuna: string
+    aggregateMax: string | null
+    aggregateMaxLuna: string | null
+    remaining: string | null
+    remainingLuna: string | null
+    atRisk: string
+    atRiskLuna: string
     maxLiveDrops: number | null
     liveDrops: number
     reservedDrafts: number
@@ -322,7 +322,7 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
     await pool.query(
       `UPDATE custody_controls
        SET paused = false,
-           max_live_principal_luna = 10000000,
+           max_live_principal_luna = NULL,
            max_live_drops = NULL,
            configured_fee_reserve_luna = ${FEE_FLOAT},
            operator_float_luna = ${FEE_FLOAT},
@@ -469,15 +469,15 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
   // words and the numbers, and the web layer's job is to render all of them
   // above the fund button.
 
-  async function setCaps(o: { capLuna?: bigint; maxLiveDrops?: number | null }): Promise<void> {
+  async function setCaps(o: { capLuna?: bigint | null; maxLiveDrops?: number | null }): Promise<void> {
     await pool.query(
       `UPDATE custody_controls SET max_live_principal_luna = $1, max_live_drops = $2
        WHERE singleton`,
-      [(o.capLuna ?? 10_000_000n).toString(), o.maxLiveDrops ?? null],
+      [o.capLuna === undefined || o.capLuna === null ? null : o.capLuna.toString(), o.maxLiveDrops ?? null],
     )
   }
 
-  it('serves the custody disclosure unauthenticated, with live limits', async () => {
+  it('serves the custody disclosure unauthenticated, with no cap to point at', async () => {
     const body = await json<DisclosureBody>(await get('/api/custody'))
 
     expect(body.network).toBe('TestAlbatross')
@@ -485,21 +485,25 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
     expect(body.mainnetPilot).toBe(false)
     expect(body.paused).toBe(false)
     expect(body.expiryHours).toBe(24)
-    expect(body.limits.aggregateMax).toBe('100')
-    expect(body.limits.remaining).toBe('100')
+    expect(body.limits.aggregateMax, 'no ceiling is set by default').toBeNull()
+    expect(body.limits.remaining).toBeNull()
+    expect(body.limits.atRisk, 'the honest number: funded and unclaimed').toBe('0')
     expect(body.limits.liveDrops).toBe(0)
 
-    // Every disclosure the sponsor is owed, by id rather than by prose.
+    // Every disclosure the sponsor is owed, by id rather than by prose. There
+    // is no `limits` point and no `funding_window` point: with nothing capped
+    // there is no room to run out of and none to hold for anybody.
     const ids = body.points.map((p) => p.id)
     expect(ids).toEqual([
       'not_escrow',
+      'why_no_contract',
       'operator_key',
-      'limits',
+      'exposure',
+      'mitigations',
       'destination',
       'test_network',
       'expiry_clock',
       'refunds',
-      'funding_window',
     ])
     const text = body.points.map((p) => p.text).join('\n')
     expect(text, 'the custody address must be readable before approving').toContain(CUSTODY)
@@ -507,7 +511,29 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
       /only key.*can move everything/i,
     )
     expect(text).toMatch(/not an escrow contract/i)
+    // The claim the old copy made — that hard caps were the mitigation — is
+    // false now, and a false custody disclosure is worse than none.
+    expect(text, 'never promise a ceiling that does not exist').not.toMatch(/can hold up to/i)
+    expect(text, 'say why there is no contract, not just that there is none').toMatch(/HTLC/)
+    expect(text, 'name the exposure').toMatch(/nobody has claimed yet/i)
+    expect(text, 'and do not dress the mitigations up').toMatch(/is not cryptography/i)
     expect(text, 'no exclamation marks in interface copy').not.toContain('!')
+  })
+
+  it('names the operator’s cap only when the operator has set one', async () => {
+    await setCaps({ capLuna: 1_000_000n, maxLiveDrops: 2 })
+    const body = await json<DisclosureBody>(await get('/api/custody'))
+
+    expect(body.limits.aggregateMax).toBe('10')
+    expect(body.limits.remaining).toBe('10')
+    const ids = body.points.map((p) => p.id)
+    expect(ids).toContain('limits')
+    expect(ids, 'a reservation only means something when there is room to reserve').toContain(
+      'funding_window',
+    )
+    const limits = body.points.find((p) => p.id === 'limits')
+    expect(limits?.text).toContain('10 NIM')
+    expect(limits?.text).toContain('2 drops can run at a time')
   })
 
   it('names the mainnet pilot and the pause state in the disclosure', async () => {
@@ -515,6 +541,21 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
     const paused = await json<DisclosureBody>(await get('/api/custody'))
     expect(paused.paused).toBe(true)
     expect(paused.points[0].id, 'a closed door is the first thing to say').toBe('paused')
+  })
+
+  it('says the drop limit and holds the room, with no principal cap at all', async () => {
+    // The shape a mainnet deployment actually runs after migration 015: no
+    // principal ceiling, one drop at a time. The reservation still means
+    // something here — it is holding the one slot — so the window is still said.
+    await setCaps({ maxLiveDrops: 1 })
+    const body = await json<DisclosureBody>(await get('/api/custody'))
+
+    expect(body.limits.aggregateMax).toBeNull()
+    expect(body.limits.maxLiveDrops).toBe(1)
+    const limits = body.points.find((p) => p.id === 'limits')
+    expect(limits?.text).toBe('Only one drop can run at a time.')
+    expect(limits?.text, 'never name a NIM ceiling that is not set').not.toContain('NIM')
+    expect(body.points.map((p) => p.id)).toContain('funding_window')
   })
 
   it('carries the disclosure on the draft, with this drop already counted', async () => {
@@ -528,7 +569,6 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
     // shown the number that includes their own drop rather than a stale one.
     expect(draft.disclosure.limits.remaining).toBe('5')
     expect(draft.disclosure.limits.reservedDrafts).toBe(1)
-    expect(draft.disclosure.limits.perDropMax).toBe('10')
     expect(draft.disclosure.points.map((p) => p.id)).toContain('limits')
   })
 
@@ -541,6 +581,9 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
     const message = await expectEnvelope(res, 422, 'drop_too_large')
     expect(message).toContain('4 NIM')
     expect(message, 'retrying will never help, so do not suggest it').not.toMatch(/try again/i)
+    expect(message, 'the ceiling is the operator’s choice, not a property of drops').toMatch(
+      /operator has capped/i,
+    )
 
     const { rows } = await pool.query<{ count: string }>('SELECT count(*)::text FROM drops')
     expect(rows[0].count, 'a refused draft holds no room of its own').toBe('0')
@@ -743,9 +786,11 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
       { sponsorLabel: '', amountEach: '1', claimCount: 5 },
       { sponsorLabel: 'S', amountEach: 1, claimCount: 5 },
       { sponsorLabel: 'S', amountEach: '1', claimCount: 1 },
-      { sponsorLabel: 'S', amountEach: '1', claimCount: 21 },
       { sponsorLabel: 'S', amountEach: '1', claimCount: 2.5 },
-      { sponsorLabel: 'S', amountEach: '1000', claimCount: 20 },
+      { sponsorLabel: 'S', amountEach: '1', claimCount: -5 },
+      // Past the width of the INT column the count is stored in. Not a policy
+      // ceiling — an impossible request answered as a 400 rather than a 500.
+      { sponsorLabel: 'S', amountEach: '1', claimCount: 2_147_483_648 },
       { sponsorLabel: 'S', amountEach: '0', claimCount: 5 },
       { sponsorLabel: 'S', amountEach: '1.000001', claimCount: 5 },
       { sponsorLabel: 'S', amountEach: '1', claimCount: 5, extra: true },

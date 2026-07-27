@@ -461,13 +461,17 @@ async function run(): Promise<void> {
     const feeReserveLuna = BigInt(solvencyBefore.feeReserveLuna)
     const headroomLuna = BigInt(solvencyBefore.solvencyHeadroomLuna)
     const attestedLuna = BigInt(solvencyBefore.attestedFloatDepositsLuna)
-    const capHeadroomLuna = BigInt(solvencyBefore.livePrincipalHeadroomLuna)
+    // `null` since migration 015 means no principal cap is set — not "no room".
+    const capHeadroomLuna =
+      solvencyBefore.livePrincipalHeadroomLuna === null
+        ? null
+        : BigInt(solvencyBefore.livePrincipalHeadroomLuna)
 
     console.log('\n--- solvency before ---')
     console.log('operator float  :', nim(BigInt(solvencyBefore.operatorFloatLuna)))
     console.log('fee reserve     :', nim(feeReserveLuna))
     console.log('headroom        :', signedNim(headroomLuna))
-    console.log('cap headroom    :', nim(capHeadroomLuna))
+    console.log('cap headroom    :', capHeadroomLuna === null ? 'uncapped' : nim(capHeadroomLuna))
 
     assert(
       !solvencyBefore.paused,
@@ -486,9 +490,10 @@ async function run(): Promise<void> {
         'that already credits money nothing on chain has been pointed at.',
     )
     assert(
-      capHeadroomLuna >= fundingLuna,
-      `this drop needs ${nim(fundingLuna)} of live principal but only ${nim(capHeadroomLuna)} ` +
-        'is left under max_live_principal_luna',
+      capHeadroomLuna === null || capHeadroomLuna >= fundingLuna,
+      `this drop needs ${nim(fundingLuna)} of live principal but only ` +
+        `${capHeadroomLuna === null ? '0' : nim(capHeadroomLuna)} is left under ` +
+        'max_live_principal_luna',
     )
 
     // The shortfall to cover, plus one fee reserve of working room on top so

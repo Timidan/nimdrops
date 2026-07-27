@@ -2,7 +2,7 @@
 
 Fund one NIM campaign with a single wallet approval, share one link, and let a fixed number of wallets each claim one equal payment.
 
-An organizer who wants to hand 20 people 2 NIM each has, today, two options inside a wallet: approve twenty separate payments, or collect twenty addresses first. Neither scales past a small room. NimDrops replaces both with one funding transaction and one shareable HTTPS link. The sponsor picks the amount per person and the number of people; the total is derived exactly, with no remainder and no randomness. Each wallet that opens the link may sign once and receive that exact amount, first come first served. Whatever nobody claims goes back to the sponsor.
+An organizer who wants to hand 100 people 2 NIM each has, today, two options inside a wallet: approve a hundred separate payments, or collect a hundred addresses first. Neither scales past a small room. NimDrops replaces both with one funding transaction and one shareable HTTPS link. The sponsor picks the amount per person and the number of people; the total is derived exactly, with no remainder and no randomness. Each wallet that opens the link may sign once and receive that exact amount, first come first served. Whatever nobody claims goes back to the sponsor.
 
 Red packets are established prior art — Binance and WeChat have shipped them for years, and NimDrops does not claim to have invented the format. The Nimiq-specific wedge is narrower and worth stating plainly: **one sponsor approval and one funding transaction produce one externally shareable link for many deterministic recipients**, inside a payments app people already have. That is a different shape from a Nimiq Cashlink (one recipient) and from a tip page (incoming, many payers). It is also custodial, which is why the disclosure below sits above the feature list rather than under it.
 
@@ -12,7 +12,9 @@ Red packets are established prior art — Binance and WeChat have shipped them f
 
 Read this before funding anything.
 
-- **Funds are temporarily held by the NimDrops operator.** Between the moment your funding transaction finalizes and the moment each payout finalizes, the NIM sits in a custody wallet controlled by the operator, not in a smart contract and not in your wallet. "Environment variable" and "open-source signer" are not security boundaries. The mitigation is deliberately small exposure and hard caps, not cryptographic guarantees.
+- **Funds are temporarily held by the NimDrops operator.** Between the moment your funding transaction finalizes and the moment each payout finalizes, the NIM sits in a custody wallet controlled by the operator, not in a smart contract and not in your wallet. "Environment variable" and "open-source signer" are not security boundaries.
+- **There is no on-chain escrow, and there cannot be one in this shape.** A Nimiq HTLC pays one named recipient. A drop pays a list of people nobody knows at funding time, so no contract on this chain can express it. That is the reason a person holds the money, not an implementation shortcut.
+- **Nothing caps the size of a drop, so the amount at risk is whatever sponsors have funded and nobody has claimed yet.** This used to say the mitigation was small exposure and hard caps. It is not, because the caps are gone: how much a drop holds and how many people it is split across are the sponsor's decisions. `GET /api/custody` publishes the live unclaimed total, and the create screen shows it above the fund button. What remains, and none of it is a cryptographic guarantee, is: a ledger-derived solvency check that refuses to create a liability the books cannot cover, a single advisory-locked signer, an operator pause switch that stops every payment at once, and 64 blocks of finality before any funding counts. An operator can also set `custody_controls.max_live_principal_luna` as a kill switch; it is NULL by default.
 - **Claims are fixed, first-come-first-served, and one per verified wallet.** There is **no proof of unique personhood.** A wallet signature proves control of one address. It does not prove one human. Anyone able to produce signatures from several wallets can claim several shares of the same drop.
 - **Expiry is 24 hours from finalized activation**, not from when you started the draft. At expiry the drop stops accepting new claims, every already-reserved claim is still honoured, and exactly one refund is created for the unallocated value: `(claim_count − reserved_claims) × amount_each`. The refund goes to the address that sent the verified funding transaction and to no other address. No request body can change it.
 - **Payouts and refunds wait for chain finality and can enter manual review.** NimDrops does not call a claim "paid" until its transaction is 64 blocks deep — the wallet's own `confirmed` state is not sufficient. During an RPC or signer incident a transfer is parked in `manual_review` and an operator resolves it by hand. Money is never silently re-sent, and a reserved claimant's share is never quietly turned into a sponsor refund.
@@ -22,14 +24,14 @@ Read this before funding anything.
 
 ## Current status
 
-NimDrops is live on Nimiq mainnet at [nimdrops.timidan.xyz](https://nimdrops.timidan.xyz), running a capped pilot. Being exact about what is proven matters more here than sounding finished.
+NimDrops is live on Nimiq mainnet at [nimdrops.timidan.xyz](https://nimdrops.timidan.xyz). Drop size and headcount are uncapped; the deployment still runs one drop at a time. Being exact about what is proven matters more here than sounding finished.
 
 **Proven.** The end-to-end settlement gate passed on the intended judging deployment (docker compose: Postgres + API + one worker) against TestAlbatross, run `s3_20260726040800` on 2026-07-26. Full evidence: [`docs/evidence/g1-vps-s3_20260726040800.md`](./docs/evidence/g1-vps-s3_20260726040800.md). In one 361.6-second run, through the shipped service functions rather than a re-implementation:
 
 | Leg | Result |
 |---|---|
 | Fail-closed solvency | Activation at operator float 0 refused with `InsolventError`; float then attested through `float set --tx cb112cce…` (200000 luna, height 7006397) |
-| Funding → activation | 6000 luna funded with memo `ND1:BWcXLVpZxQomlV2t8bJzlQ`, activated under the global principal cap |
+| Funding → activation | 6000 luna funded with memo `ND1:BWcXLVpZxQomlV2t8bJzlQ`, activated under the global principal cap that was in force at the time |
 | Kill/restart | Payout B driven across three OS processes: `kill -9` after the `signed` row committed and before broadcast, `kill -9` the instant broadcast returned, then a third process let startup reconciliation finish. Result: 1 attempt row, 1 hash `2ed5ec14…`, 1 confirmation at height 7006573 |
 | No double pay | Both claimant addresses hold **exactly 2000 luna** on chain — counted on the chain, not in our own books |
 | Pause + shortfall | A paused custody created no attempt for a queued refund; a real out-of-band debit made the chain hold less than the ledger, reconcile paused and stamped `shortfall_detected_at`, and after `unpause` signing was **still** refused until a clean reconcile |
@@ -129,7 +131,9 @@ The invariants that actually protect other people's money:
 | `NIMIQ_SEED_NODES` | Comma-separated seed override. Optional |
 | `NIMIQ_FINALITY_DEPTH` | Confirmation depth. Optional; floor 64, may only be raised |
 | `NIMIQ_VALIDITY_WINDOW_BLOCKS` | Transaction validity window. Optional; floor 7200, may only be raised |
-| `NIMIQ_FEE_LUNA` | Per-transaction fee. Optional; defaults to 0 |
+| `NIMIQ_FEE_LUNA` | Per-transaction fee. Optional; defaults to 0, and `docker-compose.yml` does not pass it through, so both containers run at 0. **Setting it is an operator decision with a size consequence** — see below |
+
+**On `NIMIQ_FEE_LUNA` and large drops.** `configured_fee_reserve_luna` is one flat number (1 NIM on the mainnet defaults) and does not scale with claim count. At a fee of 0 that is exact: fees consume nothing, so no claim count can exhaust the reserve. At a fee of *f* luna, every payout and every refund costs *f*, the cost comes out of the attested operator float, and the invariant refuses to sign once `operator_float_luna − fees_spent_so_far < configured_fee_reserve_luna`. The number of outgoing transactions a deployment can pay is therefore `(operator_float_luna − configured_fee_reserve_luna) / f`, across all drops and for the life of the float. If you set a non-zero fee, size the float for the drops you expect: a 100-claim drop needs 100 payouts, and at the mainnet defaults (float attested to 1 NIM, reserve 1 NIM) the budget is zero. Nothing in the schema knows the fee, so nothing will warn you.
 
 **Bring it up.** Set the real hostname in `Caddyfile` first — Caddy provisions TLS from that name and nothing else.
 
@@ -284,7 +288,7 @@ It runs fail-closed solvency, float attestation, activation, a normal payout, a 
 - Unguessable 128-bit links, `noindex`, and no public feed. A public drop index would be a faucet index, which is an abuse feature.
 - One claim per wallet per drop, enforced by a database unique constraint rather than by application logic.
 - Per-IP, per-wallet and per-drop rate limits. The per-drop bucket is consumed only after signature verification, so a malformed request cannot be aimed at locking out a specific drop. The client IP is never taken from a header the client can send: the API buckets by socket peer unless the address was nominated by our own Caddy and authenticated with a shared secret, which is how the real client survives a CDN in front. Getting that configuration wrong over-limits everyone into one bucket; it cannot let a client choose its own.
-- Hard caps in the schema: between 2 and 20 claims per drop, and an operator-set maximum aggregate live liability plus a fee reserve, both checked under the singleton lock before every activation, allocation and signature. A per-drop cap does not cap hot-wallet exposure, so the aggregate cap is the one that matters.
+- One shape rule in the schema — at least two claims per drop — and no ceiling on the drop's size or headcount. What is checked under the singleton lock before every activation, allocation and signature is the solvency invariant and the fee reserve. The aggregate principal cap is still there as an operator kill switch (`max_live_principal_luna`), NULL by default; it stops new liabilities without stopping the payouts already owed, which `pause` cannot do.
 - A global pause switch that works with the chain node down, and automatic pausing on a detected shortfall or stale reconciliation.
 - Uniform generic API responses where address enumeration would leak claim status; public drop state never returns claimant addresses, signatures or internal errors. Status tokens never appear in URLs or logs — only their hashes are stored.
 - Log redaction as a discipline at the call sites: alerts and error logs carry internal IDs, route names and on-chain hashes, never signatures, raw transactions, bearer tokens or full claimant addresses. A dedicated serializer that would enforce this structurally is planned and not yet written.
@@ -294,7 +298,7 @@ It runs fail-closed solvency, float attestation, activation, a normal payout, a 
 - **The deposit report enumerates only via a test double.** `recover.ts deposits` needs to list every transaction paid to the custody address, but the frozen `ChainClient` interface answers only about a hash you already know, and the pico client indexes by hash rather than by address. `FakeChain` satisfies the enumeration shape, so the report is proven against the test double; `NimiqChain` does not implement it yet, and on mainnet the command raises `DepositEnumerationUnavailableError`. The intended fix is a non-interface `accountTransactions(address, limit)` backed by the explorer API, and it is a pre-mainnet requirement.
 - The API process currently holds the signing key even though it signs nothing; a read-only chain client for that process is an open hardening item.
 - Rate-limit buckets are in-memory and per-process. With one API process that is correct; it would not survive horizontal scaling.
-- Custody is custody. The caps are small on purpose because the honest mitigation for a hot wallet is exposure you can afford to lose, not an assurance.
+- Custody is custody, and it is now uncapped. The honest mitigation for a hot wallet used to be exposure you can afford to lose; with the caps removed there is no such bound, and the remaining protections are operational rather than cryptographic. Read the custody disclosure at the top of this file as the whole of it.
 
 **Reporting a problem.** Open an issue on this repository. If it concerns custody or a live drop, say so in the title and do not include a claimant's full address. No separate security contact address has been published yet.
 

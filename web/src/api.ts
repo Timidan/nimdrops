@@ -39,15 +39,24 @@ export interface DisclosurePoint {
   text: string
 }
 
-/** The live ceiling. NIM strings are for display; luna strings for arithmetic. */
+/**
+ * What this deployment will and will not take right now. NIM strings are for
+ * display; luna strings for arithmetic.
+ *
+ * `aggregateMax` and `remaining` are `null` when the operator has set no
+ * principal ceiling, which is the default. `null` is NOT zero and not unknown:
+ * it means no policy number stands between a sponsor and the size of their
+ * drop, and the server's solvency invariant decides what can actually be paid.
+ * `atRisk` is the honest number in its place — funded and not yet claimed.
+ */
 export interface PilotLimits {
-  perDropMax: string
-  perDropMaxLuna: string
-  aggregateMax: string
-  aggregateMaxLuna: string
-  remaining: string
-  remainingLuna: string
-  /** `null` when only the principal cap applies. */
+  aggregateMax: string | null
+  aggregateMaxLuna: string | null
+  remaining: string | null
+  remainingLuna: string | null
+  atRisk: string
+  atRiskLuna: string
+  /** `null` when there is no limit on how many drops may run at once. */
   maxLiveDrops: number | null
   liveDrops: number
   reservedDrafts: number
@@ -260,13 +269,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 function isLimits(value: unknown): value is PilotLimits {
   const l = value as Partial<PilotLimits> | null
   const nullableNumber = (n: unknown) => n === null || typeof n === 'number'
+  const nullableString = (s: unknown) => s === null || typeof s === 'string'
   return (
-    typeof l?.perDropMax === 'string' &&
-    typeof l.perDropMaxLuna === 'string' &&
-    typeof l.aggregateMax === 'string' &&
-    typeof l.aggregateMaxLuna === 'string' &&
-    typeof l.remaining === 'string' &&
-    typeof l.remainingLuna === 'string' &&
+    nullableString(l?.aggregateMax) &&
+    nullableString(l?.aggregateMaxLuna) &&
+    nullableString(l?.remaining) &&
+    nullableString(l?.remainingLuna) &&
+    typeof l?.atRisk === 'string' &&
+    typeof l.atRiskLuna === 'string' &&
     nullableNumber(l.maxLiveDrops) &&
     typeof l.liveDrops === 'number' &&
     typeof l.reservedDrafts === 'number' &&

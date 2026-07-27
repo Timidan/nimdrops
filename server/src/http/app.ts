@@ -4,7 +4,7 @@ import type { ContentfulStatusCode } from 'hono/utils/http-status'
 import type { Pool } from 'pg'
 import { addressFromPublicKey } from '../auth/verify'
 import type { ChainClient } from '../chain/types'
-import { CapError, formatNim, lunaFromNim } from '../money'
+import { DropShapeError, formatNim, lunaFromNim } from '../money'
 import { type Alerts, throttled } from '../services/alerts'
 import {
   ClaimNotFoundError,
@@ -503,7 +503,7 @@ export function makeApp(deps: AppDeps): Hono {
     const claimCount = body.claimCount
     if (typeof claimCount !== 'number' || !Number.isInteger(claimCount)) throw invalidRequest()
 
-    const amountEachLuna = lunaFromNim(amountEach) // CapError → 400
+    const amountEachLuna = lunaFromNim(amountEach) // DropShapeError → 400
 
     const keyHash = idemKeyHash(CREATE_DROP_SCOPE, idemKey)
     const hash = requestHash(CREATE_DROP_SCOPE, { sponsorLabel, message, amountEach, claimCount })
@@ -791,23 +791,30 @@ function mapError(err: unknown): HttpError {
   if (err instanceof ClaimRejectedError) {
     return new HttpError(409, err.code, CLAIM_MESSAGES[err.code] ?? 'this claim cannot be completed')
   }
-  if (err instanceof CapError) return invalidRequest(err.message)
+  if (err instanceof DropShapeError) return invalidRequest(err.message)
   // Capacity refusals come BEFORE the generic `CapExceededError` line below, on
   // purpose. They are the only money-shaped refusal a sponsor meets before they
   // have paid anything, and "temporarily unavailable" would be both vaguer and,
   // for a drop that is simply too big, wrong: no amount of retrying helps.
   // The numbers are read off the error rather than forwarded as prose, so the
   // client copy stays this file's to choose (see the CLAIM_MESSAGES note).
+  //
+  // Both are now reachable ONLY when an operator has set the principal cap as a
+  // kill switch (migration 015); with it unset there is no size a drop can be
+  // too big for. The `?? 0n` fallbacks are therefore unreachable-by-construction
+  // rather than a guess at a number — a cap that is null cannot have thrown.
   if (err instanceof DropTooLargeError) {
-    const max = formatNim(err.capacity.maxLivePrincipalLuna)
+    const max = formatNim(err.capacity.maxLivePrincipalLuna ?? 0n)
     return new HttpError(
       422,
       'drop_too_large',
-      `this pilot holds up to ${max} NIM across all live drops — try a smaller total`,
+      err.capacity.maxLiveDrops === 0
+        ? 'this deployment is set to hold no live drops at all — ask the operator to open it'
+        : `the operator has capped all live drops at ${max} NIM — try a smaller total`,
     )
   }
   if (err instanceof NoHeadroomError) {
-    const free = formatNim(err.capacity.remainingLuna)
+    const free = formatNim(err.capacity.remainingLuna ?? 0n)
     const needed = formatNim(err.requestedLuna)
     return new HttpError(
       503,
