@@ -28,6 +28,9 @@ const LABELS: Record<ClaimUiState, string> = {
   rejected: 'Not claimed',
   exhausted: 'All claimed',
   expired: 'Ended',
+  // Not 'Ended': that word is already the deadline's, and this reader needs to
+  // know a person did it rather than a clock.
+  closed: 'Closed by the sponsor',
   degraded: 'Network trouble',
   paused: 'Paused',
 }
@@ -57,6 +60,7 @@ const TONES: Record<ClaimUiState, Tone> = {
   rejected: 'quiet',
   exhausted: 'quiet',
   expired: 'quiet',
+  closed: 'quiet',
   degraded: 'quiet',
   paused: 'quiet',
 }
@@ -73,6 +77,9 @@ const MARKS: Record<ClaimUiState, IconComponent> = {
   rejected: WarningIcon,
   exhausted: InfoIcon,
   expired: ClockExpiryIcon,
+  // An information dot, not a clock and not a warning: nothing went wrong and
+  // no time ran out.
+  closed: InfoIcon,
   degraded: WarningIcon,
   paused: WarningIcon,
 }

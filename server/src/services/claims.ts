@@ -1,18 +1,20 @@
-import { createHash, randomUUID } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 import type { Pool, PoolClient } from 'pg'
 import {
   assertChallengeFresh,
   buildChallengeMessage,
   ChallengeError,
   issueChallenge as mintChallenge,
+  nonceHash,
+  requireAudience,
   type Challenge,
 } from '../auth/challenge'
 import {
   addressFromPublicKey,
   checkWalletSignature,
   otherScheme,
+  requireSigScheme,
   WALLET_SIG_SCHEME,
-  type SigScheme,
 } from '../auth/verify'
 import { requireNetwork } from '../config'
 import type { Queryable } from '../db/pool'
@@ -77,6 +79,14 @@ export type ClaimRejectionCode =
   | 'message_mismatch'
   | 'drop_not_live'
   | 'drop_expired'
+  /**
+   * The sponsor closed their drop early (`services/close.ts`). Distinct from
+   * `drop_expired` because it is a different thing to have happened to a
+   * claimant: no deadline passed, a person decided. Anyone who had already
+   * reserved a share still gets paid — the close honours every reservation — so
+   * this code is only ever shown to someone who had not.
+   */
+  | 'closed_by_sponsor'
   | 'exhausted'
 
 /**
@@ -165,40 +175,14 @@ export interface ClaimStatus {
   amountEach: string
 }
 
-// ---- configuration (fail closed) --------------------------------------------
-
-function requireOrigin(): string {
-  const origin = process.env.PUBLIC_ORIGIN
-  if (!origin) throw new ClaimError('PUBLIC_ORIGIN is not set')
-  return origin
-}
-
-/**
- * Which bytes the wallet signs. An unset or unknown value fails closed rather
- * than guessing, since guessing wrong rejects every real claimant.
- *
- * A deployment serving Nimiq Pay wants {@link WALLET_SIG_SCHEME}; see
- * `auth/verify.ts` for where that is established. It stays configurable so a
- * non-wallet signer can be verified too, and because a wrong value must be
- * *detectable* — {@link reserveClaim} says so out loud when the signature it
- * just refused would have verified under the other scheme.
- */
-function requireSigScheme(): SigScheme {
-  const scheme = process.env.SIG_SCHEME
-  if (scheme !== 'raw' && scheme !== 'nimiq-signed-message') {
-    throw new ClaimError(
-      `SIG_SCHEME must be raw or nimiq-signed-message (got ${scheme ?? 'unset'})`,
-    )
-  }
-  return scheme
-}
-
 // ---- challenge issuance ------------------------------------------------------
 
-/** Only the hash of the nonce is stored, so a database read cannot forge a challenge. */
-function nonceHash(nonce: string): string {
-  return createHash('sha256').update(nonce, 'utf8').digest('hex')
-}
+/**
+ * `PUBLIC_ORIGIN` and `SIG_SCHEME` are read through `auth/` (`requireAudience`,
+ * `requireSigScheme`) rather than here, so that this path and the sponsor's
+ * close path cannot end up bound to different audiences or verifying different
+ * bytes. Both still fail closed on an unset or unknown value.
+ */
 
 /**
  * The claim path's slice of a drop row — deliberately narrower than the one
@@ -239,16 +223,20 @@ export async function issueChallenge(pool: Pool, publicId: string): Promise<Issu
   }
 
   const challenge = mintChallenge({
-    origin: requireOrigin(),
+    origin: requireAudience(),
     network: requireNetwork(),
     dropPublicId: publicId,
+    action: 'claim',
   })
   const message = buildChallengeMessage(challenge)
   const expiresAt = new Date(challenge.exp * 1000)
 
+  // `action` is written explicitly rather than left to the column default: the
+  // consuming UPDATE filters on it, and a row whose action came from a default
+  // is a row whose authorization nobody chose.
   const { rows } = await pool.query<{ id: string }>(
-    `INSERT INTO wallet_challenges (drop_id, nonce_hash, canonical_message, expires_at)
-     VALUES ($1, $2, $3, $4)
+    `INSERT INTO wallet_challenges (drop_id, action, nonce_hash, canonical_message, expires_at)
+     VALUES ($1, 'claim', $2, $3, $4)
      RETURNING id`,
     [drop.id, nonceHash(challenge.nonce), message, expiresAt],
   )
@@ -288,7 +276,7 @@ function parseChallenge(message: string, publicId: string): Challenge {
     buildChallengeMessage(parsed) !== message ||
     parsed.drop !== publicId ||
     parsed.action !== 'claim' ||
-    parsed.aud !== requireOrigin() ||
+    parsed.aud !== requireAudience() ||
     parsed.net !== requireNetwork()
   if (mismatch) {
     throw new ClaimRejectedError('message_mismatch', 'challenge message is not valid for this drop')
@@ -479,9 +467,13 @@ export async function reserveClaim(pool: Pool, o: ReserveClaimInput): Promise<Cl
       throw err
     }
     const { rows: consumed } = await client.query<{ canonical_message: string }>(
+      // `action = 'claim'` is the database's copy of the binding the signed
+      // bytes already carry (`parseChallenge` refuses any other action). A
+      // challenge minted to authorize a sponsor's close can therefore never be
+      // spent here even if a future edit drops the message check.
       `UPDATE wallet_challenges
        SET consumed_at = now()
-       WHERE id = $1 AND consumed_at IS NULL AND expires_at > now()
+       WHERE id = $1 AND action = 'claim' AND consumed_at IS NULL AND expires_at > now()
        RETURNING canonical_message`,
       [challenge.id],
     )
@@ -557,6 +549,9 @@ function closedRejection(drop: ClaimDropRow): ClaimRejectedError {
   }
   if (drop.state === 'closing' && drop.closing_reason === 'expired') {
     return new ClaimRejectedError('drop_expired', 'drop has expired')
+  }
+  if (drop.state === 'closing' && drop.closing_reason === 'closed_by_sponsor') {
+    return new ClaimRejectedError('closed_by_sponsor', 'the sponsor closed this drop')
   }
   return new ClaimRejectedError('drop_not_live', 'drop is not accepting claims')
 }

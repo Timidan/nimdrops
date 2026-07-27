@@ -152,10 +152,39 @@ describe('useClaim — landing', () => {
     await waitFor(() => expect(result.current.state).toBe('exhausted'))
   })
 
-  it('lands in `expired` for a closing drop', async () => {
-    installFetch({ drop: { status: 200, body: dropBody({ state: 'closing' }) } })
+  it('lands in `expired` for a drop closed by its own deadline', async () => {
+    installFetch({
+      drop: {
+        status: 200,
+        // Closing WITH the deadline behind it: the ordinary expiry.
+        body: dropBody({ state: 'closing', expiresAt: new Date(Date.now() - 1000).toISOString() }),
+      },
+    })
     const { result } = mount()
 
+    await waitFor(() => expect(result.current.state).toBe('expired'))
+  })
+
+  it('lands in `closed` for a drop the sponsor ended early', async () => {
+    installFetch({
+      drop: {
+        status: 200,
+        // Shares still unclaimed and the deadline still ahead: nothing but a
+        // sponsor's own close can put a drop in this shape.
+        body: dropBody({ state: 'closing', remaining: 3 }),
+      },
+    })
+    const { result } = mount()
+
+    await waitFor(() => expect(result.current.state).toBe('closed'))
+  })
+
+  it('lands in `exhausted`, not `closed`, when the last share was taken', async () => {
+    installFetch({ drop: { status: 200, body: dropBody({ state: 'closing', remaining: 0 }) } })
+    const { result } = mount()
+
+    // No shares left is the exhausted case even with the deadline ahead: the
+    // early-close derivation must never claim a drop that simply filled up.
     await waitFor(() => expect(result.current.state).toBe('expired'))
   })
 

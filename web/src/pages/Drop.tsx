@@ -1,6 +1,8 @@
+import { useState } from 'react'
 import { useParams } from 'react-router-dom'
 import type { BridgeResult } from '../sdk/adapter'
 import { useClaim } from '../state/claim'
+import { readFunding } from '../state/funding'
 import DropView from './DropView'
 
 /**
@@ -31,12 +33,29 @@ export interface DropProps {
   pollMs?: number
 }
 
+/**
+ * Is this the browser that funded this drop?
+ *
+ * The funding record is the only thing on the client that knows, and it is
+ * written by the create flow the moment a funding transaction hash exists. It
+ * decides one thing and one thing only: whether the sponsor's close link is
+ * offered here. Nothing about the close itself is trusted to it — the server
+ * verifies a signature from the funding address — so a wrong answer here costs
+ * a link, never a refund.
+ *
+ * Read once, on mount. A record cannot appear while this page is open.
+ */
+function fundedHere(publicId: string): boolean {
+  return readFunding()?.draft.publicId === publicId
+}
+
 export default function Drop({ discoverBridge, pollMs }: DropProps) {
   const { publicId = '' } = useParams()
   const claim = useClaim(publicId, {
     ...(discoverBridge ? { discoverBridge } : {}),
     ...(pollMs ? { pollMs } : {}),
   })
+  const [sponsorHere] = useState(() => fundedHere(publicId))
 
   return (
     <DropView
@@ -49,6 +68,7 @@ export default function Drop({ discoverBridge, pollMs }: DropProps) {
       notice={claim.notice}
       onClaim={() => void claim.claim()}
       onRetry={claim.retry}
+      {...(sponsorHere ? { sponsorCloseHref: `/drop/${publicId}/close` } : {})}
     />
   )
 }

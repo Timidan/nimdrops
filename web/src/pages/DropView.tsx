@@ -74,7 +74,7 @@ import Receipt from './Receipt'
 const OPENED: readonly ClaimUiState[] = ['reserved', 'confirming', 'paid']
 
 /** Dead ends: no amount to offer, no action to take, no warmth. */
-const OUTCOMES: readonly ClaimUiState[] = ['paused', 'expired', 'exhausted', 'rejected']
+const OUTCOMES: readonly ClaimUiState[] = ['paused', 'expired', 'closed', 'exhausted', 'rejected']
 
 /**
  * Whether the envelope is already open, for a reason that is not the ritual.
@@ -150,6 +150,17 @@ export interface DropViewProps {
    * to hold the claim surface to rule 1 on every state.
    */
   revealed?: boolean
+  /**
+   * Where the sponsor's own close screen is, when THIS browser is the one that
+   * funded this drop (`state/funding.ts`). Absent for everyone else, which is
+   * everyone: a claimant must never be offered a control that ends the drop
+   * they are looking at.
+   *
+   * It is a convenience, not an access control — the server checks a signature
+   * from the funding address and nothing on this page decides anything — so a
+   * sponsor who cleared their storage can still reach `/drop/:id/close` by hand.
+   */
+  sponsorCloseHref?: string
 }
 
 export default function DropView({
@@ -163,6 +174,7 @@ export default function DropView({
   onClaim,
   onRetry,
   revealed,
+  sponsorCloseHref,
 }: DropViewProps) {
   const sponsor = drop?.sponsorLabel ?? ''
   const amount = amountEach ?? ''
@@ -226,6 +238,17 @@ export default function DropView({
           {state === 'awaiting-funding' ? null : (
             <CustodyDisclosure expiryHours={drop?.expiryHours} />
           )}
+          {/*
+            The sponsor's way back to their own money, and deliberately the
+            quietest thing in the sheet. It is not an action anyone reading this
+            page is being invited to take — it is the answer to "I funded this
+            and I need to stop it", which is a question only one person here has.
+          */}
+          {sponsorCloseHref && !outcome ? (
+            <p className="nd-note mt-4 text-center" data-testid="sponsor-close-link">
+              <Link to={sponsorCloseHref}>You funded this drop — close it early</Link>
+            </p>
+          ) : null}
         </GlassSheet>
       </SealedEnvelope>
       {/*
@@ -720,6 +743,10 @@ function Funding({ confirming }: { confirming: boolean }) {
 const OUTCOME_TITLES: Partial<Record<ClaimUiState, string>> = {
   paused: 'Claims are paused for safety',
   expired: 'This drop has ended',
+  // Says who, without a word of judgement about them. The reader was not slow
+  // and did not lose a race, and both of those are what "ended" invites them to
+  // assume.
+  closed: 'The sponsor closed this drop',
   exhausted: 'You just missed it',
   // Deliberately neutral: this heading is shared by two different outcomes —
   // the claimant declined in their wallet, and the server could not verify a
@@ -744,6 +771,7 @@ const OUTCOME_TITLES: Partial<Record<ClaimUiState, string>> = {
 const OUTCOME_MARKS: Partial<Record<ClaimUiState, IconComponent>> = {
   paused: WarningIcon,
   expired: ClockExpiryIcon,
+  closed: InfoIcon,
   exhausted: InfoIcon,
   rejected: WarningIcon,
 }
@@ -787,6 +815,20 @@ function Outcome({
               : `Its ${expiryWindowAdjective(expiryHours)} claim window is up, so it is no longer accepting claims.`}
           </Line>
           <Line>Anything unclaimed is refunded to the wallet that funded it.</Line>
+          <DropOneBack amount={amount} />
+        </>
+      ) : null}
+
+      {state === 'closed' ? (
+        <>
+          <Line>
+            The wallet that funded this drop ended it early, so it is no longer accepting claims.
+            Nothing was taken from your wallet.
+          </Line>
+          <Line>
+            Anyone who had already claimed a share still gets paid. Everything nobody claimed goes
+            back to the wallet that funded it.
+          </Line>
           <DropOneBack amount={amount} />
         </>
       ) : null}

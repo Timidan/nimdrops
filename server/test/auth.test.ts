@@ -85,7 +85,7 @@ describe('buildChallengeMessage', () => {
 describe('issueChallenge', () => {
   it('fills the fixed fields and a 5-minute expiry', () => {
     const before = Math.floor(Date.now() / 1000)
-    const c = issueChallenge({ origin: ORIGIN, network: NETWORK, dropPublicId: DROP })
+    const c = issueChallenge({ origin: ORIGIN, network: NETWORK, dropPublicId: DROP, action: 'claim' })
     const after = Math.floor(Date.now() / 1000)
 
     expect(c.v).toBe(1)
@@ -102,7 +102,7 @@ describe('issueChallenge', () => {
   it('draws a fresh URL-safe nonce every time', () => {
     const nonces = new Set<string>()
     for (let i = 0; i < 500; i++) {
-      const { nonce } = issueChallenge({ origin: ORIGIN, network: NETWORK, dropPublicId: DROP })
+      const { nonce } = issueChallenge({ origin: ORIGIN, network: NETWORK, dropPublicId: DROP, action: 'claim' })
       expect(nonce).toMatch(/^[A-Za-z0-9_-]{22,}$/)
       nonces.add(nonce)
     }
@@ -110,7 +110,7 @@ describe('issueChallenge', () => {
   })
 
   it('produces a message that survives a build round-trip', () => {
-    const c = issueChallenge({ origin: ORIGIN, network: NETWORK, dropPublicId: DROP })
+    const c = issueChallenge({ origin: ORIGIN, network: NETWORK, dropPublicId: DROP, action: 'claim' })
     expect(JSON.parse(buildChallengeMessage(c))).toEqual(c)
   })
 })
@@ -137,7 +137,7 @@ describe('assertChallengeFresh', () => {
   })
 
   it('defaults `now` to the current clock', () => {
-    const fresh = issueChallenge({ origin: ORIGIN, network: NETWORK, dropPublicId: DROP })
+    const fresh = issueChallenge({ origin: ORIGIN, network: NETWORK, dropPublicId: DROP, action: 'claim' })
     expect(() => assertChallengeFresh(fresh)).not.toThrow()
     const stale = { ...fresh, iat: fresh.iat - 3600, exp: fresh.exp - 3600 }
     expect(() => assertChallengeFresh(stale)).toThrow(ChallengeExpiredError)

@@ -17,6 +17,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BridgeError, type BridgeResult, type WalletBridge } from '../sdk/adapter'
 import { MockBridge } from '../sdk/mock'
 import { CLAIM_STORAGE_PREFIX } from '../state/claim'
+import { FUNDING_STORAGE_KEY } from '../state/funding'
 import Drop from './Drop'
 
 const PUBLIC_ID = 'Ab3Cd4Ef5Gh6Ij7Kl8Mn9O'
@@ -540,11 +541,60 @@ describe('Drop — states that are not a claim', () => {
   })
 
   it('says the drop has ended when it is past its expiry', async () => {
-    installFetch({ drop: { status: 200, body: dropBody({ state: 'closing' }) } })
+    installFetch({
+      drop: {
+        status: 200,
+        body: dropBody({ state: 'closing', expiresAt: new Date(Date.now() - 1000).toISOString() }),
+      },
+    })
     mount()
 
     expect(await screen.findByText(/this drop has ended/i)).toBeTruthy()
     expect(screen.getByText(/refunded to the wallet that funded/i)).toBeTruthy()
+  })
+
+  it('offers the close screen only to the browser that funded this drop', async () => {
+    installFetch({ drop: { status: 200, body: dropBody() } })
+    mount()
+    await unseal()
+    // A claimant is never shown a control that ends the drop they are reading.
+    expect(await screen.findByTestId('claim-sheet')).toBeTruthy()
+    expect(screen.queryByTestId('sponsor-close-link')).toBeNull()
+    cleanup()
+
+    localStorage.setItem(
+      FUNDING_STORAGE_KEY,
+      JSON.stringify({
+        draft: {
+          publicId: PUBLIC_ID,
+          fundingAddress: 'NQ07 CUSTODY',
+          fundingMemo: `ND1:${PUBLIC_ID}`,
+          expectedFunding: '10',
+          expectedFundingLuna: '1000000',
+          shareUrl: `https://nimdrops.test/drop/${PUBLIC_ID}`,
+        },
+        txHash: 'c'.repeat(64),
+        savedAt: Date.now(),
+      }),
+    )
+    installFetch({ drop: { status: 200, body: dropBody() } })
+    mount()
+    await unseal()
+
+    const link = await screen.findByTestId('sponsor-close-link')
+    expect(link.querySelector('a')?.getAttribute('href')).toBe(`/drop/${PUBLIC_ID}/close`)
+    localStorage.clear()
+  })
+
+  it('names the sponsor when they closed the drop early, and says who is still paid', async () => {
+    installFetch({ drop: { status: 200, body: dropBody({ state: 'closing', remaining: 3 }) } })
+    mount()
+
+    expect(await screen.findByText(/the sponsor closed this drop/i)).toBeTruthy()
+    // The two facts a claimant landing here has to be given: nothing left them,
+    // and anyone who did claim is still being paid.
+    expect(screen.getByText(/nothing was taken from your wallet/i)).toBeTruthy()
+    expect(screen.getByText(/already claimed a share still gets paid/i)).toBeTruthy()
   })
 
   it('disables the claim button on degradation instead of removing it', async () => {

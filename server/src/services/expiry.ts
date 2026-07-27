@@ -6,7 +6,8 @@ import { PausedError, StaleReconciliationError, lockControls } from './solvency'
 
 /**
  * Expiry, exact refunds, settlement and draft garbage collection (design §9,
- * §6.1).
+ * §6.1) — and, since the sponsor gained a way out, the ONE implementation of
+ * "close a live drop and refund what nobody took" that every caller uses.
  *
  * The one sentence this module has to make true:
  *
@@ -38,6 +39,20 @@ import { PausedError, StaleReconciliationError, lockControls } from './solvency'
  * `awaiting_funding` with no funding hash and no activation height. A drop that
  * ever had money pointed at it is an operator reconciliation item (design §7),
  * never a garbage-collected row.
+ *
+ * ---
+ *
+ * **Why the sponsor's early close lives in this file.** A sponsor closing their
+ * own drop is not a second money path; it is the transition above, triggered on
+ * demand instead of by the clock. Every property the sweeper needs — reserved
+ * claims honoured, exactly one refund, the same two locks in the same order,
+ * the funding sender as the only possible recipient — is a property the close
+ * needs, and a second implementation of them would be a second chance to get
+ * one of them wrong. So {@link closeLiveDrop} owns the whole transaction, both
+ * callers hand it a reason and (for the sponsor) an authorization hook that runs
+ * under the locks, and the refund amount is derived in exactly one place: the
+ * seven lines below that count reserved claims and multiply the remainder. No
+ * other code in this repository computes what a drop owes back.
  */
 
 /** Design §6.1: an unfunded draft may be collected after this long. */
@@ -46,14 +61,80 @@ export const DRAFT_GC_AFTER_HOURS = 24
 /** Upper bound on drops closed per sweep, so one tick stays short. */
 export const SWEEP_BATCH = 50
 
-interface ExpiringDropRow {
+/**
+ * Why a drop left `live`. Stored in `drops.closing_reason` and constrained by
+ * `drops_closing_reason_allowed` (migration 017 added the third).
+ *
+ * `exhausted` is written by `claims.ts` when the last slot is taken, and is not
+ * a {@link closeLiveDrop} reason: that close allocates the final slot rather
+ * than refunding anything, so it belongs to the allocation transaction.
+ */
+export type ClosingReason = 'expired' | 'closed_by_sponsor'
+
+/** The columns {@link closeLiveDrop} decides on, read under the row lock. */
+export interface ClosableDropRow {
   id: string
   public_id: string
   state: string
   claim_count: number
   amount_each_luna: string
+  /** The verified funding sender. The ONLY address a refund can ever go to. */
   refund_address: string | null
   expired: boolean
+}
+
+/** Why a close did nothing. Every one of these leaves the drop untouched. */
+export type CloseSkipReason =
+  | 'not_found'
+  | 'not_live'
+  | 'not_expired'
+  /** A live drop with unallocated value and no recorded funder: for a human. */
+  | 'missing_refund_address'
+
+export type CloseResult =
+  | {
+      outcome: 'closed'
+      reservedClaims: number
+      unclaimedSlots: number
+      /** Zero when every slot was reserved; no intent is written in that case. */
+      refundLuna: bigint
+    }
+  | {
+      outcome: 'skipped'
+      reason: CloseSkipReason
+      /** The state read under the lock, for a caller that must explain itself. */
+      state: string | null
+    }
+  | {
+      outcome: 'deferred'
+      cause: 'paused' | 'stale_reconciliation'
+      /** The original error, so an HTTP caller can map it as it already does. */
+      error: Error
+    }
+
+export interface CloseLiveDropOptions {
+  dropId: string
+  /** Written to `closing_reason`, and named in the alert and the log line. */
+  reason: ClosingReason
+  /** Names this caller in operator alerts. Unchanged for the sweeper. */
+  stage: string
+  /**
+   * Refuse unless the drop's own deadline has already passed. True for the
+   * sweeper, whose whole authority to close IS the clock; false for the
+   * sponsor, whose authority is a signature.
+   */
+  requireExpired: boolean
+  /**
+   * Authorization, run INSIDE the close transaction with `custody_controls` and
+   * the drop row already locked and the drop already confirmed `live`.
+   *
+   * It is handed the locked row precisely so that the address it checks is the
+   * one this transaction will refund to — not a copy read earlier, not a value
+   * from a request body. Throwing aborts the whole close, including anything the
+   * hook itself wrote (a consumed challenge nonce), which is what lets the hook
+   * spend a single-use token without a failed close burning it.
+   */
+  authorize?: (client: PoolClient, drop: ClosableDropRow) => Promise<void>
 }
 
 /**
@@ -81,9 +162,16 @@ export async function sweepExpiry(pool: Pool, alerts: Alerts): Promise<number> {
   for (const candidate of candidates) {
     const client = await pool.connect()
     try {
-      const outcome = await closeExpiredDrop(client, alerts, candidate.id)
-      if (outcome === 'closed') closed++
-      if (outcome === 'deferred') return closed
+      const result = await closeLiveDrop(client, alerts, {
+        dropId: candidate.id,
+        reason: 'expired',
+        stage: 'expiry_sweep',
+        // The clock is this caller's entire authority. Re-checked under the
+        // row lock, not merely in the SELECT that found the candidate.
+        requireExpired: true,
+      })
+      if (result.outcome === 'closed') closed++
+      if (result.outcome === 'deferred') return closed
     } catch (err) {
       // The next tick retries from committed state; one poisoned drop must not
       // stop the others from closing.
@@ -95,13 +183,35 @@ export async function sweepExpiry(pool: Pool, alerts: Alerts): Promise<number> {
   return closed
 }
 
-type CloseOutcome = 'closed' | 'skipped' | 'deferred'
-
-async function closeExpiredDrop(
+/**
+ * Take a `live` drop out of circulation and write the ONE refund it owes.
+ *
+ * This is the single implementation of that transition. `sweepExpiry` calls it
+ * with the clock as its authority; `services/close.ts` calls it with a sponsor's
+ * wallet signature as its authority, through {@link CloseLiveDropOptions.authorize}.
+ * There is no other way to close a live drop and no other place a refund amount
+ * is computed — which is the point, because the two facts a close must never get
+ * wrong are "how much is unallocated" and "who is it unallocated to", and one
+ * implementation can only be wrong once.
+ *
+ * Owns the whole transaction: BEGIN, both locks in the mandated order, the
+ * decision, the writes, and COMMIT or ROLLBACK. Callers pass a dedicated client
+ * and are responsible only for releasing it.
+ *
+ * **The three writes are one commit.** The drop leaves `live`, the refund intent
+ * appears, and (for the sponsor) the challenge nonce is consumed, atomically. A
+ * `reserveClaim` running concurrently takes the same two locks in the same order
+ * (`custody_controls` → drop row), so the two transactions serialize: either the
+ * claim commits first and is counted here as reserved — its slot is never
+ * refunded — or this commits first and the claim's under-lock re-read finds a
+ * drop that is no longer `live` and refuses. Neither can see the other half-done.
+ */
+export async function closeLiveDrop(
   client: PoolClient,
   alerts: Alerts,
-  dropId: string,
-): Promise<CloseOutcome> {
+  o: CloseLiveDropOptions,
+): Promise<CloseResult> {
+  const { dropId, reason, stage } = o
   try {
     await client.query('BEGIN')
 
@@ -113,20 +223,17 @@ async function closeExpiredDrop(
     } catch (err) {
       await client.query('ROLLBACK')
       if (err instanceof PausedError) {
-        await alerts.notify('paused', { stage: 'expiry_sweep', message: err.message })
-        return 'deferred'
+        await alerts.notify('paused', { stage, message: err.message })
+        return { outcome: 'deferred', cause: 'paused', error: err }
       }
       if (err instanceof StaleReconciliationError) {
-        await alerts.notify('stale_reconciliation', {
-          stage: 'expiry_sweep',
-          message: err.message,
-        })
-        return 'deferred'
+        await alerts.notify('stale_reconciliation', { stage, message: err.message })
+        return { outcome: 'deferred', cause: 'stale_reconciliation', error: err }
       }
       throw err
     }
 
-    const { rows } = await client.query<ExpiringDropRow>(
+    const { rows } = await client.query<ClosableDropRow>(
       `SELECT id, public_id, state, claim_count, amount_each_luna, refund_address,
               (expires_at IS NOT NULL AND expires_at <= now()) AS expired
        FROM drops WHERE id = $1 FOR UPDATE`,
@@ -134,19 +241,40 @@ async function closeExpiredDrop(
     )
     const drop = rows[0]
     // Re-read under the lock. A claim may have taken the last slot and closed
-    // the drop as `exhausted` while this sweep was waiting for the lock — in
-    // which case there is nothing unallocated and nothing to do.
-    if (!drop || drop.state !== 'live' || !drop.expired) {
+    // the drop as `exhausted` while this caller was waiting for the lock — in
+    // which case there is nothing unallocated and nothing to do. The same
+    // re-read is what makes a second close, from either caller, a no-op.
+    if (!drop) {
       await client.query('ROLLBACK')
-      return 'skipped'
+      return { outcome: 'skipped', reason: 'not_found', state: null }
     }
+    if (drop.state !== 'live') {
+      await client.query('ROLLBACK')
+      return { outcome: 'skipped', reason: 'not_live', state: drop.state }
+    }
+    if (o.requireExpired && !drop.expired) {
+      await client.query('ROLLBACK')
+      return { outcome: 'skipped', reason: 'not_expired', state: drop.state }
+    }
+
+    // Authorization runs here and nowhere else: after both locks, after the
+    // drop is known to be live, and before anything is written. It sees the
+    // same locked row this transaction will refund to.
+    if (o.authorize) await o.authorize(client, drop)
 
     const { rows: counted } = await client.query<{ reserved: number }>(
       'SELECT count(*)::int AS reserved FROM claims WHERE drop_id = $1',
       [dropId],
     )
-    const unclaimed = drop.claim_count - counted[0].reserved
-    const unallocatedLuna = BigInt(Math.max(0, unclaimed)) * BigInt(drop.amount_each_luna)
+    const reservedClaims = counted[0].reserved
+    // THE refund amount. Counted inside the locked transaction, from the row
+    // this transaction holds: every slot nobody reserved, and not one that
+    // somebody did. `Math.max` is belt and braces — the claims table cannot
+    // hold more rows than `claim_count`, because `reserveClaim` refuses at the
+    // ceiling under this same lock — but a negative multiplier here would be an
+    // invented refund, so it is not left to that argument alone.
+    const unclaimed = Math.max(0, drop.claim_count - reservedClaims)
+    const unallocatedLuna = BigInt(unclaimed) * BigInt(drop.amount_each_luna)
 
     if (unallocatedLuna > 0n && !drop.refund_address) {
       // A live drop always has the verified funding sender recorded, so this is
@@ -155,23 +283,27 @@ async function closeExpiredDrop(
       await client.query(`UPDATE drops SET state = 'manual_review' WHERE id = $1`, [dropId])
       await client.query('COMMIT')
       await alerts.notify('manual_review', {
-        stage: 'expiry_sweep',
+        stage,
         dropId,
         reason: 'missing_refund_address',
         unallocatedLuna: unallocatedLuna.toString(),
       })
-      return 'skipped'
+      return { outcome: 'skipped', reason: 'missing_refund_address', state: 'manual_review' }
     }
 
-    await client.query(
-      `UPDATE drops SET state = 'closing', closing_reason = 'expired' WHERE id = $1`,
-      [dropId],
-    )
+    await client.query(`UPDATE drops SET state = 'closing', closing_reason = $2 WHERE id = $1`, [
+      dropId,
+      reason,
+    ])
 
     if (unallocatedLuna > 0n) {
       // `ON CONFLICT DO NOTHING` covers BOTH unique paths (`idempotency_key`
       // and the `one_refund_per_drop` partial index) without naming either:
-      // a second refund must be an impossible no-op, never an aborted sweep.
+      // a second refund must be an impossible no-op, never an aborted close.
+      //
+      // The recipient is `refund_address` off the locked row — the sender of the
+      // verified funding transaction, written once by `activate()` and never
+      // again. No caller of this function can nominate an address.
       await client.query(
         `INSERT INTO outgoing_transfers (
            idempotency_key, purpose, drop_id, claim_id, recipient_address, amount_luna, state
@@ -182,12 +314,14 @@ async function closeExpiredDrop(
     }
 
     await client.query('COMMIT')
-    logInfo('drop_expired', {
+    logInfo('drop_closed', {
       dropId,
-      unclaimedSlots: Math.max(0, unclaimed),
+      reason,
+      reservedClaims,
+      unclaimedSlots: unclaimed,
       refundLuna: unallocatedLuna.toString(),
     })
-    return 'closed'
+    return { outcome: 'closed', reservedClaims, unclaimedSlots: unclaimed, refundLuna: unallocatedLuna }
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {})
     throw err

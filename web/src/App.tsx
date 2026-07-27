@@ -1,4 +1,5 @@
 import { BrowserRouter, Navigate, Route, Routes, useParams } from 'react-router-dom'
+import CloseDrop from './pages/CloseDrop'
 import Create from './pages/Create'
 import DirectionA from './pages/design/DirectionA'
 import DirectionB from './pages/design/DirectionB'
@@ -12,8 +13,9 @@ import Spike from './pages/Spike'
 
 /**
  * The routes the server actually serves a shell for (`http/ssr.ts`): `/`,
- * `/create` and `/drop/:publicId`. Anything else is a mistyped or stale link,
- * and the useful answer to that is the create screen, not a 404 page.
+ * `/create`, `/drop/:publicId` and `/drop/:publicId/close`. Anything else is a
+ * mistyped or stale link, and the useful answer to that is the create screen,
+ * not a 404 page.
  *
  * `/preview` is the envelope's states board and must never ship. The guard is
  * `import.meta.env.DEV`, which Vite substitutes with the literal `false` in a
@@ -47,6 +49,16 @@ export function AppRoutes() {
       <Route path="/" element={<Landing />} />
       <Route path="/create" element={<Create />} />
       <Route path="/drop/:publicId" element={<Drop />} />
+      {/*
+        The sponsor's own screen for the drop they funded. A route rather than a
+        dialog on the page above it, because closing is irreversible and the
+        sentence that says so has to be read before the wallet opens.
+
+        It is not protected here and does not need to be: the server accepts a
+        close only from a signature by the address that funded the drop, so an
+        uninvited visitor to this URL can read it and get no further.
+      */}
+      <Route path="/drop/:publicId/close" element={<CloseDrop />} />
       {/*
         The old shape. The server 301s it, so this only catches a client-side
         navigation, but a claim link that dead-ends is somebody not getting

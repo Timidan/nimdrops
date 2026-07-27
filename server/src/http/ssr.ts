@@ -455,4 +455,22 @@ export function registerSsr(app: Hono, opts: SsrOptions = {}): void {
   app.get('/', () => spaShell(true))
   /** Client-routed pages that are not campaign links. */
   app.get('/create', () => spaShell())
+
+  /**
+   * The sponsor's close screen.
+   *
+   * A generic shell, deliberately: it performs NO lookup and its head is
+   * byte-identical to every other non-campaign page. A route that rendered the
+   * sponsor label here would turn a URL anyone can construct into a confirmation
+   * that a drop exists, on the one page whose subject is ending it.
+   *
+   * It is mounted so a sponsor can reload, or open the link cold in Nimiq Pay,
+   * and still get the app rather than the API's JSON 404 — this path is under
+   * `/drop/:publicId`, which matches only the exact two-segment route above.
+   */
+  app.get('/drop/:publicId/close', (c) => {
+    const publicId = c.req.param('publicId') ?? ''
+    if (!PUBLIC_ID_RE.test(publicId)) return c.notFound()
+    return spaShell()
+  })
 }

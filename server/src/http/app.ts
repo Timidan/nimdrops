@@ -15,6 +15,12 @@ import {
   type ClaimRejectionCode,
 } from '../services/claims'
 import {
+  CloseRejectedError,
+  closeDropBySponsor,
+  issueCloseChallenge,
+  type CloseRejectionCode,
+} from '../services/close'
+import {
   DEFAULT_EXPIRY_HOURS,
   DropNotFoundError,
   ExpiryWindowError,
@@ -185,7 +191,33 @@ const CLAIM_MESSAGES: Record<ClaimRejectionCode, string> = {
   message_mismatch: 'this claim request is no longer valid — start again',
   drop_not_live: 'this drop is not accepting claims',
   drop_expired: 'this drop has expired',
+  // Says what happened without blaming anyone, and without implying the reader
+  // lost something they had: a share they never reserved was never theirs.
+  closed_by_sponsor: 'the sponsor closed this drop, so there are no shares left to claim',
   exhausted: 'every share in this drop has been claimed',
+}
+
+/**
+ * Client-facing copy for a refused close. Same rule as `CLAIM_MESSAGES`: the
+ * service's own message is never forwarded.
+ *
+ * `not_the_funder` is deliberately plain rather than apologetic. Whoever is
+ * reading it either is the sponsor on the wrong wallet — in which case the fix
+ * is in the sentence — or is not the sponsor, in which case they are owed
+ * nothing softer.
+ */
+const CLOSE_MESSAGES: Record<CloseRejectionCode, string> = {
+  unknown_challenge: 'this request is no longer valid — start again',
+  cross_drop_challenge: 'this request is no longer valid — start again',
+  challenge_expired: 'this request expired — start again',
+  challenge_consumed: 'this request was already used — reload the page to see the drop’s state',
+  invalid_signature:
+    'we could not check that approval — nothing changed and the drop is still running, so try again',
+  message_mismatch: 'this request is no longer valid — start again',
+  not_the_funder: 'only the wallet that funded this drop can close it',
+  drop_not_funded: 'this drop was never funded, so there is nothing to close or refund',
+  already_closed: 'this drop is already closed',
+  drop_not_live: 'this drop cannot be closed',
 }
 
 const FUNDING_MESSAGES: Record<FundingRejectionCode, string> = {
@@ -525,6 +557,9 @@ export function makeApp(deps: AppDeps): Hono {
     if (err instanceof ClaimRejectedError && err.diagnostic) {
       void alerts.notify(err.diagnostic.alert, { surface: 'api', ...err.diagnostic.detail })
     }
+    if (err instanceof CloseRejectedError && err.diagnostic) {
+      void alerts.notify(err.diagnostic.alert, { surface: 'api', ...err.diagnostic.detail })
+    }
     return envelope(mapped)
   })
 
@@ -741,6 +776,69 @@ export function makeApp(deps: AppDeps): Hono {
     return c.json({ claimId: result.claimId, statusToken: result.statusToken, state: result.state }, 202)
   })
 
+  // ---- POST /api/drops/:publicId/close/challenge -------------------------------------
+  //
+  // A close challenge is a SEPARATE route from the claim challenge rather than a
+  // parameter on it. The claim path is a live money path that works; giving it a
+  // switch whose wrong value would mint a challenge authorizing the wrong action
+  // is not a saving worth making. Two routes, two actions, no branch.
+  //
+  // Unauthenticated, like its claim counterpart: a challenge is worthless without
+  // a signature from the funding address, and refusing to issue one to a stranger
+  // would only tell the stranger who the funder is not.
+
+  app.post('/api/drops/:publicId/close/challenge', async (c) => {
+    const issued = await issueCloseChallenge(pool, requirePublicId(c))
+    return c.json({
+      challengeId: issued.challengeId,
+      message: issued.message,
+      expiresAt: issued.expiresAt.toISOString(),
+    })
+  })
+
+  // ---- POST /api/drops/:publicId/close ------------------------------------------------
+  //
+  // The sponsor's way out (`services/close.ts`). No `Idempotency-Key`: the
+  // challenge nonce is the single-use token, the drop's state gates the
+  // transition, and `one_refund_per_drop` is the schema backstop — a retry
+  // produces `challenge_consumed` or `already_closed`, never a second refund.
+  //
+  // Rate limiting is the per-IP bucket above and nothing more. A per-drop bucket
+  // here would let anyone who knows a drop id lock its real sponsor out of the
+  // one control that returns their money, which is a strictly worse failure than
+  // the signature checks a flood would waste.
+
+  app.post('/api/drops/:publicId/close', async (c) => {
+    const publicId = requirePublicId(c)
+    const body = await readJsonObject(c)
+    only(body, ['challengeId', 'publicKey', 'signature'])
+    const challengeId = matching(body, 'challengeId', UUID_RE)
+    const publicKeyHex = matching(body, 'publicKey', PUBLIC_KEY_RE)
+    const signatureHex = matching(body, 'signature', SIGNATURE_RE)
+
+    const result = await closeDropBySponsor(pool, alerts, {
+      publicId,
+      challengeId,
+      publicKeyHex,
+      signatureHex,
+    })
+
+    // 202, for the same reason a claim is 202: the drop is closed and the refund
+    // intent is committed, but the transfer is the worker's job and `broadcast`
+    // is not `paid`. The drop is re-read so the sponsor's screen renders from
+    // the committed row rather than from anything this handler assembled.
+    return c.json(
+      {
+        drop: publicBody(await getPublic(pool, publicId)),
+        claimedShares: result.reservedClaims,
+        unclaimedShares: result.unclaimedSlots,
+        refund: formatNim(result.refundLuna),
+        refundLuna: result.refundLuna.toString(),
+      },
+      202,
+    )
+  })
+
   // ---- GET /api/claims/:claimId ----------------------------------------------------------
 
   app.get('/api/claims/:claimId', async (c) => {
@@ -871,6 +969,17 @@ function mapError(err: unknown): HttpError {
   }
   if (err instanceof ClaimRejectedError) {
     return new HttpError(409, err.code, CLAIM_MESSAGES[err.code] ?? 'this claim cannot be completed')
+  }
+  // 403 for the one refusal that is about WHO is asking, 409 for the rest, which
+  // are all about the state of the drop or of a one-use token. A wrong wallet is
+  // not a conflict, and telling a sponsor "conflict" when the answer is "not
+  // this wallet" would send them looking in the wrong place.
+  if (err instanceof CloseRejectedError) {
+    return new HttpError(
+      err.code === 'not_the_funder' ? 403 : 409,
+      err.code,
+      CLOSE_MESSAGES[err.code] ?? 'this drop cannot be closed',
+    )
   }
   if (err instanceof DropShapeError) return invalidRequest(err.message)
   // The route validates the window first and answers 400 with its own code, so

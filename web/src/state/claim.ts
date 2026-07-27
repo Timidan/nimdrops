@@ -60,6 +60,11 @@ export function explorerTxUrl(txHash: string): string {
  * anywhere — the sponsor has not paid — so nothing is in flight and nothing is
  * guaranteed to end. Displaying that as a spinner under a dead claim button is
  * how a shared link to an unfunded campaign comes to look broken.
+ *
+ * `closed` is separate from `expired` for the same reason: no deadline passed
+ * and no share was taken by someone faster — the sponsor ended their own drop.
+ * Saying "its claim window is up" there would be a plain untruth, and it is the
+ * one screen where the reader might otherwise wonder whether they were slow.
  */
 export type ClaimUiState =
   | 'loading'
@@ -73,6 +78,7 @@ export type ClaimUiState =
   | 'rejected'
   | 'exhausted'
   | 'expired'
+  | 'closed'
   | 'degraded'
   | 'paused'
 
@@ -140,8 +146,29 @@ function clearStored(publicId: string): void {
   }
 }
 
+/**
+ * Whether a drop that is no longer open was ended EARLY by its sponsor.
+ *
+ * Derived rather than served, because the public projection carries no closing
+ * reason — and the derivation is sound: a drop only leaves `live` for three
+ * reasons. Its deadline passed (then `expiresAt` is in the past), its last share
+ * was taken (then `remaining` is 0), or the sponsor closed it. Shares still
+ * showing as remaining, with the deadline still ahead, leaves only the third.
+ *
+ * Ties go to `expired`: a deadline that has just passed is the ordinary case and
+ * the ordinary sentence is the safer one to be wrong with.
+ */
+export function closedEarly(drop: DropPublic): boolean {
+  if (drop.state !== 'closing' && drop.state !== 'refunded') return false
+  if (drop.remaining <= 0) return false
+  if (drop.expiresAt === null) return false
+  const deadline = Date.parse(drop.expiresAt)
+  return Number.isFinite(deadline) && deadline > Date.now()
+}
+
 /** What the public drop projection means for someone who wants to claim. */
 export function stateForDrop(drop: DropPublic): ClaimUiState {
+  if (closedEarly(drop)) return 'closed'
   switch (drop.state) {
     case 'awaiting_funding':
       // No funding transaction exists. Not a refusal and not a wait with a
@@ -229,6 +256,12 @@ export function useClaim(publicId: string, options: UseClaimOptions = {}): Claim
           case 'drop_not_live':
             setNotice('')
             goto('expired')
+            return
+          // The sponsor ended the drop, possibly while this claimant was
+          // reading it. A dead end, but not the same dead end as a deadline.
+          case 'closed_by_sponsor':
+            setNotice('')
+            goto('closed')
             return
           case 'paused':
             setNotice(err.message)
