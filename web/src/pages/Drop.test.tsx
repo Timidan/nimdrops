@@ -164,12 +164,12 @@ describe('Drop — the drop card', () => {
     expect(body).not.toMatch(/campaign/i)
   })
 
-  it('labels the action exactly "Open — 2 NIM"', async () => {
+  it('labels the action exactly "Open 2 NIM"', async () => {
     installFetch({ drop: { status: 200, body: dropBody() } })
     mount()
 
-    const button = await screen.findByRole('button', { name: /open . 2 NIM/i })
-    expect(button.textContent).toBe('Open — 2 NIM')
+    const button = await screen.findByRole('button', { name: /open 2 NIM/i })
+    expect(button.textContent).toBe('Open 2 NIM')
     // The approval expectation lives under the button, not on it.
     expect(document.body.textContent ?? '').toMatch(/you approve one signature/i)
     // …and the button says nothing the 3.5rem amount above it already said.
@@ -179,7 +179,7 @@ describe('Drop — the drop card', () => {
   it('never promises one tap, anywhere on the page', async () => {
     installFetch({ drop: { status: 200, body: dropBody() } })
     mount()
-    await screen.findByRole('button', { name: /open . 2 NIM/i })
+    await screen.findByRole('button', { name: /open 2 NIM/i })
 
     expect(document.body.textContent ?? '').not.toMatch(/one[\s-]?tap/i)
     // Banned vocabulary: shares are fixed and equal, never a game of chance.
@@ -190,7 +190,7 @@ describe('Drop — the drop card', () => {
     installFetch({ drop: { status: 200, body: dropBody() } })
     mount()
 
-    await screen.findByRole('button', { name: /open . 2 NIM/i })
+    await screen.findByRole('button', { name: /open 2 NIM/i })
     expect(screen.queryByTestId('status-pill')).toBe(null)
   })
 })
@@ -214,7 +214,7 @@ describe('Drop — the custody disclosure', () => {
     const sheet = await screen.findByRole('dialog')
     expect(sheet.textContent).toMatch(/who is holding this NIM/i)
     // The three facts that are nobody's favourite, unsoftened.
-    expect(sheet.textContent).toMatch(/operator controls.*custody . not a smart contract/is)
+    expect(sheet.textContent).toMatch(/operator controls.*custody: not a smart contract/is)
     expect(sheet.textContent).toMatch(/one per wallet/i)
     expect(sheet.textContent).toMatch(/does not prove one person/i)
     expect(sheet.textContent).toMatch(/24 hours/i)
@@ -269,8 +269,8 @@ describe('Drop — the sponsor has not funded it yet', () => {
     // ...but there IS something that works.
     expect(screen.getByRole('button', { name: /copy link/i })).toBeTruthy()
 
-    // The envelope stays sealed, and everything real stays on screen.
-    expect(screen.getByTestId('envelope').getAttribute('data-envelope-open')).toBe('false')
+    // The sheet is on screen and everything real stays on it.
+    expect(screen.getByTestId('claim-sheet')).toBeTruthy()
     expect(screen.getByTestId('amount-hero').textContent).toMatch(/2\s*NIM/)
     expect(screen.getByText('Team NimDrops')).toBeTruthy()
     expect(screen.getByTestId('remaining').textContent).toMatch(/3.*5/)
@@ -294,7 +294,7 @@ describe('Drop — the sponsor has not funded it yet', () => {
 
     await screen.findByTestId('awaiting-funding')
     // No reload and no interaction — the poll does it.
-    const button = await screen.findByRole('button', { name: /open . 2 NIM/i })
+    const button = await screen.findByRole('button', { name: /open 2 NIM/i })
     expect((button as HTMLButtonElement).disabled).toBe(false)
     expect(screen.queryByTestId('awaiting-funding')).toBe(null)
   })
@@ -346,7 +346,9 @@ describe('Drop — claiming', () => {
     mount()
 
     const review = await screen.findByTestId('manual-review')
-    expect(review.textContent).toMatch(/being reviewed/i)
+    // Same two facts, fewer words: a person is looking at it, and the money is
+    // safe while they do.
+    expect(review.textContent).toMatch(/a person is reviewing/i)
     expect(review.textContent).toMatch(/safe/i)
   })
 
@@ -429,7 +431,7 @@ describe('Drop — claiming', () => {
     })
     mount(bridgeOf(rejectingBridge()))
 
-    const button = await screen.findByRole('button', { name: /open . 2 NIM/i })
+    const button = await screen.findByRole('button', { name: /open 2 NIM/i })
     await act(async () => {
       fireEvent.click(button)
     })
@@ -440,7 +442,7 @@ describe('Drop — claiming', () => {
       fireEvent.click(retry)
     })
 
-    await waitFor(() => expect(screen.getByRole('button', { name: /open . 2 NIM/i })).toBeTruthy())
+    await waitFor(() => expect(screen.getByRole('button', { name: /open 2 NIM/i })).toBeTruthy())
   })
 })
 
@@ -466,12 +468,12 @@ describe('Drop — states that are not a claim', () => {
     installFetch({ drop: { status: 200, body: dropBody() }, challenge: { status: 503, body: { error: { code: 'degraded', message: 'temporarily unavailable' } } } })
     mount()
 
-    const button = await screen.findByRole('button', { name: /open . 2 NIM/i })
+    const button = await screen.findByRole('button', { name: /open 2 NIM/i })
     await act(async () => {
       fireEvent.click(button)
     })
 
-    const still = await screen.findByRole('button', { name: /open . 2 NIM/i })
+    const still = await screen.findByRole('button', { name: /open 2 NIM/i })
     expect((still as HTMLButtonElement).disabled).toBe(true)
     expect(screen.getByTestId('degraded-banner').textContent).toMatch(/try again shortly|having trouble/i)
   })
