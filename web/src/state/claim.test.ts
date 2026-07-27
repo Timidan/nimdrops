@@ -250,9 +250,7 @@ describe('useClaim — landing', () => {
     })
     const { result } = mount()
 
-    // No shares left is the exhausted case even with the deadline ahead: a drop
-    // that simply filled up was never closed by anybody.
-    await waitFor(() => expect(result.current.state).toBe('expired'))
+    await waitFor(() => expect(result.current.state).toBe('exhausted'))
   })
 
   it('lands in `paused` when the money path is paused', async () => {

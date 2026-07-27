@@ -4,6 +4,7 @@ import {
   ApiError,
   closeDrop,
   getDrop,
+  NetworkError,
   requestCloseChallenge,
   type CloseAccepted,
   type DropPublic,
@@ -132,13 +133,25 @@ export default function CloseDrop({ discoverBridge = resolveBridge }: CloseDropP
       setResult(accepted)
       setStage('closed')
     } catch (err) {
-      setNotice(closeFailureNotice(err))
-      // An `already_closed` is not something to try again — reload the drop so
-      // the screen tells the truth about what it now is.
       if (err instanceof ApiError && (err.code === 'already_closed' || err.code === 'drop_not_funded')) {
+        setNotice(closeFailureNotice(err))
         setStage('unreadable')
         return
       }
+
+      if (err instanceof NetworkError) {
+        try {
+          const latest = await getDrop(publicId)
+          setDrop(latest)
+          if (latest.state !== 'live') {
+            setNotice(alreadyOverNotice(latest))
+            setStage('unreadable')
+            return
+          }
+        } catch {}
+      }
+
+      setNotice(closeFailureNotice(err, true))
       setStage('confirm')
     }
   }, [discoverBridge, publicId])
@@ -173,7 +186,19 @@ function alreadyOverNotice(drop: DropPublic): string {
   if (drop.state === 'awaiting_funding' || drop.state === 'funding_pending') {
     return 'This drop was never funded, so there is nothing to close and nothing to refund.'
   }
-  return 'This drop is already closed. Anything nobody claimed is on its way back to the wallet that funded it.'
+  if (drop.state === 'closing') {
+    return 'This drop is already closing. Any unclaimed NIM is being returned to the wallet that funded it.'
+  }
+  if (drop.state === 'refunded') {
+    return 'This drop is already closed. Its unclaimed NIM was returned to the wallet that funded it.'
+  }
+  if (drop.state === 'settled') {
+    return 'This drop has finished. Its claims and any refund have already been settled.'
+  }
+  if (drop.state === 'paused' || drop.state === 'manual_review') {
+    return 'This drop is under review and cannot be closed here right now.'
+  }
+  return 'This drop cannot be closed here. If you funded it, contact the operator before sending anything else.'
 }
 
 function Confirm({

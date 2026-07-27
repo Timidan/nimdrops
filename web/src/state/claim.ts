@@ -146,29 +146,10 @@ function clearStored(publicId: string): void {
   }
 }
 
-/**
- * Whether a drop that is no longer open was ended EARLY by its sponsor.
- *
- * The server's `closingReason`, not a derivation. This used to be inferred from
- * `state`, `remaining` and the deadline — a drop that had left `live` with
- * shares still showing and its deadline still ahead was read as a sponsor
- * close — and that inference was wrong in both directions:
- *
- *  - a sponsor closing a drop in its last minutes, or a refund that settled
- *    after the deadline passed, read as an ordinary expiry; and
- *  - the clock it compared against was the READER'S, so a device an hour slow
- *    turned an expired drop into "the sponsor ended this".
- *
- * A server that predates the field sends nothing, and nothing is what this
- * says: `undefined` is not a close.
- */
-export function closedEarly(drop: DropPublic): boolean {
-  return drop.closingReason === 'closed_by_sponsor'
-}
-
 /** What the public drop projection means for someone who wants to claim. */
 export function stateForDrop(drop: DropPublic): ClaimUiState {
-  if (closedEarly(drop)) return 'closed'
+  if (drop.closingReason === 'closed_by_sponsor') return 'closed'
+  if (drop.closingReason === 'exhausted') return 'exhausted'
   switch (drop.state) {
     case 'awaiting_funding':
       // No funding transaction exists. Not a refusal and not a wait with a
@@ -184,6 +165,9 @@ export function stateForDrop(drop: DropPublic): ClaimUiState {
     case 'live':
       return drop.remaining > 0 ? 'ready' : 'exhausted'
     case 'settled':
+      return drop.remaining === 0 ? 'exhausted' : 'expired'
+    case 'closing':
+    case 'refunded':
       return drop.remaining === 0 ? 'exhausted' : 'expired'
     default:
       return 'expired'

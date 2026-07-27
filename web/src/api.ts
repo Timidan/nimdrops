@@ -271,7 +271,7 @@ export class ApiError extends Error {
   }
 }
 
-/** A request that never reached the server (offline, DNS, TLS, abort). */
+/** A fetch that did not complete; after a POST, the server outcome may be unknown. */
 export class NetworkError extends Error {
   constructor(cause: unknown) {
     super('the network request did not complete', { cause })

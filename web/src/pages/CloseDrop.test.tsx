@@ -159,6 +159,14 @@ describe('CloseDrop — before the wallet', () => {
     expect(await screen.findByText(/never funded/i)).toBeTruthy()
     expect(screen.queryByRole('button', { name: /close/i })).toBeNull()
   })
+
+  it('reports an initial connection failure without implying a close was sent', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Promise.reject(new TypeError('offline'))))
+    mount()
+
+    expect(await screen.findByText(/could not reach NimDrops/i)).toBeTruthy()
+    expect(screen.queryByText(/close request reached/i)).toBeNull()
+  })
 })
 
 describe('CloseDrop — closing', () => {
@@ -233,5 +241,37 @@ describe('CloseDrop — closing', () => {
 
     await waitFor(() => expect(screen.getByTestId('close-unavailable')).toBeTruthy())
     expect(screen.queryByRole('button', { name: /send back/i })).toBeNull()
+  })
+
+  it('re-reads the drop after an ambiguous close response', async () => {
+    let dropReads = 0
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown) => {
+        const url = String(input)
+        if (url.endsWith('/close/challenge')) {
+          return { ok: true, status: 200, json: async () => CHALLENGE }
+        }
+        if (url.endsWith('/close')) throw new TypeError('connection lost after request')
+        dropReads += 1
+        return {
+          ok: true,
+          status: 200,
+          json: async () =>
+            dropReads === 1
+              ? dropBody()
+              : dropBody({ state: 'closing', closingReason: 'closed_by_sponsor' }),
+        }
+      }),
+    )
+    mount()
+
+    const button = await screen.findByRole('button', { name: /send back 6 NIM/i })
+    button.click()
+
+    await waitFor(() => expect(screen.getByTestId('close-unavailable')).toBeTruthy())
+    expect(screen.getByText(/already closing/i)).toBeTruthy()
+    expect(screen.queryByText(/nothing changed/i)).toBeNull()
+    expect(dropReads).toBe(2)
   })
 })
