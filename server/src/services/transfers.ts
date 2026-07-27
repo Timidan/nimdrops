@@ -61,11 +61,15 @@ export const WORKER_LOCK_ID = 42
 export const CLAIM_MEMO = '🧧 NimDrop'
 
 /**
- * How much of an id goes in the memo. 8 hex characters of a v4 UUID is 32 bits
- * of the random field — plenty to tell two of our own transactions apart, and
- * short enough that the whole memo stays well inside the 64-byte limit.
+ * The whole id goes in the memo.
+ *
+ * This truncated to 8 hex characters, on the reasoning that 32 bits is plenty to
+ * tell two of our own payments apart. It is, until it isn't: two claim ids sharing
+ * their first eight characters bring the collision back, and truncating bought
+ * nothing, because the full form fits. A payout memo is 49 bytes and a refund 56,
+ * both inside the 64-byte limit checked at import below.
  */
-const MEMO_ID_CHARS = 8
+const MEMO_ID_CHARS = 36
 
 /**
  * The data field of a PAYOUT transaction.

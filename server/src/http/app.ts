@@ -901,9 +901,16 @@ export function makeApp(deps: AppDeps): Hono {
   // ---- GET /api/games/:publicId/session/:sessionId/question --------------------------------
 
   app.get('/api/games/:publicId/session/:sessionId/question', async (c) => {
-    requirePublicId(c)
+    const publicId = requirePublicId(c)
     const sessionId = requireSessionId(c)
-    const question = await requireTrivia().currentQuestion(sessionId)
+    // Metered like the other gate routes. It looked like a read, but it opens a
+    // transaction, locks the session row, writes delivery state and reads the
+    // bank — the same work the routes either side of it pay for.
+    enforce(gateAttemptBucket, clientIp(c))
+    // Both path segments are honoured. Without the drop id a session belonging to
+    // one drop could be played through another drop's URL.
+    const gate = await loadGate(pool, publicId)
+    const question = await requireTrivia().currentQuestion(sessionId, gate.dropId)
     // Note what is NOT here: no answer index, no per-question correctness, no
     // score. See `AnswerOutcome` in `gates/trivia/sessions.ts` for why.
     return c.json({ ...question, deadlineAt: question.deadlineAt.toISOString() })
@@ -912,14 +919,17 @@ export function makeApp(deps: AppDeps): Hono {
   // ---- POST /api/games/:publicId/session/:sessionId/answer ---------------------------------
 
   app.post('/api/games/:publicId/session/:sessionId/answer', async (c) => {
-    requirePublicId(c)
+    const publicId = requirePublicId(c)
     const sessionId = requireSessionId(c)
     const body = await readJsonObject(c)
     only(body, ['questionIndex', 'answerIndex'])
     const questionIndex = wholeNumberIn(body, 'questionIndex', 0, 9)
     const answerIndex = wholeNumberIn(body, 'answerIndex', 0, 3)
     enforce(gateAttemptBucket, clientIp(c))
-    return c.json(await requireTrivia().submitAnswer(sessionId, questionIndex, answerIndex))
+    const gate = await loadGate(pool, publicId)
+    return c.json(
+      await requireTrivia().submitAnswer(sessionId, questionIndex, answerIndex, gate.dropId),
+    )
   })
 
   // ---- POST /api/games/:publicId/passphrase ------------------------------------------------

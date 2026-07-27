@@ -190,3 +190,30 @@ export function requireTriviaBankPath(): string {
 export function triviaConfigured(): boolean {
   return Boolean(process.env.TRIVIA_SELECTION_SALT && process.env.TRIVIA_BANK_PATH)
 }
+
+/**
+ * HMAC key for passphrase hashing. SEPARATE from the trivia selection salt.
+ *
+ * These were one value, and that was an operability bug rather than a tidy
+ * simplification. `TRIVIA_SELECTION_SALT` is documented as rotatable, and the
+ * cost of rotating it is meant to be that future sessions draw different
+ * questions. Sharing it with passphrase hashing made rotation ALSO invalidate
+ * every hash already written into `drop_gates.config`, which turned every
+ * existing passphrase drop permanently unsatisfiable: the sponsor's word still
+ * worked at the event, and nobody could ever claim with it.
+ *
+ * Two keys means rotating either one is survivable. Neither has a default, so a
+ * deployment cannot silently fall back to the other.
+ */
+export function requirePassphraseSalt(): string {
+  const salt = process.env.PASSPHRASE_SALT
+  if (!salt || salt.length < 32) {
+    throw new Error('PASSPHRASE_SALT must be set to at least 32 characters')
+  }
+  return salt
+}
+
+/** Whether passphrase gates can be served. Independent of trivia. */
+export function passphraseConfigured(): boolean {
+  return Boolean(process.env.PASSPHRASE_SALT)
+}

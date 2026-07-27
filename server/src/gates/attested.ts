@@ -122,17 +122,20 @@ export function parseAttestationMessage(message: string): Attestation {
 /**
  * Validate one `attested` gate's config.
  *
- * A misconfigured gate is refused with the same code as a bad attestation on
- * purpose: the submitter cannot tell the two apart, and nothing about the
- * sponsor's key material leaks into a client-facing message.
+ * Raises `misconfigured`, not `bad_attestation`. The two were deliberately
+ * conflated so a submitter could not tell a broken drop from a bad signature —
+ * but the cost of that was telling an honest integrator their attestation failed
+ * to verify when it verified perfectly and the SPONSOR had typed the key wrong.
+ * Nothing about the key leaks either way: the client-facing sentence for
+ * `misconfigured` names no field, and it is the operator who gets paged.
  */
 export function parseAttestedConfig(config: Record<string, unknown>): AttestedConfig {
   const { attesterPublicKey, maxAgeSeconds } = config
   if (typeof attesterPublicKey !== 'string' || !PUBLIC_KEY_PATTERN.test(attesterPublicKey)) {
-    bad('this drop is misconfigured')
+    throw new GateRejectedError('misconfigured', 'attested gate has no usable attester key')
   }
   if (typeof maxAgeSeconds !== 'number' || !Number.isInteger(maxAgeSeconds) || maxAgeSeconds <= 0) {
-    bad('this drop is misconfigured')
+    throw new GateRejectedError('misconfigured', 'attested gate has no usable maxAgeSeconds')
   }
   return { attesterPublicKey, maxAgeSeconds }
 }

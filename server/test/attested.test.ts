@@ -172,9 +172,12 @@ describe('parseAttestedConfig', () => {
     { attesterPublicKey: key, maxAgeSeconds: -300 },
     { attesterPublicKey: key, maxAgeSeconds: 1.5 },
     { attesterPublicKey: key, maxAgeSeconds: '300' },
-  ])('refuses %j', (config) => {
+  ])('refuses %j as a misconfiguration', (config) => {
+    // `misconfigured`, not `bad_attestation`. These are all faults in what the
+    // SPONSOR configured, and reporting them as a verification failure told an
+    // honest integrator their signature was bad when it verified perfectly.
     expect(() => parseAttestedConfig(config as Record<string, unknown>)).toThrow(
-      expect.objectContaining({ code: 'bad_attestation' }),
+      expect.objectContaining({ code: 'misconfigured' }),
     )
   })
 })
@@ -491,11 +494,14 @@ describe.skipIf(!hasDb)('submitAttestation', () => {
     expect(await countNonces()).toBe('0')
   })
 
-  it('refuses every attestation on a misconfigured gate', async () => {
+  it('refuses every attestation on a misconfigured gate, blaming the operator', async () => {
     const broken = await gatedDrop({ config: { attesterPublicKey: 'nope', maxAgeSeconds: 300 } })
     const message = attestation({ drop: broken })
+    // The signature here is valid. Only the drop is broken, so the code must not
+    // be the one that means "your confirmation could not be verified" — the HTTP
+    // layer maps `misconfigured` to 5xx and pages an operator instead.
     await expect(submit(message, sign(message), broken)).rejects.toMatchObject({
-      code: 'bad_attestation',
+      code: 'misconfigured',
     })
   })
 

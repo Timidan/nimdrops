@@ -100,35 +100,67 @@ export async function submitPassphrase(
   )
   if (held[0]) return { granted: true }
 
-  // Counted per address per drop, and counted in the database: the cap is about
-  // an address, so a restart must not hand a brute-forcer a fresh five. Per-IP
-  // limiting is the caller's job; this is the durable half.
-  const { rows: recent } = await pool.query<{ attempts: number }>(
-    `SELECT count(*)::int AS attempts
-     FROM passphrase_attempts
-     WHERE drop_id = $1 AND wallet_address = $2
-       AND attempted_at > now() - make_interval(mins => $3::int)`,
-    [o.gate.dropId, o.walletAddress, ATTEMPT_WINDOW_MINUTES],
-  )
-  if (recent[0].attempts >= MAX_ATTEMPTS) {
-    throw new GateRejectedError(
-      'too_many_attempts',
-      `more than ${MAX_ATTEMPTS} tries in ${ATTEMPT_WINDOW_MINUTES} minutes`,
-    )
-  }
+  // Counting and charging happen in ONE transaction, serialised per address.
+  //
+  // This was `SELECT count(*)` followed later by an independent `INSERT`, and the
+  // gap was exploitable: five concurrent requests all read four attempts, all
+  // passed the cap, and all five guesses were evaluated — nine recorded attempts
+  // against a budget of five. The per-IP bucket bounded a single-IP burst to four
+  // extra guesses, and bounded a distributed one not at all, because every
+  // request can assert the same wallet address from a different address of its
+  // own.
+  //
+  // The advisory lock is on `(drop, wallet)` rather than a row, because on the
+  // first attempt there is no row to lock. It is transaction-scoped, so it is
+  // released by COMMIT or ROLLBACK and never leaks on a throw.
+  const client = await pool.connect()
+  let committed = false
+  try {
+    await client.query('BEGIN')
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+      `passphrase:${o.gate.dropId}:${o.walletAddress}`,
+    ])
 
-  if (!matches(hashPhrase(o.phrase, o.salt), config.hash)) {
-    await pool.query(
-      'INSERT INTO passphrase_attempts (drop_id, wallet_address) VALUES ($1, $2)',
-      [o.gate.dropId, o.walletAddress],
+    const { rows: recent } = await client.query<{ attempts: number }>(
+      `SELECT count(*)::int AS attempts
+       FROM passphrase_attempts
+       WHERE drop_id = $1 AND wallet_address = $2
+         AND attempted_at > now() - make_interval(mins => $3::int)`,
+      [o.gate.dropId, o.walletAddress, ATTEMPT_WINDOW_MINUTES],
     )
-    throw new GateRejectedError('bad_attempt', 'that is not the phrase')
-  }
+    if (recent[0].attempts >= MAX_ATTEMPTS) {
+      await client.query('COMMIT')
+      committed = true
+      throw new GateRejectedError(
+        'too_many_attempts',
+        `more than ${MAX_ATTEMPTS} tries in ${ATTEMPT_WINDOW_MINUTES} minutes`,
+      )
+    }
 
-  await issueGrant(pool, {
-    dropId: o.gate.dropId,
-    walletAddress: o.walletAddress,
-    kind: 'passphrase',
-  })
-  return { granted: true }
+    if (!matches(hashPhrase(o.phrase, o.salt), config.hash)) {
+      // Charged inside the lock, so the next concurrent caller reads this attempt
+      // rather than the count that let this one through.
+      await client.query(
+        'INSERT INTO passphrase_attempts (drop_id, wallet_address) VALUES ($1, $2)',
+        [o.gate.dropId, o.walletAddress],
+      )
+      await client.query('COMMIT')
+      committed = true
+      throw new GateRejectedError('bad_attempt', 'that is not the phrase')
+    }
+
+    await issueGrant(client, {
+      dropId: o.gate.dropId,
+      walletAddress: o.walletAddress,
+      kind: 'passphrase',
+    })
+    await client.query('COMMIT')
+    committed = true
+    return { granted: true }
+  } catch (err) {
+    if (!committed) await client.query('ROLLBACK').catch(() => {})
+    throw err
+  } finally {
+    client.release()
+  }
 }

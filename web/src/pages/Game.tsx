@@ -1,0 +1,692 @@
+import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { Link, useParams } from 'react-router-dom'
+import { ApiError, submitPassphrase, type GateKind } from '../api'
+import { formatNim } from '../money'
+import { ADDRESS_RE, PASSPHRASE_MAX_ATTEMPTS, useGate } from '../state/gate'
+import { TRIVIA_COOLDOWN_MINUTES, TRIVIA_QUESTION_COUNT, useTriviaSession } from '../state/trivia'
+import Screen from '../ui/Screen'
+
+/**
+ * One page, three conditions: answer five questions, know a phrase, or be
+ * vouched for by whoever runs the drop.
+ *
+ * **The pass screen is plain, and that is the load-bearing decision here.**
+ * `PRODUCT.md`: *the celebration belongs to the moment of receiving, and
+ * nowhere else.* Meeting a condition is not receiving — nothing has moved and
+ * nothing has been signed. So passing says "You can claim N NIM" and hands off
+ * to `/drop/:publicId`, where the reveal already lives. A reveal here would
+ * both steal that moment from the payout and use delight to hurry a stranger
+ * toward a signature, which `PRODUCT.md` names as the thing that makes a scam
+ * feel like one.
+ *
+ * **Nothing here is built on the sealed-paper component.** Three redesign
+ * directions are live and undecided and one of them removes it entirely, so
+ * these screens use `Screen`, the paper and ink tokens, and the `nd-*` classes
+ * in `index.css` — all of which survive every direction. A grep of this file for
+ * that component's name comes back empty, and is meant to keep doing so.
+ *
+ * **The player's address is asked for, not derived.** `web/` has no way to read
+ * an address from the wallet: `sdk/adapter.ts` deliberately does not call
+ * `connect()`/`listAccounts()` because that costs a native prompt, and design
+ * §4.3 derives the claimant's address from the verified `sign()` public key
+ * instead — which happens on the claim, long after this page. The gate routes
+ * take an asserted address by design, and it is safe precisely because a grant
+ * is worthless to any address but the one it names.
+ */
+
+export interface GameProps {
+  /** Test seam. Production remembers whatever the player last told us. */
+  walletAddress?: string
+}
+
+/** `nimdrops.gate.wallet` → the address the player said they are playing as. */
+export const WALLET_STORAGE_KEY = 'nimdrops.gate.wallet'
+
+function readStoredWallet(): string | null {
+  try {
+    const raw = localStorage.getItem(WALLET_STORAGE_KEY)
+    return raw && ADDRESS_RE.test(raw) ? raw : null
+  } catch {
+    // Private mode or a quota denial. Costs a re-ask, nothing more.
+    return null
+  }
+}
+
+function writeStoredWallet(address: string): void {
+  try {
+    localStorage.setItem(WALLET_STORAGE_KEY, address)
+  } catch {
+    /* the address still works for this page load */
+  }
+}
+
+function clearStoredWallet(): void {
+  try {
+    localStorage.removeItem(WALLET_STORAGE_KEY)
+  } catch {
+    /* nothing to undo */
+  }
+}
+
+/** What this drop asks of you, in the fewest words that are still true. */
+const KIND_TITLES: Record<GateKind, string> = {
+  trivia: 'Five questions',
+  passphrase: 'A passphrase',
+  attested: 'Confirmed by whoever runs this drop',
+}
+
+export default function Game({ walletAddress }: GameProps) {
+  const { publicId = '' } = useParams()
+  const [wallet, setWallet] = useState<string | null>(() => walletAddress ?? readStoredWallet())
+  const gate = useGate(publicId, wallet ?? undefined)
+  /**
+   * Satisfied during this visit, as opposed to `gate.granted`, which was already
+   * true when the page loaded. Lifted out of the kinds so the pass screen is the
+   * WHOLE screen: leaving the offer above it would print the amount twice, and
+   * leaving "use a different wallet" under it would invite somebody to switch to
+   * a wallet that cannot claim what they just earned.
+   */
+  const [metJustNow, setMetJustNow] = useState(false)
+
+  const rememberWallet = useCallback((address: string) => {
+    writeStoredWallet(address)
+    setWallet(address)
+  }, [])
+
+  const forgetWallet = useCallback(() => {
+    clearStoredWallet()
+    setWallet(null)
+  }, [])
+
+  const onMet = useCallback(() => setMetJustNow(true), [])
+
+  const amount = gate.amountEachLuna === null ? null : formatNim(BigInt(gate.amountEachLuna))
+  const met = gate.granted || metJustNow
+
+  return (
+    <Screen>
+      <div className="flex flex-1 flex-col bg-paper px-5 pt-9 pb-12 text-ink">
+        {gate.loading && gate.kind === null ? (
+          <Loading />
+        ) : gate.kind === null ? (
+          <LoadFailure
+            publicId={publicId}
+            code={gate.errorCode}
+            message={gate.error}
+            onRetry={gate.refresh}
+          />
+        ) : met ? (
+          <Pass publicId={publicId} amount={amount ?? ''} />
+        ) : (
+          <>
+            <Offer
+              kind={gate.kind}
+              tier={gate.tier}
+              amount={amount ?? ''}
+              slotsRemaining={gate.slotsRemaining}
+            />
+
+            {wallet === null ? (
+              <WalletStep onSubmit={rememberWallet} />
+            ) : (
+              <>
+                <PlayingAs address={wallet} onChange={forgetWallet} />
+                {gate.kind === 'trivia' ? (
+                  <Trivia publicId={publicId} walletAddress={wallet} tier={gate.tier} onPass={onMet} />
+                ) : gate.kind === 'passphrase' ? (
+                  <Passphrase
+                    publicId={publicId}
+                    walletAddress={wallet}
+                    hint={gate.hint}
+                    onGranted={onMet}
+                  />
+                ) : (
+                  <Attested onCheckAgain={gate.refresh} checking={gate.loading} />
+                )}
+              </>
+            )}
+          </>
+        )}
+      </div>
+    </Screen>
+  )
+}
+
+// ---- the offer, above every kind ---------------------------------------------------
+
+/**
+ * What is on the table and what it costs to reach it.
+ *
+ * The amount is the largest thing on the screen because it is the number the
+ * reader is deciding about (`PRODUCT.md` design principle 1), in tabular
+ * figures so it cannot jitter, and exact — five NIM is `5`, two and a half is
+ * `2.5`, and neither is ever rounded to look tidier.
+ *
+ * The share count is here rather than left to the claim screen because a player
+ * is about to spend real effort: somebody who would answer five questions for
+ * the last share deserves to know it is the last one first.
+ */
+function Offer({
+  kind,
+  tier,
+  amount,
+  slotsRemaining,
+}: {
+  kind: GateKind
+  tier: string | null
+  amount: string
+  slotsRemaining: number | null
+}) {
+  return (
+    <div>
+      <div className="flex flex-wrap items-center justify-center gap-2">
+        <p className="text-sm font-semibold text-ink/70">{KIND_TITLES[kind]}</p>
+        {tier ? (
+          <span className="rounded-full border border-ink/15 px-2 py-0.5 text-[0.6875rem] font-medium text-ink/55">
+            {tier}
+          </span>
+        ) : null}
+      </div>
+
+      <p data-testid="game-amount" className="nd-amount mt-6 text-center text-[2.75rem]">
+        {amount} NIM
+      </p>
+      <p className="mt-3 text-center text-xs leading-relaxed text-ink/55">
+        The same fixed amount for everyone who meets this drop&rsquo;s condition.
+      </p>
+
+      {slotsRemaining === null ? null : (
+        <p data-testid="game-slots" className="mt-4 text-center text-xs tabular-nums text-ink/55">
+          {slotsRemaining} {slotsRemaining === 1 ? 'share' : 'shares'} left
+        </p>
+      )}
+    </div>
+  )
+}
+
+// ---- the pass screen: deliberately plain -------------------------------------------
+
+/**
+ * Met the condition. This is not the moment of receiving, so it does not look
+ * like one: no keyline, no bloom, no exclamation. It states the fact, says what
+ * happens next in the order it happens, and links to the screen that owns the
+ * reveal.
+ */
+function Pass({ publicId, amount }: { publicId: string; amount: string }) {
+  return (
+    <div data-testid="gate-passed" className="mt-9">
+      <h1 className="text-2xl font-semibold tracking-tight">You can claim {amount} NIM</h1>
+      <p className="mt-3 text-sm leading-relaxed text-ink/65">
+        This drop&rsquo;s condition is met for the wallet you named. Nothing has been sent yet — the
+        claim happens on the drop&rsquo;s own page, where you tap and approve one signature and the
+        NIM goes to the wallet that signed.
+      </p>
+      <Link to={`/drop/${publicId}`} className="nd-primary mt-8 block w-full text-center">
+        Go to the claim
+      </Link>
+      <p className="mt-3 text-center text-xs leading-relaxed text-ink/50">
+        One share per wallet. It has to be the wallet you named here.
+      </p>
+    </div>
+  )
+}
+
+// ---- which wallet is playing -------------------------------------------------------
+
+/**
+ * The one thing this page has to ask for.
+ *
+ * It comes after the offer, never before it: a stranger should learn what this
+ * is before being asked for anything (`PRODUCT.md` design principle 5). It is
+ * also the honest place to say that nothing is signed here, because the reason
+ * an address is typed rather than read from the wallet is precisely that this
+ * page refuses to spend a native prompt on a condition the player has not met
+ * yet.
+ */
+function WalletStep({ onSubmit }: { onSubmit: (address: string) => void }) {
+  const [value, setValue] = useState('')
+  const [problem, setProblem] = useState('')
+
+  return (
+    <form
+      data-testid="wallet-step"
+      className="mt-8"
+      onSubmit={(event) => {
+        event.preventDefault()
+        const trimmed = value.trim()
+        if (!ADDRESS_RE.test(trimmed)) {
+          setProblem(
+            'That does not look like a Nimiq address. It begins with NQ and is 36 characters; the spaces do not matter.',
+          )
+          return
+        }
+        setProblem('')
+        onSubmit(trimmed)
+      }}
+    >
+      <h1 className="text-lg font-semibold tracking-tight">Which wallet is playing?</h1>
+      <p className="mt-2 text-sm leading-relaxed text-ink/65">
+        Whatever this drop asks of you is recorded against the address you give here, and only that
+        wallet can claim the share. It has to be one you hold.
+      </p>
+      <p className="mt-2 text-sm leading-relaxed text-ink/65">
+        Nothing is signed on this page and nothing leaves your wallet. The signature comes later, on
+        the claim.
+      </p>
+
+      <label htmlFor="gate-wallet" className="mt-6 block text-sm font-medium text-ink/70">
+        Your Nimiq address
+      </label>
+      <input
+        id="gate-wallet"
+        name="walletAddress"
+        value={value}
+        autoComplete="off"
+        spellCheck={false}
+        placeholder="NQ…"
+        onChange={(event) => setValue(event.target.value)}
+        aria-describedby="gate-wallet-hint"
+        className="mt-2 w-full rounded-2xl border border-ink/12 bg-white px-4 py-3 text-base text-ink outline-none placeholder:text-ink/45 focus:border-gold"
+      />
+      <p id="gate-wallet-hint" className="mt-2 text-xs leading-relaxed text-ink/55">
+        Copy it from Nimiq Pay. It starts with NQ.
+      </p>
+      {problem ? (
+        <p data-testid="wallet-problem" role="alert" className="mt-2 text-xs leading-relaxed text-ink/75">
+          {problem}
+        </p>
+      ) : null}
+
+      <button type="submit" className="nd-primary mt-6 w-full">
+        Continue
+      </button>
+    </form>
+  )
+}
+
+function PlayingAs({ address, onChange }: { address: string; onChange: () => void }) {
+  return (
+    <div className="mt-6 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 border-t border-ink/10 pt-4">
+      <p className="min-w-0 text-xs leading-relaxed text-ink/55 [overflow-wrap:anywhere]">
+        Playing as <span className="font-medium text-ink/75">{address}</span>
+      </p>
+      <button
+        type="button"
+        data-testid="change-wallet"
+        onClick={onChange}
+        className="shrink-0 text-xs font-semibold text-ink/60 underline"
+      >
+        Use a different wallet
+      </button>
+    </div>
+  )
+}
+
+// ---- kind: trivia -------------------------------------------------------------------
+
+function Trivia({
+  publicId,
+  walletAddress,
+  tier,
+  onPass,
+}: {
+  publicId: string
+  walletAddress: string
+  tier: string | null
+  onPass: () => void
+}) {
+  const session = useTriviaSession(publicId, walletAddress)
+  const [submitting, setSubmitting] = useState(false)
+
+  // Told upwards rather than rendered here, so the pass screen is the whole
+  // screen rather than a panel under the offer it has just been earned from.
+  const passed = session.phase === 'passed'
+  useEffect(() => {
+    if (passed) onPass()
+  }, [onPass, passed])
+  if (passed) return null
+
+  if (session.phase === 'failed') {
+    return (
+      <div data-testid="trivia-failed" className="mt-8">
+        <h1 className="text-2xl font-semibold tracking-tight">This attempt has ended</h1>
+        {/**
+         * The server's own sentence when it refused the submission — a missed
+         * deadline says so in those words. Otherwise the plain fact: one answer
+         * was wrong and the round stops there.
+         *
+         * Neither branch says which option was right. The API does not return
+         * it and this screen does not invent it.
+         */}
+        <p className="mt-3 text-sm leading-relaxed text-ink/65">
+          {session.error ??
+            `One answer was not the right one, so the round stopped there. You answered ${session.answered} of ${session.questionCount}.`}
+        </p>
+        <p className="mt-3 text-sm leading-relaxed text-ink/65">
+          You can try this drop again in {TRIVIA_COOLDOWN_MINUTES} minutes. Nothing was signed and
+          nothing was sent, so nothing has been lost.
+        </p>
+        <Link to="/games" className="nd-secondary mt-8 block w-full text-center">
+          See the other drops
+        </Link>
+      </div>
+    )
+  }
+
+  if (session.phase === 'playing' && session.question) {
+    const question = session.question
+    const timeUp = session.secondsLeft === 0
+    return (
+      <div data-testid="trivia-playing" className="mt-8">
+        <div className="flex items-baseline justify-between gap-3">
+          <p data-testid="question-progress" className="text-sm font-semibold tabular-nums text-ink/70">
+            {question.questionIndex + 1} of {session.questionCount || question.questionCount}
+          </p>
+          <p className="text-xs font-medium text-ink/55">{question.category}</p>
+        </div>
+
+        <Countdown secondsLeft={session.secondsLeft} />
+
+        <h1 className="mt-6 text-xl leading-snug font-semibold tracking-tight">{question.prompt}</h1>
+
+        {/* Four large targets, 52px tall with 12px between them. */}
+        <div className="mt-6 flex flex-col gap-3">
+          {question.options.map((option, index) => (
+            <button
+              key={option}
+              type="button"
+              disabled={submitting}
+              onClick={() => {
+                setSubmitting(true)
+                void session.submit(index).finally(() => setSubmitting(false))
+              }}
+              className="nd-secondary w-full text-left"
+            >
+              {option}
+            </button>
+          ))}
+        </div>
+
+        {/**
+         * Zero does not submit anything. The server already refuses a late
+         * answer and stays the authority; picking an option on the player's
+         * behalf would spend their one submission on something they did not
+         * choose. So the buttons stay live and the screen says where they stand.
+         */}
+        {timeUp ? (
+          <p data-testid="time-up" className="mt-4 text-sm leading-relaxed text-ink/65">
+            Time is up on this question. You can still answer, but the server may not accept it.
+          </p>
+        ) : null}
+
+        {session.error ? (
+          <p role="alert" className="mt-4 text-sm leading-relaxed text-ink/75">
+            {session.error}
+          </p>
+        ) : null}
+      </div>
+    )
+  }
+
+  return (
+    <div data-testid="trivia-idle" className="mt-8">
+      <h1 className="text-lg font-semibold tracking-tight">
+        {TRIVIA_QUESTION_COUNT} questions, four options each
+      </h1>
+      <p className="mt-2 text-sm leading-relaxed text-ink/65">
+        Answer all {TRIVIA_QUESTION_COUNT} correctly and this drop&rsquo;s share is yours to claim.
+        One wrong answer ends the attempt{tier ? ` at ${tier}` : ''}, and you can try again in{' '}
+        {TRIVIA_COOLDOWN_MINUTES} minutes.
+      </p>
+      {/**
+       * The per-question time limit is set per drop and is not in
+       * `GET /api/games/:publicId` — it arrives with a started session. So this
+       * line says the question is timed, which is true, rather than a number
+       * that would be a guess.
+       */}
+      <p className="mt-2 text-sm leading-relaxed text-ink/65">
+        Each question is timed by the server, and the seconds are on screen while you answer.
+      </p>
+      <p className="mt-2 text-sm leading-relaxed text-ink/65">
+        Nothing is signed while you play. If you pass, you go to this drop&rsquo;s own page and claim
+        there — the wallet approval comes after, not now.
+      </p>
+
+      <button
+        type="button"
+        onClick={() => void session.start()}
+        className="nd-primary mt-8 w-full"
+      >
+        Start
+      </button>
+
+      {session.error ? (
+        <p data-testid="trivia-start-error" role="alert" className="mt-4 text-sm leading-relaxed text-ink/75">
+          {session.error}
+        </p>
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * The seconds the SERVER will honour, and a bar that shows them at a glance.
+ *
+ * The number is plain text driven by state, so it keeps counting under
+ * `prefers-reduced-motion` — the global block in `index.css` zeroes the bar's
+ * transition and nothing else. A countdown that stopped counting because
+ * animation was off would be a correctness bug wearing a visual costume, and
+ * `PRODUCT.md` holds timers to AA contrast for the same reason it holds
+ * amounts: misreading one has consequences.
+ */
+function Countdown({ secondsLeft }: { secondsLeft: number }) {
+  return (
+    <div className="mt-4">
+      <span
+        data-testid="countdown"
+        role="timer"
+        className="text-sm font-semibold tabular-nums text-ink"
+      >
+        {secondsLeft}s
+      </span>
+      <div className="mt-2 h-1 w-full overflow-hidden rounded-full bg-ink/10">
+        <div
+          aria-hidden="true"
+          className="h-full rounded-full bg-gold transition-[width] duration-300 ease-linear"
+          style={{ width: `${Math.min(100, secondsLeft * 10)}%` }}
+        />
+      </div>
+    </div>
+  )
+}
+
+// ---- kind: passphrase ---------------------------------------------------------------
+
+function Passphrase({
+  publicId,
+  walletAddress,
+  hint,
+  onGranted,
+}: {
+  publicId: string
+  walletAddress: string
+  hint: string | null
+  onGranted: () => void
+}) {
+  const [phrase, setPhrase] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [notice, setNotice] = useState<ReactNode>(null)
+  /**
+   * This page's own count of wrong tries, not the server's.
+   *
+   * The server counts per address per drop over an hour and does not return the
+   * tally, so this is the only number available at the moment of a wrong
+   * guess. It can only ever be an under-count — tries from another device or
+   * before a reload are invisible to it — which is why the server's own
+   * `too_many_attempts` sentence replaces this line the moment it arrives.
+   */
+  const [wrong, setWrong] = useState(0)
+
+  return (
+    <form
+      data-testid="passphrase-form"
+      className="mt-8"
+      onSubmit={(event) => {
+        event.preventDefault()
+        if (busy || phrase.trim() === '') return
+        setBusy(true)
+        setNotice(null)
+        void submitPassphrase(publicId, walletAddress, phrase)
+          .then(onGranted)
+          .catch((err: unknown) => {
+            if (err instanceof ApiError && err.code === 'bad_attempt') {
+              const used = wrong + 1
+              const left = Math.max(0, PASSPHRASE_MAX_ATTEMPTS - used)
+              setWrong(used)
+              setNotice(
+                <>
+                  That is not it.{' '}
+                  <span className="tabular-nums">
+                    {left} of {PASSPHRASE_MAX_ATTEMPTS} tries left.
+                  </span>
+                </>,
+              )
+              return
+            }
+            if (err instanceof ApiError) {
+              // The server's own sentence, including the hour-long refusal.
+              setNotice(err.message)
+              return
+            }
+            setNotice('We could not reach NimDrops just now. Nothing was counted against you.')
+          })
+          .finally(() => setBusy(false))
+      }}
+    >
+      <h1 className="text-lg font-semibold tracking-tight">Know the phrase, claim a share</h1>
+      {hint ? (
+        <p data-testid="passphrase-hint" className="mt-3 border-l-2 border-gold/45 pl-4 text-sm leading-relaxed text-ink/70">
+          {hint}
+        </p>
+      ) : null}
+      <p className="mt-3 text-sm leading-relaxed text-ink/65">
+        Capital letters and extra spaces do not matter. Nothing is signed here — if the phrase is
+        right, you claim on the drop&rsquo;s own page.
+      </p>
+
+      <label htmlFor="gate-phrase" className="mt-6 block text-sm font-medium text-ink/70">
+        The phrase
+      </label>
+      <input
+        id="gate-phrase"
+        name="phrase"
+        value={phrase}
+        autoComplete="off"
+        spellCheck={false}
+        onChange={(event) => setPhrase(event.target.value)}
+        className="mt-2 w-full rounded-2xl border border-ink/12 bg-white px-4 py-3 text-base text-ink outline-none placeholder:text-ink/45 focus:border-gold"
+      />
+
+      <button type="submit" disabled={busy || phrase.trim() === ''} className="nd-primary mt-6 w-full">
+        Check the phrase
+      </button>
+
+      {notice ? (
+        <p data-testid="passphrase-notice" role="alert" className="mt-4 text-sm leading-relaxed text-ink/75">
+          {notice}
+        </p>
+      ) : null}
+    </form>
+  )
+}
+
+// ---- kind: attested -----------------------------------------------------------------
+
+/**
+ * Nothing to answer. A third party decides who is eligible and tells the server
+ * with a signed message, so the player has no step at all — and the screen says
+ * that plainly instead of showing an input that would do nothing.
+ */
+function Attested({ onCheckAgain, checking }: { onCheckAgain: () => void; checking: boolean }) {
+  return (
+    <div data-testid="attested" className="mt-8">
+      <h1 className="text-lg font-semibold tracking-tight">Someone else confirms this one</h1>
+      <p className="mt-3 text-sm leading-relaxed text-ink/65">
+        Whoever runs this drop decides who can claim it and confirms it themselves. There is nothing
+        here to answer and nothing to sign.
+      </p>
+      <p className="mt-3 text-sm leading-relaxed text-ink/65">
+        For the wallet you named, that confirmation has not happened yet. When it does, this page
+        says you can claim.
+      </p>
+      <button
+        type="button"
+        data-testid="attested-recheck"
+        disabled={checking}
+        onClick={onCheckAgain}
+        className="nd-secondary mt-8 w-full"
+      >
+        Check again
+      </button>
+    </div>
+  )
+}
+
+// ---- the page could not be read ------------------------------------------------------
+
+function Loading() {
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center pb-24 text-center">
+      <div className="nd-pulse h-1.5 w-16 rounded-full bg-gold" aria-hidden="true" />
+      <p className="mt-6 text-sm text-ink/55">Opening…</p>
+    </div>
+  )
+}
+
+/**
+ * Two different dead ends, told apart by the code rather than the sentence.
+ *
+ * `not_a_game` is the common one and is not an error at all: somebody was sent
+ * a `/game/` link for an ordinary drop, and the useful answer is the drop.
+ */
+function LoadFailure({
+  publicId,
+  code,
+  message,
+  onRetry,
+}: {
+  publicId: string
+  code: string | null
+  message: string | null
+  onRetry: () => void
+}) {
+  if (code === 'not_a_game' || code === 'not_found') {
+    return (
+      <div data-testid="not-a-game" className="flex flex-1 flex-col justify-center pb-16">
+        <h1 className="text-2xl font-semibold tracking-tight">Nothing to meet here</h1>
+        <p className="mt-3 text-sm leading-relaxed text-ink/65">
+          This drop does not ask anything of you. If it is still live, you can claim from its own
+          page.
+        </p>
+        <Link to={`/drop/${publicId}`} className="nd-primary mt-8 block w-full text-center">
+          Open the drop
+        </Link>
+      </div>
+    )
+  }
+
+  return (
+    <div data-testid="game-unavailable" className="flex flex-1 flex-col justify-center pb-16">
+      <h1 className="text-2xl font-semibold tracking-tight">We could not open this</h1>
+      <p className="mt-3 text-sm leading-relaxed text-ink/65">
+        {message ?? 'Something went wrong on our side.'}
+      </p>
+      <p className="mt-3 text-sm leading-relaxed text-ink/65">
+        Nothing has been lost and nothing was signed.
+      </p>
+      <button type="button" onClick={onRetry} className="nd-primary mt-8 w-full">
+        Try again
+      </button>
+    </div>
+  )
+}

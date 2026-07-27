@@ -382,6 +382,70 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
 
   // A retry serves the identical set, so leaking which of the five was wrong
   // would turn 1024 guaranteed attempts into about twenty.
+  /**
+   * The test that should have existed first.
+   *
+   * Asserting the response's KEYS proves nothing about what it means. A `state`
+   * that turned `failed` the moment one answer was wrong was per-question
+   * correctness under a different name, and it cut brute force from 1024 attempts
+   * to sixteen — three failed sessions per question, five questions, about two
+   * and a half hours at a ten-minute cooldown, knowing none of the answers.
+   *
+   * So this asserts the semantics: a wrong FIRST answer must be
+   * indistinguishable from a right one until the set is finished.
+   */
+  it('does not reveal that an answer was wrong until every question is in', async () => {
+    const svc = service()
+    const bank = testBank()
+    const gate = await loadGate(pool, publicId)
+    const s = await svc.startOrResume(gate, PLAYER)
+
+    const first = await svc.currentQuestion(s.sessionId)
+    const id = (await questionIds(s.sessionId))[first.questionIndex]
+    const truth = bank.questions.find((x) => x.id === id)!.answerIndex
+
+    const wrong = await svc.submitAnswer(s.sessionId, first.questionIndex, (truth + 1) % 4)
+    expect(wrong.state).toBe('in_progress')
+    // And the session is genuinely still playable, not merely reported as such.
+    expect(await sessionState(s.sessionId)).toBe('in_progress')
+    await expect(svc.currentQuestion(s.sessionId)).resolves.toMatchObject({ questionIndex: 1 })
+  })
+
+  it('reports the same state for a right and a wrong first answer', async () => {
+    const svc = service()
+    const bank = testBank()
+    const gate = await loadGate(pool, publicId)
+
+    async function firstOutcome(wallet: string, correct: boolean) {
+      const s = await svc.startOrResume(gate, wallet)
+      const q = await svc.currentQuestion(s.sessionId)
+      const id = (await questionIds(s.sessionId))[q.questionIndex]
+      const truth = bank.questions.find((x) => x.id === id)!.answerIndex
+      return svc.submitAnswer(s.sessionId, q.questionIndex, correct ? truth : (truth + 1) % 4)
+    }
+
+    // Two different wallets so each gets its own session and its own question
+    // set; what must match is the SHAPE of the answer they get back.
+    const right = await firstOutcome('NQ07 RIGHT', true)
+    const notRight = await firstOutcome('NQ07 WRONG', false)
+    expect(notRight).toEqual(right)
+  })
+
+  it('still fails a session that got one question wrong, at the end', async () => {
+    const svc = service()
+    const gate = await loadGate(pool, publicId)
+    const s = await svc.startOrResume(gate, PLAYER)
+    // `answerAll` with correct=false answers every question wrong; the outcome
+    // must arrive only on the fifth.
+    const outcome = await answerAll(svc, s.sessionId, false)
+    expect(outcome).toMatchObject({ state: 'failed', answered: 5 })
+    const { rows } = await pool.query<{ count: string }>(
+      'SELECT count(*) FROM gate_grants WHERE wallet_address = $1',
+      [PLAYER],
+    )
+    expect(rows[0].count).toBe('0')
+  })
+
   it('leaks no per-question correctness in the outcome', async () => {
     const svc = service()
     const s = await svc.startOrResume(await gateFor(), PLAYER)
@@ -412,7 +476,7 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
     expect(rows[0].count).toBe('0')
   })
 
-  it('rejects an answer submitted after the deadline, and ends the session', async () => {
+  it('records a late answer as wrong and lets play continue', async () => {
     const svc = service()
     const s = await svc.startOrResume(await gateFor(), PLAYER)
     const q = await svc.currentQuestion(s.sessionId)
@@ -424,9 +488,53 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
     await expect(svc.submitAnswer(s.sessionId, q.questionIndex, 0)).rejects.toThrow(
       /deadline_missed/,
     )
-    // The failure is committed before the rejection is raised, so a missed
-    // deadline is recorded rather than lost.
-    expect(await sessionState(s.sessionId)).toBe('failed')
+
+    // The answer is committed as wrong BEFORE the rejection is raised, so the
+    // missed deadline is recorded rather than lost to a rollback.
+    const { rows } = await pool.query<{ is_correct: boolean; answered: boolean }>(
+      `SELECT is_correct, answered_at IS NOT NULL AS answered
+       FROM trivia_answers WHERE session_id = $1 AND question_index = $2`,
+      [s.sessionId, q.questionIndex],
+    )
+    expect(rows[0]).toEqual({ is_correct: false, answered: true })
+
+    // It does NOT end the session. Ending it here would tell the player their
+    // answer was wrong, and the whole point of scoring at the end is that a
+    // single submission reveals nothing about a single answer. They finish the
+    // set and lose at the end, like anyone who simply guessed badly.
+    expect(await sessionState(s.sessionId)).toBe('in_progress')
+    await expect(svc.currentQuestion(s.sessionId)).resolves.toMatchObject({ questionIndex: 1 })
+  })
+
+  it('fails a session at the end when one answer was late', async () => {
+    const svc = service()
+    const s = await svc.startOrResume(await gateFor(), PLAYER)
+    const bank = testBank()
+    for (let i = 0; i < 5; i += 1) {
+      const q = await svc.currentQuestion(s.sessionId)
+      const id = (await questionIds(s.sessionId))[q.questionIndex]
+      const truth = bank.questions.find((x) => x.id === id)!.answerIndex
+      if (i === 2) {
+        // Answer this one correctly, but too late.
+        await pool.query(
+          `UPDATE trivia_answers SET deadline_at = now() - interval '1 second'
+           WHERE session_id = $1 AND question_index = $2`,
+          [s.sessionId, q.questionIndex],
+        )
+        await expect(svc.submitAnswer(s.sessionId, q.questionIndex, truth)).rejects.toThrow(
+          /deadline_missed/,
+        )
+        continue
+      }
+      const outcome = await svc.submitAnswer(s.sessionId, q.questionIndex, truth)
+      if (i < 4) expect(outcome.state).toBe('in_progress')
+      else expect(outcome.state).toBe('failed')
+    }
+    const { rows } = await pool.query<{ count: string }>(
+      'SELECT count(*) FROM gate_grants WHERE wallet_address = $1',
+      [PLAYER],
+    )
+    expect(rows[0].count).toBe('0')
   })
 
   it('rejects a second submission for the same question index', async () => {
@@ -477,5 +585,126 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
     await expect(svc.submitAnswer(absent, 0, 0)).rejects.toThrow(/session_not_found/)
     // Garbage from a client must not surface as a 500 either.
     await expect(svc.currentQuestion('not-a-uuid')).rejects.toThrow(/session_not_found/)
+  })
+
+  // Spec §4.6: Novice and Easy are always open; Medium needs a pass at Easy or
+  // above on ANY drop; Hard needs Medium. That is the entire level system — no
+  // points, no streaks, no randomness.
+  //
+  // The bank in this suite holds novice questions only, so a gate under test
+  // stays `tier: 'novice'` and carries the requirement in `unlockRequiresTier`.
+  // Only the tier of the drop a PRIOR grant sits on matters to the check.
+  describe('tier progression', () => {
+    /** A gate that requires `tier`, on its own drop. */
+    const gateRequiring = (tier: string) =>
+      seedGate({ config: { ...shippedConfig, unlockRequiresTier: tier } })
+
+    /** A prior pass: a grant of `kind` on a separate drop whose gate is `tier`. */
+    async function priorGrant(o: { tier: string; kind?: 'trivia' | 'passphrase' }) {
+      const other = await seedGate({ config: { ...shippedConfig, tier: o.tier } })
+      const gate = await gateFor(other)
+      await issueGrant(pool, {
+        dropId: gate.dropId,
+        walletAddress: PLAYER,
+        kind: o.kind ?? 'trivia',
+      })
+    }
+
+    it('never locks a gate that names no requirement', async () => {
+      // Absent, as `shippedConfig` has it, and explicitly null.
+      await expect(service().startOrResume(await gateFor(), PLAYER)).resolves.toMatchObject({
+        deliveredCount: 0,
+      })
+      const open = await seedGate({ config: { ...shippedConfig, unlockRequiresTier: null } })
+      await expect(
+        service().startOrResume(await gateFor(open), 'NQ07 OTHER'),
+      ).resolves.toMatchObject({ deliveredCount: 0 })
+    })
+
+    it('locks a wallet holding no prior trivia grant', async () => {
+      const locked = await gateRequiring('medium')
+      await expect(service().startOrResume(await gateFor(locked), PLAYER)).rejects.toThrow(
+        /tier_locked/,
+      )
+    })
+
+    it('unlocks on a grant at exactly the required tier', async () => {
+      const locked = await gateRequiring('medium')
+      await priorGrant({ tier: 'medium' })
+      await expect(
+        service().startOrResume(await gateFor(locked), PLAYER),
+      ).resolves.toMatchObject({ deliveredCount: 0 })
+    })
+
+    it('unlocks on a grant at a higher tier', async () => {
+      const locked = await gateRequiring('easy')
+      await priorGrant({ tier: 'hard' })
+      await expect(
+        service().startOrResume(await gateFor(locked), PLAYER),
+      ).resolves.toMatchObject({ deliveredCount: 0 })
+    })
+
+    it('stays locked on a grant at a lower tier', async () => {
+      const locked = await gateRequiring('hard')
+      await priorGrant({ tier: 'easy' })
+      await expect(service().startOrResume(await gateFor(locked), PLAYER)).rejects.toThrow(
+        /tier_locked/,
+      )
+    })
+
+    // A passphrase grant says a wallet heard a word at a meetup. It is no
+    // evidence about trivia, however high the tier of the drop it sits on.
+    it('does not accept a passphrase grant as a trivia pass', async () => {
+      const locked = await gateRequiring('easy')
+      await priorGrant({ tier: 'hard', kind: 'passphrase' })
+      await expect(service().startOrResume(await gateFor(locked), PLAYER)).rejects.toThrow(
+        /tier_locked/,
+      )
+    })
+
+    // The unlock and the session it authorises must be decided against one
+    // snapshot. Checking it after the COMMIT, or on the pool instead of the
+    // transaction's client, would let two tabs each read "locked" and one still
+    // walk away with a session.
+    it('checks the requirement inside the advisory-locked transaction', async () => {
+      const sql: string[] = []
+      const recording = {
+        connect: async () => {
+          const client = await pool.connect()
+          const original = client.query.bind(client)
+          const spy = (...args: unknown[]) => {
+            const first = args[0]
+            sql.push(
+              typeof first === 'string' ? first : String((first as { text: string }).text),
+            )
+            return (original as unknown as (...a: unknown[]) => unknown)(...args)
+          }
+          Object.assign(client, { query: spy })
+          return client
+        },
+      } as unknown as pg.Pool
+
+      const locked = await gateRequiring('medium')
+      const svc = makeTrivia({ pool: recording, bank: testBank(), salt: SALT })
+      await expect(svc.startOrResume(await gateFor(locked), PLAYER)).rejects.toThrow(
+        /tier_locked/,
+      )
+
+      const at = (needle: string) => sql.findIndex((q) => q.includes(needle))
+      expect(sql[0]).toBe('BEGIN')
+      expect(at('pg_advisory_xact_lock')).toBeGreaterThan(0)
+      // `array_position` over the tier ladder is the tier check and nothing else
+      // in this path uses it.
+      expect(at('array_position')).toBeGreaterThan(at('pg_advisory_xact_lock'))
+      expect(at('ROLLBACK')).toBeGreaterThan(at('array_position'))
+      expect(at('COMMIT')).toBe(-1)
+
+      // And the rollback is real: a locked player spends no session, so nothing
+      // puts them in a cooldown for an attempt they were never allowed.
+      const { rows } = await pool.query<{ count: string }>(
+        'SELECT count(*)::text AS count FROM trivia_sessions',
+      )
+      expect(rows[0].count).toBe('0')
+    })
   })
 })

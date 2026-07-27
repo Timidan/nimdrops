@@ -1,13 +1,15 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import Create from './pages/Create'
 import Drop from './pages/Drop'
+import Game from './pages/Game'
+import Games from './pages/Games'
 import Preview from './pages/Preview'
 import Spike from './pages/Spike'
 
 /**
- * The three routes the server actually serves a shell for (`http/ssr.ts`):
- * `/`, `/create` and `/d/:publicId`. Anything else is a mistyped or stale link,
- * and the useful answer to that is the create screen, not a 404 page.
+ * The routes the server serves a shell for (`http/ssr.ts`): `/`, `/create` and
+ * `/d/:publicId`. Anything else is a mistyped or stale link, and the useful
+ * answer to that is the create screen, not a 404 page.
  *
  * `/preview` is the envelope's states board and must never ship. The guard is
  * `import.meta.env.DEV`, which Vite substitutes with the literal `false` in a
@@ -24,6 +26,21 @@ export function AppRoutes() {
       <Route path="/" element={<Create />} />
       <Route path="/create" element={<Create />} />
       <Route path="/d/:publicId" element={<Drop />} />
+      {/**
+       * `/drop/:publicId` is the canonical claim path and the only one a gate
+       * screen links to. It resolves the same component as `/d/:publicId`,
+       * which stays working forever: a claim link that dead-ends is somebody
+       * not getting money that was sent to them.
+       */}
+      <Route path="/drop/:publicId" element={<Drop />} />
+      {/**
+       * Conditional claims. `/game/:publicId`, not `/g/:publicId` — `/d/` was
+       * the short thing that fit while the shell was being built and it cost a
+       * redirect to undo, so a new abbreviation would recreate that debt on day
+       * one.
+       */}
+      <Route path="/game/:publicId" element={<Game />} />
+      <Route path="/games" element={<Games />} />
       {/* Task 7's on-device provider spike page; dev-only in practice. */}
       <Route path="/spike" element={<Spike />} />
       {import.meta.env.DEV ? <Route path="/preview" element={<Preview />} /> : null}

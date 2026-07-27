@@ -145,6 +145,92 @@ export interface SignedClaim {
   signature: string
 }
 
+// ---- conditional claims ("games") ------------------------------------------------
+//
+// A gated drop asks a wallet to satisfy one condition before it will let that
+// wallet claim. Three kinds exist and the server dispatches on `kind`; none of
+// them is a money endpoint, and none of them takes a signature — a grant names
+// an address, and `reserveClaim` compares that address against the one derived
+// from the claim signature, so a condition met under somebody else's address is
+// worthless to whoever met it.
+
+export type GateKind = 'trivia' | 'passphrase' | 'attested'
+
+/**
+ * `GET /api/games/:publicId` — one game, plus whether a named wallet has
+ * already met its condition.
+ *
+ * Deliberately a named field set: the server never returns `drop_gates.config`,
+ * which holds the passphrase hash for one kind and the attester key for
+ * another. There is no `questionCount` and no `secondsPerQuestion` here — those
+ * arrive with a started session.
+ */
+export interface GameView {
+  publicId: string
+  kind: GateKind
+  /** Trivia difficulty; null for a kind that has no tiers. */
+  tier: string | null
+  /** A tier that must already have been passed, or null when nothing locks it. */
+  unlockRequiresTier: string | null
+  /** The sponsor's public hint for `passphrase`; null for every other kind. */
+  hint: string | null
+  amountEachLuna: string
+  claimCount: number
+  slotsRemaining: number
+  expiresAt: string | null
+  state: DropState
+  /** False when no wallet was named — the server cannot answer without one. */
+  granted: boolean
+}
+
+/** One row of `GET /api/games`. Listed, gated, live drops only. */
+export interface ListedGame {
+  publicId: string
+  kind: GateKind
+  tier: string | null
+  amountEachLuna: string
+  slotsRemaining: number
+  expiresAt: string | null
+  unlockRequiresTier: string | null
+  hint: string | null
+}
+
+/** `POST /api/games/:publicId/session` — trivia only. */
+export interface StartedTriviaSession {
+  sessionId: string
+  questionCount: number
+  secondsPerQuestion: number
+  /** Questions already delivered, so a resumed session does not restart at 1. */
+  deliveredCount: number
+}
+
+/**
+ * One question in play.
+ *
+ * `deadlineAt` is stamped by the server at delivery and re-reading does not
+ * extend it, so it — and never a local timer start — is what a countdown may
+ * derive from. Note what is absent: no answer index, no correctness, no score.
+ */
+export interface TriviaQuestion {
+  questionIndex: number
+  prompt: string
+  options: string[]
+  category: string
+  deadlineAt: string
+  questionCount: number
+}
+
+/**
+ * The result of one submission. `state` is the only correctness signal a client
+ * ever receives: there is no per-question feedback and no reveal of the right
+ * answer, on a pass or on a failure.
+ */
+export interface TriviaOutcome {
+  state: 'in_progress' | 'passed' | 'failed'
+  answered: number
+  questionCount: number
+}
+
 export interface CreateDropInput {
   sponsorLabel: string
   message?: string
@@ -407,5 +493,80 @@ export async function submitClaim(
 export async function getClaimStatus(claimId: string, statusToken: string): Promise<ClaimStatus> {
   return request<ClaimStatus>(`/claims/${encodeURIComponent(claimId)}`, {
     headers: { Authorization: `Bearer ${statusToken}` },
+  })
+}
+
+// ---- gate endpoints ---------------------------------------------------------------
+
+/**
+ * Every listed, gated, live drop. Answers with an empty list rather than a 404
+ * when no gates are configured, so an empty catalogue does not read as an outage.
+ */
+export async function listGames(): Promise<ListedGame[]> {
+  const body = await request<{ games?: ListedGame[] }>('/games')
+  return Array.isArray(body?.games) ? body.games : []
+}
+
+/**
+ * One game. `walletAddress` is optional and travels as a query parameter: it is
+ * the only way the server can answer `granted`, and it is an assertion rather
+ * than a proof — which is safe, because a grant is worthless to any address but
+ * the one it names.
+ */
+export async function getGame(publicId: string, walletAddress?: string): Promise<GameView> {
+  const query = walletAddress ? `?wallet=${encodeURIComponent(walletAddress)}` : ''
+  return request<GameView>(`/games/${encodeURIComponent(publicId)}${query}`)
+}
+
+export async function startTriviaSession(
+  publicId: string,
+  walletAddress: string,
+): Promise<StartedTriviaSession> {
+  return request<StartedTriviaSession>(`/games/${encodeURIComponent(publicId)}/session`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ walletAddress }),
+  })
+}
+
+export async function getTriviaQuestion(
+  publicId: string,
+  sessionId: string,
+): Promise<TriviaQuestion> {
+  return request<TriviaQuestion>(
+    `/games/${encodeURIComponent(publicId)}/session/${encodeURIComponent(sessionId)}/question`,
+  )
+}
+
+/**
+ * Answer the question in play. `questionIndex` is sent so the server can refuse
+ * a submission for a question that is no longer the current one, rather than
+ * spending this session's answer on the wrong question.
+ */
+export async function submitTriviaAnswer(
+  publicId: string,
+  sessionId: string,
+  questionIndex: number,
+  answerIndex: number,
+): Promise<TriviaOutcome> {
+  return request<TriviaOutcome>(
+    `/games/${encodeURIComponent(publicId)}/session/${encodeURIComponent(sessionId)}/answer`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ questionIndex, answerIndex }),
+    },
+  )
+}
+
+export async function submitPassphrase(
+  publicId: string,
+  walletAddress: string,
+  phrase: string,
+): Promise<{ granted: true }> {
+  return request<{ granted: true }>(`/games/${encodeURIComponent(publicId)}/passphrase`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ walletAddress, phrase }),
   })
 }

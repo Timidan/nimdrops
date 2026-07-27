@@ -8,6 +8,8 @@ import {
   requireSigScheme,
   requireTriviaBankPath,
   requireTriviaSalt,
+  requirePassphraseSalt,
+  passphraseConfigured,
   triviaConfigured,
 } from './config'
 import { loadBank } from './gates/trivia/bank'
@@ -142,16 +144,17 @@ async function main(): Promise<void> {
   // `loadBank` throws here so a broken bank stops boot instead of silently
   // disabling the feature on a process that then reports itself healthy.
   const triviaOn = triviaConfigured()
+  const passphraseOn = passphraseConfigured()
   const gates = {
     trivia: triviaOn
       ? makeTrivia({ pool, bank: await loadBank(requireTriviaBankPath()), salt: requireTriviaSalt() })
       : null,
-    // The same secret keys passphrase hashing. One value rather than two, so an
-    // operator cannot rotate half of it and leave the other half verifying
-    // against what it used to be.
-    passphraseSalt: triviaOn ? requireTriviaSalt() : null,
+    // A SEPARATE key from the selection salt, and configured independently. The
+    // two were one value, which meant rotating the salt to reshuffle questions
+    // also invalidated every passphrase hash already stored on a live drop.
+    passphraseSalt: passphraseOn ? requirePassphraseSalt() : null,
   }
-  logInfo('gates_configured', { trivia: triviaOn, passphrase: triviaOn })
+  logInfo('gates_configured', { trivia: triviaOn, passphrase: passphraseOn })
 
   const app = makeApp({ pool, chain, alerts, clientIp, gates })
 

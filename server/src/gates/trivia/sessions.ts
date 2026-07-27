@@ -63,9 +63,9 @@ const TIERS: readonly Tier[] = ['novice', 'easy', 'medium', 'hard']
 /**
  * Validated `drop_gates.config` for a trivia gate.
  *
- * `unlockRequiresTier` is carried through and recorded but not enforced here:
- * tier progression is a later task, and the field exists so a listed game can
- * show its requirement.
+ * `unlockRequiresTier` is enforced in {@link TriviaService.startOrResume} — see
+ * `assertTierUnlocked` — and is also what a listed game shows as its
+ * requirement, so a locked game still renders with its payout visible.
  */
 export interface TriviaConfig {
   tier: Tier
@@ -95,10 +95,15 @@ export interface DeliveredQuestion {
 /**
  * The result of one submission.
  *
- * `state` is the ONLY correctness signal a client ever receives. There is
- * deliberately no `isCorrect`, no per-question score array and no reveal of the
- * right answer on failure — see the module comment for why that is what bounds
- * retry rather than a nicety.
+ * There is no `isCorrect`, no per-question score array and no reveal of the right
+ * answer. More importantly, `state` says nothing about the answer just submitted:
+ * it stays `in_progress` for every question until the last one, and only then
+ * becomes `passed` or `failed`.
+ *
+ * Withholding the field is not enough on its own, and the first version of this
+ * proved it. A `state` that flipped to `failed` the moment an answer was wrong
+ * WAS per-question correctness, whatever it was called, and it collapsed brute
+ * force from 1024 attempts to sixteen. See `submitAnswer` for the arithmetic.
  */
 export interface AnswerOutcome {
   state: 'in_progress' | 'passed' | 'failed'
@@ -108,11 +113,12 @@ export interface AnswerOutcome {
 
 export interface TriviaService {
   startOrResume(gate: GateRow, walletAddress: string): Promise<StartedSession>
-  currentQuestion(sessionId: string): Promise<DeliveredQuestion>
+  currentQuestion(sessionId: string, dropId?: string): Promise<DeliveredQuestion>
   submitAnswer(
     sessionId: string,
     questionIndex: number,
     answerIndex: number,
+    dropId?: string,
   ): Promise<AnswerOutcome>
 }
 
@@ -239,7 +245,69 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
     return question
   }
 
-  async function loadSession(db: PoolClient, sessionId: string): Promise<SessionRow> {
+  /**
+   * Tier progression (spec §4.6): Medium needs a pass at Easy or above, Hard
+   * needs Medium, and Novice and Easy are always open because nothing precedes
+   * them.
+   *
+   * "A pass" is a `kind = 'trivia'` grant, on ANY drop — not a passed session
+   * row and not a grant of another kind. Both restrictions are load-bearing:
+   * sessions are retried and a `passed` row on a drop whose grant was never
+   * written would be a pass the money path never saw, and a `passphrase` grant
+   * says a wallet heard a word at a meetup, which is no evidence about trivia.
+   *
+   * The comparison runs on `array_position` over the tier ladder rather than on
+   * text, so `medium >= easy` means what the ladder says rather than what the
+   * alphabet says. `array_position` answers NULL for a tier the ladder does not
+   * name, and `NULL >= n` is NULL, so a gate carrying a junk tier unlocks
+   * nothing — it fails closed, exactly as `parseTriviaConfig` does.
+   *
+   * Runs inside the caller's transaction, under the same advisory lock as the
+   * rest of `startOrResume`: the unlock and the session it authorises must be
+   * decided against one snapshot, or two tabs could each read "locked" and one
+   * still get a session out of it.
+   */
+  async function assertTierUnlocked(
+    db: PoolClient,
+    requiredTier: Tier,
+    walletAddress: string,
+  ): Promise<void> {
+    const { rows } = await db.query<{ unlocked: boolean }>(
+      `SELECT true AS unlocked
+       FROM gate_grants gg
+       JOIN drop_gates dg ON dg.drop_id = gg.drop_id
+       WHERE gg.wallet_address = $1
+         AND gg.kind = 'trivia'
+         AND array_position($3::text[], dg.config->>'tier')
+             >= array_position($3::text[], $2::text)
+       LIMIT 1`,
+      [walletAddress, requiredTier, [...TIERS]],
+    )
+    if (rows.length === 0) {
+      // Names the requirement, because a player who cannot see what unlocks a
+      // game has been given a locked door and no sign on it. It names no wallet
+      // and no other drop.
+      throw new GateRejectedError(
+        'tier_locked',
+        `this game opens after a pass at ${requiredTier} or above`,
+      )
+    }
+  }
+
+  /**
+   * @param expectDropId when given, the session must belong to this drop.
+   *   The HTTP routes carry a `publicId` AND a `sessionId`, and without this the
+   *   two were never compared: a session for drop A could be played through drop
+   *   B's URL. Nothing was stealable that way — the grant lands on drop A for the
+   *   session's own wallet either way — but a route whose path segments contradict
+   *   each other should say so rather than quietly honour one and ignore the
+   *   other.
+   */
+  async function loadSession(
+    db: PoolClient,
+    sessionId: string,
+    expectDropId?: string,
+  ): Promise<SessionRow> {
     if (!UUID_RE.test(sessionId)) {
       throw new GateRejectedError('session_not_found', 'no such session')
     }
@@ -257,6 +325,11 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
     if (!row) throw new GateRejectedError('session_not_found', 'no such session')
     if (row.kind !== 'trivia') {
       throw new GateRejectedError('wrong_kind', 'this drop does not use trivia')
+    }
+    // Same code as an unknown id, on purpose: a caller who guesses a real session
+    // id under the wrong drop learns nothing it did not already have.
+    if (expectDropId !== undefined && row.drop_id !== expectDropId) {
+      throw new GateRejectedError('session_not_found', 'no such session')
     }
     return row
   }
@@ -292,6 +365,14 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
           'already_granted',
           'this wallet has already met this condition',
         )
+      }
+
+      // After `already_granted`, so a wallet that has finished this very game is
+      // told to go and claim rather than told it is locked out of it. Before the
+      // cooldown and before selection: a locked player must not spend a session,
+      // and must not be put in cooldown for one they were never allowed to start.
+      if (config.unlockRequiresTier !== null) {
+        await assertTierUnlocked(client, config.unlockRequiresTier, walletAddress)
       }
 
       const { rows: existing } = await client.query<{
@@ -386,12 +467,12 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
    * cannot buy time. That is why the INSERT does not use RETURNING — on the
    * second call it returns nothing — and is paired with a follow-up read.
    */
-  async function currentQuestion(sessionId: string): Promise<DeliveredQuestion> {
+  async function currentQuestion(sessionId: string, dropId?: string): Promise<DeliveredQuestion> {
     const client = await pool.connect()
     let committed = false
     try {
       await client.query('BEGIN')
-      const session = await loadSession(client, sessionId)
+      const session = await loadSession(client, sessionId, dropId)
       const config = parseTriviaConfig(session.config, bank.version)
 
       if (session.state === 'in_progress' && session.expired) {
@@ -451,6 +532,7 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
     sessionId: string,
     questionIndex: number,
     answerIndex: number,
+    dropId?: string,
   ): Promise<AnswerOutcome> {
     if (
       !Number.isInteger(answerIndex) ||
@@ -467,7 +549,7 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
     let committed = false
     try {
       await client.query('BEGIN')
-      const session = await loadSession(client, sessionId)
+      const session = await loadSession(client, sessionId, dropId)
       const config = parseTriviaConfig(session.config, bank.version)
 
       if (session.state === 'in_progress' && session.expired) {
@@ -516,7 +598,7 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
 
       const question = questionById(sessionId, row.question_id)
 
-      // A late answer ends the session. It is not a free retry: the wall-clock
+      // A late answer counts as wrong. It is not a free retry: the wall-clock
       // cost of the deadline is the whole point of having one.
       const correct = !row.late && answerIndex === question.answerIndex
 
@@ -528,9 +610,36 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
       )
 
       const answered = questionIndex + 1
+
+      // EVERY QUESTION IS ANSWERED BEFORE ANYTHING IS SCORED.
+      //
+      // This is the most important decision in the file, and the first version of
+      // it was wrong. A wrong answer used to end the session immediately, so every
+      // submission answered "was THAT one right?" — `failed` for no,
+      // `in_progress` for yes. Combined with a retry serving the identical
+      // question set, that let an attacker solve each question independently: at
+      // most three failed sessions per question, five questions, so SIXTEEN
+      // attempts rather than 4^5 = 1024. At a ten-minute cooldown that is about
+      // two and a half hours against a twenty-four hour drop, from one address,
+      // knowing none of the answers. The gate was decorative.
+      //
+      // Scoring only once every question is in restores the intended bound: an
+      // attempt yields exactly one bit, pass or fail overall, and 1024 attempts
+      // no longer fit inside a drop's life.
+      //
+      // The cost is that a player who knows they got question two wrong still
+      // answers three more. That is the right trade — the alternative hands the
+      // answer key to anyone patient enough to ask for it five times.
       let state: AnswerOutcome['state'] = 'in_progress'
-      if (!correct) state = 'failed'
-      else if (answered >= config.questionCount) state = 'passed'
+      if (answered >= config.questionCount) {
+        const { rows: tally } = await client.query<{ wrong: string }>(
+          `SELECT count(*)::text AS wrong
+           FROM trivia_answers
+           WHERE session_id = $1 AND is_correct IS NOT TRUE`,
+          [sessionId],
+        )
+        state = tally[0].wrong === '0' ? 'passed' : 'failed'
+      }
 
       await client.query(
         `UPDATE trivia_sessions
@@ -556,8 +665,11 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
       await client.query('COMMIT')
       committed = true
 
-      // Committed as `failed` BEFORE the rejection is raised, so a missed
-      // deadline is recorded rather than lost to a rollback.
+      // The answer is COMMITTED as wrong before this rejection is raised, so a
+      // missed deadline is recorded rather than lost to a rollback. It does not
+      // end the session — the player answers the rest and learns the outcome at
+      // the end like everyone else. Lateness is not correctness, so telling them
+      // the clock beat them leaks nothing about the answer.
       if (row.late) {
         throw new GateRejectedError('deadline_missed', 'that answer arrived after the deadline')
       }
