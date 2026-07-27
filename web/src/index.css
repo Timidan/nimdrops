@@ -1847,7 +1847,10 @@ body {
   width: 100%;
   min-height: 3rem;
   padding: 0.75rem 0.9375rem;
-  border: 1px solid var(--nd-rule);
+  /* The stronger hairline, on a recess: a field has to announce that it is one
+     before it is touched, and the 10% rule that divides a ledger's rows is not
+     an edge you would try to type into. */
+  border: 1px solid var(--nd-rule-strong);
   border-radius: 0.875rem;
   background-color: rgb(12 7 6 / 0.32);
   color: var(--nd-on-surface);
@@ -1886,14 +1889,17 @@ body {
   align-items: baseline;
   gap: 0.5rem;
   min-height: 3.5rem;
-  padding: 0.625rem 0.9375rem;
-  border: 1px solid var(--nd-rule);
+  padding: 0.5rem 0.9375rem;
+  border: 1px solid var(--nd-rule-strong);
   border-radius: 1rem;
   background-color: rgb(12 7 6 / 0.32);
 }
 
 .nd-amountbox input {
   min-width: 0;
+  /* The box is the affordance but the INPUT is the target, and a 28px line box
+     inside a padded parent is 42px tall — under the touch floor by two. */
+  min-height: 2.75rem;
   flex: 1;
   border: 0;
   background: none;
