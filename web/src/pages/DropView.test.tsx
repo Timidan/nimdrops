@@ -442,12 +442,6 @@ describe('the printed amount', () => {
  * ---------------------------------------------------------------------- */
 
 describe('gold appears once on the claim screen, and on the card', () => {
-  /**
-   * The s4 layout moved the money out of the card and onto the field, where
-   * Nimiq gold is 2.74:1 — under even the 3:1 non-text floor. So the currency
-   * mark went near-white with it, and the one gold left is the custody shield,
-   * which sits on the card at 5.47:1. `ui/surface.contrast.test.ts` pins both.
-   */
   it('paints the currency mark in ink, not gold, now that it sits on the field', () => {
     view('ready')
     const mark = screen.getByTestId('amount-hero').querySelector('.nim-mark path')!

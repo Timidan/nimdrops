@@ -1,25 +1,12 @@
 import { explorerTxUrl } from '../state/claim'
 import { SuccessCheckIcon } from '../ui/icons'
 
-/**
- * The proof a claimant keeps.
- *
- * It is only ever rendered once the server has said `paid`, and everything on
- * it is checkable by someone who does not trust NimDrops: the amount, the
- * sponsor label (marked unverified, because it is just text the sponsor typed),
- * and the transaction on a public explorer.
- *
- * It does not restate the amount as a headline. The plate it rises under has
- * that number on it, under the gold keyline; saying it twice at two sizes would
- * read as two different facts.
- */
 export interface ReceiptProps {
   publicId: string
   txHash: string | null
   sponsorLabel: string
 }
 
-/** Enough hash to compare against an explorer, short enough to read on a phone. */
 function shortHash(hash: string): string {
   return `${hash.slice(0, 8)}…${hash.slice(-8)}`
 }
