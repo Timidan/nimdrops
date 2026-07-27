@@ -65,8 +65,7 @@ export function AppRoutes() {
         money that was sent to them — cheap to keep, expensive to have missed.
       */}
       <Route path="/d/:publicId" element={<LegacyDropRedirect />} />
-      {/* Task 7's on-device provider spike page; dev-only in practice. */}
-      <Route path="/spike" element={<Spike />} />
+      {import.meta.env.DEV ? <Route path="/spike" element={<Spike />} /> : null}
       {import.meta.env.DEV ? <Route path="/preview" element={<Preview />} /> : null}
       {import.meta.env.DEV ? <Route path="/design/a" element={<DirectionA />} /> : null}
       {import.meta.env.DEV ? <Route path="/design/b" element={<DirectionB />} /> : null}

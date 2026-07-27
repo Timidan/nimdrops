@@ -74,7 +74,7 @@ declare global {
 }
 
 function recordRaw(method: RawProviderCall['method'], request: unknown, response: unknown): void {
-  if (typeof window === 'undefined') return
+  if (!import.meta.env.DEV || typeof window === 'undefined') return
   ;(window.__nimiqRawLog ??= []).push({
     method,
     request,
