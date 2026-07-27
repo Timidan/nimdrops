@@ -299,14 +299,28 @@ describe.skipIf(!hasDb)('submitPassphrase', () => {
     expect(await countGrants()).toBe('0')
   })
 
-  it('refuses rather than crashing on a same-length non-hex hash', async () => {
+  it('refuses a same-length non-hex hash as a misconfiguration, not a wrong guess', async () => {
     // Comparison is over hex-decoded buffers, so a well-shaped but undecodable
-    // hash must come out as a wrong phrase, not an unhandled crypto error.
+    // hash must never reach `timingSafeEqual`. It is also not the player's
+    // fault: `bad_attempt` here would tell someone who typed the CORRECT phrase
+    // that they got it wrong, which is why this is `misconfigured` and why the
+    // HTTP layer answers 5xx for it.
     const junk = await gatedDrop('passphrase', { hash: 'z'.repeat(64), hint: HINT })
     await expect(submit(PHRASE, W, junk.publicId)).rejects.toMatchObject({
-      code: 'bad_attempt',
+      code: 'misconfigured',
     })
     expect(await countGrants()).toBe('0')
+  })
+
+  it('does not spend an attempt on a misconfigured gate', async () => {
+    // The counter is for brute-forcers. A player defeated by the operator's typo
+    // must not also lose one of their five tries.
+    const junk = await gatedDrop('passphrase', { hash: 'z'.repeat(64), hint: HINT })
+    await expect(submit(PHRASE, W, junk.publicId)).rejects.toThrow(GateRejectedError)
+    const { rows } = await pool.query<{ count: string }>(
+      'SELECT count(*) FROM passphrase_attempts',
+    )
+    expect(rows[0].count).toBe('0')
   })
 
   describe('secrecy', () => {

@@ -35,6 +35,16 @@ export type GateRejectionCode =
   | 'game_not_live'
   /** Right drop, wrong kind of attempt — e.g. a phrase posted to a quiz. */
   | 'wrong_kind'
+  /**
+   * The drop's own `config` is invalid. An OPERATOR fault, never the player's.
+   *
+   * It exists because the two alternatives both lie. Reporting it as
+   * `bad_attempt` tells a player they guessed wrong when they did not, and
+   * throwing a bare error turns a typo in one drop's config into a 500 that
+   * looks like an outage. The HTTP layer maps this to a 5xx — the request was
+   * fine, the deployment is not — while still naming the real cause in the log.
+   */
+  | 'misconfigured'
   /** This wallet already satisfied the condition; it should be claiming. */
   | 'already_granted'
   /** Too soon after the previous attempt. */

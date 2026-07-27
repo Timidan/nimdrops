@@ -54,8 +54,13 @@ export function hashPhrase(phrase: string, salt: string): string {
 
 export function parsePassphraseConfig(config: Record<string, unknown>): PassphraseConfig {
   const { hash, hint } = config
-  if (typeof hash !== 'string' || hash.length !== 64) {
-    throw new GateRejectedError('bad_attempt', 'this drop is misconfigured')
+  if (typeof hash !== 'string' || !/^[0-9a-f]{64}$/i.test(hash)) {
+    // `misconfigured`, not `bad_attempt`. This reported an operator's broken
+    // config under the code meaning "you guessed wrong", which told the player
+    // they had made a mistake they had not made. The shape check is also
+    // tightened from a length check to hex, so a 64-character non-hash cannot
+    // reach `timingSafeEqual` and be rejected there for the wrong reason.
+    throw new GateRejectedError('misconfigured', 'passphrase gate is misconfigured')
   }
   return { hash, hint: typeof hint === 'string' ? hint : '' }
 }
