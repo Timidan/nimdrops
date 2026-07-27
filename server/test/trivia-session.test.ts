@@ -133,6 +133,10 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
   // then the drops they hang off.
   beforeEach(async () => {
     for (const table of [
+      // First: it references trivia_sessions, and it is what stops a wallet
+      // being asked the same question twice. Leaving it between cases exhausts
+      // the twelve-question test bank after two sessions.
+      'trivia_seen',
       'trivia_answers',
       'trivia_sessions',
       'gate_grants',
@@ -262,7 +266,12 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
     expect(next.sessionId).not.toBe(s.sessionId)
   })
 
-  it('serves the identical question set on a retry', async () => {
+  it('never asks one wallet the same question twice', async () => {
+    // The old rule was the opposite — a retry served the IDENTICAL set, so a
+    // failure leaked one bit and brute force was 1024 attempts. That bound is
+    // deliberately traded away for the reveal: showing the answers would make an
+    // identical retry worth about four attempts, so instead the questions never
+    // come back and knowing their answers is worth nothing.
     const svc = service()
     const gate = await gateFor()
     const first = await svc.startOrResume(gate, PLAYER)
@@ -274,11 +283,44 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
        WHERE id = $1`,
       [first.sessionId, COOLDOWN_MINUTES + 1],
     )
+
     const second = await svc.startOrResume(gate, PLAYER)
-    expect(await questionIds(second.sessionId)).toEqual(before)
+    const after = await questionIds(second.sessionId)
+    expect(after).toHaveLength(5)
+    expect(after.filter((id) => before.includes(id))).toEqual([])
   })
 
-  // The grant, not the session row, is what blocks a retry now.
+  it('records what was shown even if the session is abandoned', async () => {
+    // A player who walks away has still SEEN the questions. Re-offering them
+    // after a reveal is exactly the repetition trivia_seen exists to prevent.
+    const svc = service()
+    const s = await svc.startOrResume(await gateFor(), PLAYER)
+    const ids = await questionIds(s.sessionId)
+    const { rows } = await pool.query<{ question_id: string }>(
+      'SELECT question_id FROM trivia_seen WHERE wallet_address = $1 ORDER BY question_id',
+      [PLAYER],
+    )
+    expect(rows.map((r) => r.question_id).sort()).toEqual([...ids].sort())
+  })
+
+  it('refuses a session once the wallet has exhausted the pool', async () => {
+    // Marked directly rather than by playing, so the test says exactly what it
+    // means: four of the six categories are used up, leaving two, and a session
+    // needs five distinct ones.
+    const used = ['geography', 'science', 'history', 'sport']
+    const ids = testBank()
+      .questions.filter((q) => used.includes(q.category))
+      .map((q) => q.id)
+    await pool.query(
+      `INSERT INTO trivia_seen (wallet_address, question_id)
+       SELECT 'NQ07 EXHAUSTED', unnest($1::text[])`,
+      [ids],
+    )
+
+    await expect(service().startOrResume(await gateFor(), 'NQ07 EXHAUSTED')).rejects.toThrow(
+      /already-seen|categories left/,
+    )
+  })
   it('refuses a new session once the wallet holds a grant', async () => {
     const svc = service()
     const gate = await gateFor()
@@ -368,7 +410,7 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
     const svc = service()
     const s = await svc.startOrResume(await gateFor(), PLAYER)
     const outcome = await answerAll(svc, s.sessionId, true)
-    expect(outcome).toEqual({ state: 'passed', answered: 5, questionCount: 5 })
+    expect(outcome).toMatchObject({ state: 'passed', answered: 5, questionCount: 5 })
     expect(await sessionState(s.sessionId)).toBe('passed')
   })
 
@@ -446,11 +488,42 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
     expect(rows[0].count).toBe('0')
   })
 
-  it('leaks no per-question correctness in the outcome', async () => {
+  it('leaks no per-question correctness while a question is still in play', async () => {
     const svc = service()
     const s = await svc.startOrResume(await gateFor(), PLAYER)
+    const bank = testBank()
+
+    // Mid-session the outcome carries no review and no verdict of any kind.
+    const q = await svc.currentQuestion(s.sessionId)
+    const id = (await questionIds(s.sessionId))[q.questionIndex]
+    const truth = bank.questions.find((x) => x.id === id)!.answerIndex
+    const mid = await svc.submitAnswer(s.sessionId, q.questionIndex, (truth + 1) % 4)
+    expect(Object.keys(mid).sort()).toEqual(['answered', 'questionCount', 'state'])
+    expect(mid.review).toBeUndefined()
+  })
+
+  it('reveals every answer once the session is over', async () => {
+    const svc = service()
+    const s = await svc.startOrResume(await gateFor(), PLAYER)
+    const ids = await questionIds(s.sessionId)
+    const bank = testBank()
     const outcome = await answerAll(svc, s.sessionId, false)
-    expect(Object.keys(outcome).sort()).toEqual(['answered', 'questionCount', 'state'])
+
+    expect(outcome.state).toBe('failed')
+    expect(outcome.review).toHaveLength(5)
+    for (const [i, item] of (outcome.review ?? []).entries()) {
+      const question = bank.questions.find((x) => x.id === ids[i])!
+      expect(item).toMatchObject({
+        questionIndex: i,
+        prompt: question.prompt,
+        correctIndex: question.answerIndex,
+        wasCorrect: false,
+      })
+      expect(item.options).toHaveLength(4)
+      // The player's own choice comes back too, so a reader can see what they
+      // picked and what it should have been side by side.
+      expect(item.answerIndex).toBe((question.answerIndex + 1) % 4)
+    }
   })
 
   it('issues exactly one grant when a session passes', async () => {

@@ -109,6 +109,26 @@ export interface AnswerOutcome {
   state: 'in_progress' | 'passed' | 'failed'
   answered: number
   questionCount: number
+  /**
+   * The finished session, question by question. Present ONLY when `state` is no
+   * longer `in_progress`, and absent while a question is still in play.
+   *
+   * Safe to send precisely because a wallet never meets a question twice — see
+   * `trivia_seen` and `selectQuestionIds`. Without that rule this field would be
+   * the whole answer key: test one option across all five, read the verdicts,
+   * repeat, and pass on the fourth attempt knowing nothing.
+   */
+  review?: ReviewedQuestion[]
+}
+
+export interface ReviewedQuestion {
+  questionIndex: number
+  prompt: string
+  options: string[]
+  /** What the player chose. Null if the deadline passed with no submission. */
+  answerIndex: number | null
+  correctIndex: number
+  wasCorrect: boolean
 }
 
 export interface TriviaService {
@@ -419,6 +439,15 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
 
       // Deterministic per (drop, wallet), so a retry gets the identical set —
       // persisted here so it cannot drift even if the bank is reloaded.
+      // Everything this wallet has already been shown, across every drop. A
+      // question it has seen cannot come back, which is what makes revealing the
+      // answers afterwards safe — see `selectQuestionIds`.
+      const { rows: seenRows } = await client.query<{ question_id: string }>(
+        'SELECT question_id FROM trivia_seen WHERE wallet_address = $1',
+        [walletAddress],
+      )
+      const seen = new Set(seenRows.map((r) => r.question_id))
+
       const questionIds = selectQuestionIds({
         bank,
         tier: config.tier,
@@ -426,6 +455,7 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
         dropId: gate.dropId,
         walletAddress,
         count: config.questionCount,
+        exclude: seen,
       })
 
       const { rows: created } = await client.query<{ id: string }>(
@@ -441,6 +471,18 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
           JSON.stringify(questionIds),
           SESSION_TTL_MINUTES,
         ],
+      )
+
+      // Recorded at START, not at delivery. A player who abandons a session has
+      // still SEEN whatever it was going to ask, and re-offering those questions
+      // to the same wallet after a reveal is precisely the repetition this table
+      // exists to prevent. Burning them on an abandoned session is the safe
+      // direction to be wrong in.
+      await client.query(
+        `INSERT INTO trivia_seen (wallet_address, question_id, session_id)
+         SELECT $1, unnest($2::text[]), $3
+         ON CONFLICT (wallet_address, question_id) DO NOTHING`,
+        [walletAddress, questionIds, created[0].id],
       )
 
       await client.query('COMMIT')
@@ -526,6 +568,38 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
     } finally {
       client.release()
     }
+  }
+
+  /**
+   * Every question of a finished session, with the player's answer and the right
+   * one.
+   *
+   * Only ever called once a session has left `in_progress`. Calling it earlier
+   * would hand over the answers mid-play, which is the same leak as scoring
+   * mid-play and worse.
+   */
+  async function buildReview(db: PoolClient, sessionId: string): Promise<ReviewedQuestion[]> {
+    const { rows } = await db.query<{
+      question_index: number
+      question_id: string
+      answer_index: number | null
+      is_correct: boolean | null
+    }>(
+      `SELECT question_index, question_id, answer_index, is_correct
+       FROM trivia_answers WHERE session_id = $1 ORDER BY question_index`,
+      [sessionId],
+    )
+    return rows.map((row) => {
+      const question = questionById(sessionId, row.question_id)
+      return {
+        questionIndex: row.question_index,
+        prompt: question.prompt,
+        options: [...question.options],
+        answerIndex: row.answer_index,
+        correctIndex: question.answerIndex,
+        wasCorrect: row.is_correct === true,
+      }
+    })
   }
 
   async function submitAnswer(
@@ -662,6 +736,10 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
         })
       }
 
+      // Built INSIDE the transaction that finished the session, from the rows
+      // just written, so it cannot disagree with what was scored.
+      const review = state === 'in_progress' ? undefined : await buildReview(client, sessionId)
+
       await client.query('COMMIT')
       committed = true
 
@@ -673,7 +751,7 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
       if (row.late) {
         throw new GateRejectedError('deadline_missed', 'that answer arrived after the deadline')
       }
-      return { state, answered, questionCount: config.questionCount }
+      return { state, answered, questionCount: config.questionCount, ...(review ? { review } : {}) }
     } catch (err) {
       if (!committed) await client.query('ROLLBACK').catch(() => {})
       throw err
