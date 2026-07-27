@@ -823,9 +823,11 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
       const point = draft.disclosure.points.find((p) => p.id === 'expiry_clock')?.text ?? ''
       expect(point, `expiryHours=${expiryHours}`).toMatch(phrase)
       // The consequence, stated rather than implied: a longer window is a
-      // longer time the operator is holding the money.
+      // longer time the operator is holding the money — and, since the
+      // sponsor's early close, the way out of it. A disclosure that named the
+      // cost without naming the exit would be describing the old product.
       expect(point).toMatch(/operator holds your NIM for the whole window/)
-      expect(point).toMatch(/no one can end a drop early/)
+      expect(point).toMatch(/only the wallet you fund from can end the drop early/)
       expect(draft.disclosure.expiryHours).toBe(expiryHours)
     }
   })

@@ -1410,7 +1410,8 @@ function ExpiryChoice({ value, onChange }: { value: number; onChange: (hours: nu
       </div>
       <p className="nd-hint">
         Unclaimed NIM goes back to you {expiryWindowLabel(value)} after the drop goes live. NimDrops
-        holds it for the whole window, and no one can end a drop early.
+        holds it for the whole window, and you can close the drop early from the wallet you fund
+        with to get the unclaimed NIM back sooner.
       </p>
     </div>
   )

@@ -78,10 +78,15 @@ export const MIN_EXPIRY_HOURS = 1
  *
  * Fourteen days rather than a month, for three reasons that agree:
  *
- *  - **Nothing can end a drop early.** There is no sponsor cancel and no
- *    operator close; `sweepExpiry` at `expires_at` is the only exit. So this
- *    number is not "the longest claim window" but "the longest a sponsor can
- *    lock their own money with no way out".
+ *  - **How long a sponsor can be locked in.** When this ceiling was chosen
+ *    nothing could end a drop early — `sweepExpiry` at `expires_at` was the
+ *    only exit — so the number was not "the longest claim window" but "the
+ *    longest a sponsor can lock their own money with no way out".
+ *    `services/close.ts` has since given them the way out: the wallet that
+ *    funded a drop can close it and take back what nobody claimed. That
+ *    weakens this argument rather than removing it — the ceiling still bounds
+ *    a drop the sponsor has abandoned or lost the key to — so the number
+ *    stands until it is re-argued on its own merits.
  *  - **Every campaign shape fits inside it**: an evening, a weekend, a
  *    week-long conference, a fortnight's push. A month is not a longer
  *    campaign, it is a deposit, and this is not a deposit product.

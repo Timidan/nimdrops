@@ -236,13 +236,18 @@ export function buildDisclosure(o: {
       // Two sentences, because the window is now a decision and a decision
       // needs its consequence next to it. The first says when the clock starts,
       // which is the thing sponsors got wrong before this control existed. The
-      // second says what choosing a long one costs: the operator holds the NIM
-      // for all of it, and neither side can cut it short — there is no sponsor
-      // cancel and no operator close, only the sweep at `expires_at`.
+      // second says what choosing a long one costs — the operator holds the NIM
+      // for all of it — and, since `services/close.ts`, the way out of that.
+      //
+      // The second sentence used to end "and no one can end a drop early".
+      // That was true when it was written and is now the opposite of true, on
+      // the screen a sponsor reads before they part with money, about the one
+      // control that gives it back. Anything that makes it false again has to
+      // change this line in the same commit.
       text:
         `The ${formatExpiryWindow(expiryHours)} claim window starts when the network confirms your ` +
-        `funding, not when you tap send. The operator holds your NIM for the whole window, and no ` +
-        `one can end a drop early.`,
+        `funding, not when you tap send. The operator holds your NIM for the whole window, and only ` +
+        `the wallet you fund from can end the drop early and take back what nobody claimed.`,
     },
     {
       id: 'refunds',

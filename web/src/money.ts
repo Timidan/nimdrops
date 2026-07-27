@@ -47,7 +47,9 @@ export const MAX_LUNA = 9_223_372_036_854_775_807n
  * reasons for the two ends live on the server, where they are enforced: the
  * floor protects claimants from a drop that expires before anyone could open
  * the link, and the ceiling bounds how long the operator holds a sponsor's NIM
- * with no way for either of them to end it early.
+ * with no way for either of them to end it early. Since `services/close.ts` the
+ * sponsor can close early from the funding wallet, which bounds that exposure
+ * further; the ceiling stays where it is until it is re-argued against that.
  */
 export const DEFAULT_EXPIRY_HOURS = 24
 export const MIN_EXPIRY_HOURS = 1

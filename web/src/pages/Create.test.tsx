@@ -112,7 +112,7 @@ function disclosure(over: Partial<CustodyDisclosure> = {}): CustodyDisclosure {
       },
       {
         id: 'expiry_clock',
-        text: 'The 24 hour claim window starts when the network confirms your funding, not when you tap send. The operator holds your NIM for the whole window, and no one can end a drop early.',
+        text: 'The 24 hour claim window starts when the network confirms your funding, not when you tap send. The operator holds your NIM for the whole window, and only the wallet you fund from can end the drop early and take back what nobody claimed.',
       },
       {
         id: 'refunds',
@@ -621,7 +621,9 @@ describe('Create — the claim window', () => {
 
     expect(group.textContent).toMatch(/goes back to you 24 hours after the drop goes live/i)
     expect(group.textContent).toMatch(/holds it for the whole window/i)
-    expect(group.textContent).toMatch(/no one can end a drop early/i)
+    // The consequence AND the way out of it: a sponsor choosing fourteen days
+    // has to know they are not locked in for fourteen days.
+    expect(group.textContent).toMatch(/close the drop early/i)
 
     fireEvent.click(chipFor(168))
     expect(group.textContent).toMatch(/goes back to you 7 days after the drop goes live/i)
@@ -670,7 +672,7 @@ describe('Create — the claim window', () => {
         p.id === 'expiry_clock'
           ? {
               ...p,
-              text: 'The 7 day claim window starts when the network confirms your funding, not when you tap send. The operator holds your NIM for the whole window, and no one can end a drop early.',
+              text: 'The 7 day claim window starts when the network confirms your funding, not when you tap send. The operator holds your NIM for the whole window, and only the wallet you fund from can end the drop early and take back what nobody claimed.',
             }
           : p,
       ),
