@@ -606,7 +606,18 @@ describe.skipIf(!hasDb)('recover CLI process lifetime', () => {
       expect(run.outcome).toMatchObject({ ok: true, command: 'unpause', effect: 'applied' })
       // Luna survive as decimal STRINGS, which is the only lossless JSON they
       // have — never as numbers.
-      expect((run.outcome?.result as { operatorFloatLuna: unknown }).operatorFloatLuna).toBe('0')
+      //
+      // Asserted as a shape rather than as `'0'`. This suite spawns CLI child
+      // processes and holds no pool of its own, so it cannot set the float it
+      // was reading: the exact value belonged to whichever suite happened to
+      // run before it, and the test went red the moment that order changed.
+      // Nothing about the serialisation claim needs a particular number — it
+      // needs the value to be a string of digits and not a JSON number, which
+      // is what a bigint silently becomes when it survives `JSON.stringify` by
+      // being cast, and what `1e21` becomes when it does not.
+      const float = (run.outcome?.result as { operatorFloatLuna: unknown }).operatorFloatLuna
+      expect(typeof float).toBe('string')
+      expect(float).toMatch(/^\d+$/)
       expect((run.outcome?.result as { paused: unknown }).paused).toBe(false)
     },
     CLI_TIMEOUT_MS,

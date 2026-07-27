@@ -4,7 +4,7 @@ import type { ContentfulStatusCode } from 'hono/utils/http-status'
 import type { Pool } from 'pg'
 import { addressFromPublicKey } from '../auth/verify'
 import type { ChainClient } from '../chain/types'
-import { CapError, formatNim, lunaFromNim } from '../money'
+import { DropShapeError, formatNim, lunaFromNim } from '../money'
 import { normaliseNimiqAddress } from '../nimiq-address'
 import { type Alerts, throttled } from '../services/alerts'
 import {
@@ -16,8 +16,12 @@ import {
   type ClaimRejectionCode,
 } from '../services/claims'
 import {
+  DEFAULT_EXPIRY_HOURS,
   DropNotFoundError,
+  ExpiryWindowError,
   FundingRejectedError,
+  MAX_EXPIRY_HOURS,
+  MIN_EXPIRY_HOURS,
   createDraft,
   fundingMemoFor,
   getPublic,
@@ -42,6 +46,7 @@ import { submitPassphrase } from '../gates/passphrase'
 import type { TriviaService } from '../gates/trivia/sessions'
 import { GateRejectedError, type GateRejectionCode } from '../gates/types'
 import { hasGrant, listGames, loadGameView, loadGate } from '../services/gates'
+import { StatsCache, type StatsCacheOptions, StatsUnavailableError } from '../services/stats'
 import { SHARED_BUCKET, type ClientIpResolver } from './client-ip'
 import { type CustodyDisclosure, buildDisclosure } from './disclosure'
 import { ConflictError, bindIdem, idemKeyHash, lookupIdem } from './idempotency'
@@ -50,7 +55,9 @@ import { registerSsr } from './ssr'
 
 /**
  * The whole public HTTP surface (design §11), plus an unauthenticated
- * `GET /health` (amended contract: "six endpoints + /health").
+ * `GET /health` (amended contract: "six endpoints + /health") and an
+ * unauthenticated `GET /api/stats` (aggregate counts for the landing page;
+ * `services/stats.ts` owns what may appear in it).
  *
  * Three rules shape every line below.
  *
@@ -465,6 +472,37 @@ function requireWalletQuery(c: Context): string {
 }
 
 /**
+ * The sponsor's chosen claim window, or `undefined` when they did not choose.
+ *
+ * Type first, then bounds, and both here rather than in the service: a body
+ * carrying `"24"` or `1.5` is a malformed request, and the sponsor should be
+ * told 400 rather than have it become a database error further in.
+ * `assertExpiryHours` runs again inside `createDraft`, and migration 019's
+ * CHECK constraint runs after that — three layers, of which only the last one
+ * cannot be bypassed by a future caller.
+ */
+function optionalExpiryHours(body: Record<string, unknown>): number | undefined {
+  const value = body.expiryHours
+  if (value === undefined || value === null) return undefined
+  if (typeof value !== 'number' || !Number.isInteger(value)) throw invalidRequest()
+  if (value < MIN_EXPIRY_HOURS || value > MAX_EXPIRY_HOURS) {
+    throw new HttpError(
+      400,
+      'invalid_expiry_window',
+      `a claim window must be between ${MIN_EXPIRY_HOURS} and ${MAX_EXPIRY_HOURS} hours`,
+    )
+  }
+  return value
+}
+
+/** `?expiryHours=` on a read: same bounds, same refusal, from a query string. */
+function queryExpiryHours(raw: string | undefined): number | undefined {
+  if (raw === undefined || raw === '') return undefined
+  if (!/^\d{1,4}$/.test(raw)) throw invalidRequest()
+  return optionalExpiryHours({ expiryHours: Number.parseInt(raw, 10) })
+}
+
+/**
  * Canonical JSON: object keys sorted, `undefined` dropped. Two byte-different
  * requests that mean the same thing must produce the same idempotency request
  * hash, otherwise a retried key looks like a reused one.
@@ -492,7 +530,7 @@ function requireOrigin(): string {
 }
 
 export function shareUrlFor(publicId: string): string {
-  return `${requireOrigin()}/d/${publicId}`
+  return `${requireOrigin()}/drop/${publicId}`
 }
 
 /**
@@ -509,6 +547,7 @@ function publicBody(drop: DropPublic): Record<string, unknown> {
     claimCount: drop.claimCount,
     remaining: drop.remaining,
     state: drop.state,
+    expiryHours: drop.expiryHours,
     expiresAt: drop.expiresAt === null ? null : drop.expiresAt.toISOString(),
     ...(drop.fundingTxHash === undefined ? {} : { fundingTxHash: drop.fundingTxHash }),
   }
@@ -523,6 +562,8 @@ interface DraftBody {
   /** The same amount in luna, as a string: what the wallet call needs, exactly. */
   expectedFundingLuna: string
   shareUrl: string
+  /** The claim window this drop will have, fixed at draft creation. */
+  expiryHours: number
   /**
    * When this draft stops holding room in the aggregate cap. After it passes,
    * funding may still work — it just is not promised any more.
@@ -541,6 +582,7 @@ function draftBody(o: {
   fundingAddress: string
   fundingMemo: string
   expectedFundingLuna: bigint
+  expiryHours: number
   reservationExpiresAt: Date | null
   disclosure: CustodyDisclosure
 }): DraftBody {
@@ -551,6 +593,7 @@ function draftBody(o: {
     expectedFunding: formatNim(o.expectedFundingLuna),
     expectedFundingLuna: o.expectedFundingLuna.toString(),
     shareUrl: shareUrlFor(o.publicId),
+    expiryHours: o.expiryHours,
     reservationExpiresAt:
       o.reservationExpiresAt === null ? null : o.reservationExpiresAt.toISOString(),
     disclosure: o.disclosure,
@@ -568,6 +611,13 @@ async function currentDisclosure(
   pool: Pool,
   chain: ChainClient,
   capacity?: CapacitySnapshot,
+  /**
+   * The claim window the returned sentences must describe. The create route
+   * passes the window the drop was actually created with; `/api/custody`
+   * passes whatever the sponsor is currently considering; omitted is the
+   * default, which is what a sponsor who has not chosen is looking at.
+   */
+  expiryHours?: number,
 ): Promise<CustodyDisclosure> {
   const controls = await readControls(pool)
   return buildDisclosure({
@@ -575,6 +625,7 @@ async function currentDisclosure(
     custodyAddress: chain.custodyAddress(),
     paused: controls.paused,
     capacity: capacity ?? (await readCapacity(pool, controls)),
+    ...(expiryHours === undefined ? {} : { expiryHours }),
   })
 }
 
@@ -598,6 +649,12 @@ export interface AppDeps {
    * bucket without a secret proving which hop set it.
    */
   clientIp?: ClientIpResolver
+  /**
+   * Overrides for the `GET /api/stats` snapshot cache (`services/stats.ts`).
+   * Production leaves this alone and gets the module's defaults; tests shorten
+   * the TTL so they can observe a refresh without waiting a minute.
+   */
+  statsCache?: StatsCacheOptions
   /**
    * The gate services, or null where a kind is not configured.
    *
@@ -629,6 +686,11 @@ export function makeApp(deps: AppDeps): Hono {
   const clientIp: ClientIpResolver = deps.clientIp ?? (() => SHARED_BUCKET)
   // Throttled so a hot claim path cannot turn one insolvency into a webhook flood.
   const alerts = throttled(deps.alerts)
+
+  // One per app, so its TTL and its single-flight guarantee are process-wide.
+  // Built with the injected clock: the tests that freeze `now` for the rate
+  // limiters freeze the stats TTL with it.
+  const statsCache = new StatsCache(pool, { now, ...deps.statsCache })
 
   const ipBucket = new TokenBuckets(limits.ipPerWindow, limits.windowMs, now)
   const dropClaimBucket = new TokenBuckets(limits.claimsPerDropPerWindow, limits.windowMs, now)
@@ -738,18 +800,29 @@ export function makeApp(deps: AppDeps): Hono {
   app.post('/api/drops', async (c) => {
     const idemKey = requireIdemKey(c)
     const body = await readJsonObject(c)
-    only(body, ['sponsorLabel', 'message', 'amountEach', 'claimCount'])
+    only(body, ['sponsorLabel', 'message', 'amountEach', 'claimCount', 'expiryHours'])
 
     const sponsorLabel = requireString(body, 'sponsorLabel', MAX_SPONSOR_LABEL_CHARS)
     const message = optionalString(body, 'message', MAX_MESSAGE_CHARS)
     const amountEach = matching(body, 'amountEach', NIM_AMOUNT_RE)
     const claimCount = body.claimCount
     if (typeof claimCount !== 'number' || !Number.isInteger(claimCount)) throw invalidRequest()
+    // Resolved, not raw: omitting the field and sending the default mean the
+    // same drop, so they must produce the same request hash. Otherwise a client
+    // that started sending the field explicitly would find its own retries
+    // reading as conflicts.
+    const expiryHours = optionalExpiryHours(body) ?? DEFAULT_EXPIRY_HOURS
 
-    const amountEachLuna = lunaFromNim(amountEach) // CapError → 400
+    const amountEachLuna = lunaFromNim(amountEach) // DropShapeError → 400
 
     const keyHash = idemKeyHash(CREATE_DROP_SCOPE, idemKey)
-    const hash = requestHash(CREATE_DROP_SCOPE, { sponsorLabel, message, amountEach, claimCount })
+    const hash = requestHash(CREATE_DROP_SCOPE, {
+      sponsorLabel,
+      message,
+      amountEach,
+      claimCount,
+      expiryHours,
+    })
 
     const recorded = await lookupIdem(pool, CREATE_DROP_SCOPE, keyHash)
     if (recorded) {
@@ -763,6 +836,7 @@ export function makeApp(deps: AppDeps): Hono {
       ...(message === undefined ? {} : { message }),
       amountEachLuna,
       claimCount,
+      expiryHours,
     })
 
     // A draft holds no money, so binding the key AFTER the insert is safe: the
@@ -788,7 +862,10 @@ export function makeApp(deps: AppDeps): Hono {
       draftBody({
         ...draft,
         reservationExpiresAt: draft.reservationExpiresAt,
-        disclosure: await currentDisclosure(pool, chain, draft.capacity),
+        // The window the DRAFT was created with, not the one this request
+        // asked for. They are the same today, and reading it off the draft is
+        // what keeps them the same if that ever stops being true.
+        disclosure: await currentDisclosure(pool, chain, draft.capacity, draft.expiryHours),
       }),
       201,
     )
@@ -801,8 +878,45 @@ export function makeApp(deps: AppDeps): Hono {
   // hot wallet, who holds the key, which chain and address the money goes to,
   // and exactly how much room is left. Unauthenticated and cheap, so the create
   // screen can render it on first paint.
+  //
+  // `?expiryHours=` exists because the disclosure NAMES the claim window, the
+  // window is now the sponsor's choice, and the sentence is rendered to them
+  // before they fund. A client that paraphrased it could drift from what the
+  // server enforces, so the client asks for the sentence about the window it is
+  // actually showing rather than rewriting the one it was given. Out of bounds
+  // is refused here exactly as it is on create: this endpoint must never
+  // describe a window that could not be created.
   app.get('/api/custody', async (c) => {
-    return c.json(await currentDisclosure(pool, chain))
+    const expiryHours = queryExpiryHours(c.req.query('expiryHours'))
+    return c.json(await currentDisclosure(pool, chain, undefined, expiryHours))
+  })
+
+  // ---- GET /api/stats ----------------------------------------------------------------
+  //
+  // Public aggregate statistics for the landing page. Everything about what may
+  // and may not appear here — and why the "paid out" predicate is the one it is
+  // — lives in `services/stats.ts`; this route only serialises and caches.
+  //
+  // Mounted under `/api` deliberately, so the per-IP limiter above covers it:
+  // an unauthenticated read on a money service gets the same 60-per-minute
+  // budget as every other API route, and `StatsCache` means even that budget
+  // costs at most one query a minute. `/health` is outside `/api` because a
+  // monitor must always be answered; a statistics page has no such claim.
+  app.get('/api/stats', async (c) => {
+    const stats = await statsCache.read()
+    // Let a browser or a proxy absorb the rest of the burst too. `public` is
+    // correct: the body is identical for every caller and depends on no header,
+    // no cookie and no bearer token.
+    //
+    // The lifetime is what is LEFT of this snapshot's own freshness, not a flat
+    // TTL. A snapshot served stale — because a refresh is running behind it, or
+    // failing — must not be handed to a proxy with a full minute of life ahead
+    // of it, or the numbers a visitor sees could outlive the window this
+    // process is willing to vouch for.
+    const ageMs = statsCache.ageMs(now()) ?? 0
+    const remainingMs = Math.max(0, statsCache.ttlMs - ageMs)
+    c.header('cache-control', `public, max-age=${Math.floor(remainingMs / 1000)}`)
+    return c.json(stats)
   })
 
   // ---- POST /api/drops/:publicId/funding ------------------------------------------
@@ -1115,15 +1229,23 @@ async function dropRowId(pool: Pool, publicId: string): Promise<string> {
  * The reservation timestamp comes off the row, so a replay reports the room the
  * original request took rather than a fresh window: retrying a request must
  * never quietly extend a promise.
+ *
+ * The claim window comes off the row for a stronger reason. A replay must
+ * report the window the drop WILL actually have, and the drop's window is
+ * whatever `createDraft` wrote — never whatever the replaying request body
+ * happens to carry. Rebuilding it from the request would be the one shape in
+ * which a second request could appear to change a drop's expiry.
  */
 async function draftById(pool: Pool, chain: ChainClient, dropId: string): Promise<DraftBody | null> {
   if (!UUID_RE.test(dropId)) return null
   const { rows } = await pool.query<{
     public_id: string
     expected_funding_luna: string
+    expiry_hours: number
     funding_reservation_expires_at: Date | null
   }>(
-    'SELECT public_id, expected_funding_luna, funding_reservation_expires_at FROM drops WHERE id = $1',
+    `SELECT public_id, expected_funding_luna, expiry_hours, funding_reservation_expires_at
+     FROM drops WHERE id = $1`,
     [dropId],
   )
   const row = rows[0]
@@ -1133,8 +1255,9 @@ async function draftById(pool: Pool, chain: ChainClient, dropId: string): Promis
     fundingAddress: chain.custodyAddress(),
     fundingMemo: fundingMemoFor(row.public_id),
     expectedFundingLuna: BigInt(row.expected_funding_luna),
+    expiryHours: row.expiry_hours,
     reservationExpiresAt: row.funding_reservation_expires_at,
-    disclosure: await currentDisclosure(pool, chain),
+    disclosure: await currentDisclosure(pool, chain, undefined, row.expiry_hours),
   })
 }
 
@@ -1168,23 +1291,39 @@ function mapError(err: unknown): HttpError {
       GATE_MESSAGES[err.code] ?? 'this condition cannot be completed',
     )
   }
-  if (err instanceof CapError) return invalidRequest(err.message)
+  // `CapError` on the gates branch; renamed by the uncapping work, which turned
+  // the size ceiling into a shape check.
+  if (err instanceof DropShapeError) return invalidRequest(err.message)
+  // The route validates the window first and answers 400 with its own code, so
+  // this is the service's own bound speaking — reachable only from a caller
+  // that reached `createDraft` some other way. It is still a bad request, not a
+  // server fault, and must not surface as a 500.
+  if (err instanceof ExpiryWindowError) {
+    return new HttpError(400, 'invalid_expiry_window', err.message)
+  }
   // Capacity refusals come BEFORE the generic `CapExceededError` line below, on
   // purpose. They are the only money-shaped refusal a sponsor meets before they
   // have paid anything, and "temporarily unavailable" would be both vaguer and,
   // for a drop that is simply too big, wrong: no amount of retrying helps.
   // The numbers are read off the error rather than forwarded as prose, so the
   // client copy stays this file's to choose (see the CLAIM_MESSAGES note).
+  //
+  // Both are now reachable ONLY when an operator has set the principal cap as a
+  // kill switch (migration 018); with it unset there is no size a drop can be
+  // too big for. The `?? 0n` fallbacks are therefore unreachable-by-construction
+  // rather than a guess at a number — a cap that is null cannot have thrown.
   if (err instanceof DropTooLargeError) {
-    const max = formatNim(err.capacity.maxLivePrincipalLuna)
+    const max = formatNim(err.capacity.maxLivePrincipalLuna ?? 0n)
     return new HttpError(
       422,
       'drop_too_large',
-      `this pilot holds up to ${max} NIM across all live drops — try a smaller total`,
+      err.capacity.maxLiveDrops === 0
+        ? 'this deployment is set to hold no live drops at all — ask the operator to open it'
+        : `the operator has capped all live drops at ${max} NIM — try a smaller total`,
     )
   }
   if (err instanceof NoHeadroomError) {
-    const free = formatNim(err.capacity.remainingLuna)
+    const free = formatNim(err.capacity.remainingLuna ?? 0n)
     const needed = formatNim(err.requestedLuna)
     return new HttpError(
       503,
@@ -1200,6 +1339,18 @@ function mapError(err: unknown): HttpError {
   }
   if (err instanceof StaleReconciliationError) {
     return new HttpError(503, 'degraded', 'temporarily unavailable — try again shortly', DEGRADED_RETRY_SECONDS)
+  }
+  // Its own code, NOT the shared `unavailable`: that one makes `onError` fire an
+  // `insolvent` alert, and a landing-page statistic that could not be computed
+  // must never page an operator about custody. Nothing on a money path depends
+  // on this route, so its failure is exactly as serious as it looks.
+  if (err instanceof StatsUnavailableError) {
+    return new HttpError(
+      503,
+      'stats_unavailable',
+      'statistics are temporarily unavailable — try again shortly',
+      DEGRADED_RETRY_SECONDS,
+    )
   }
   if (err instanceof InsolventError || err instanceof CapExceededError) {
     return new HttpError(503, 'unavailable', 'temporarily unavailable — try again shortly', DEGRADED_RETRY_SECONDS)

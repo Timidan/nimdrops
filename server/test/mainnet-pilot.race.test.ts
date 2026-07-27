@@ -4,6 +4,7 @@ import { FakeChain } from '../src/chain/fake'
 import { migrate } from '../src/db/migrate'
 import { createDraft } from '../src/services/drops'
 import {
+  DropTooLargeError,
   FloatAttestationError,
   MAINNET_PILOT_DEFAULTS,
   NoHeadroomError,
@@ -23,14 +24,14 @@ import '../src/db/pool'
  * TestAlbatross is invisible in the recipient's wallet, and the same address
  * shows a zero balance on mainnet. So every real user, including a judge, is on
  * mainnet — which means the first mainnet deployment is not a rehearsal, and it
- * must start small and closed rather than open with a 100 NIM sandbox cap.
+ * must start closed rather than open.
  *
  * Two claims are asserted here, and both are about what happens when NOBODY
  * REMEMBERS TO CONFIGURE ANYTHING:
  *
- *  1. a fresh database bound to MainAlbatross gets the pilot caps and starts
- *     paused, while TestAlbatross keeps migration 001's values untouched (which
- *     is what leaves the rest of the suite and the VPS harness alone); and
+ *  1. a fresh database bound to MainAlbatross gets the pilot posture — paused,
+ *     one drop at a time — while TestAlbatross is left alone (which is what
+ *     leaves the rest of the suite and the VPS harness untouched); and
  *  2. a float attestation proven on another chain, or a float the deposits do
  *     not add up to, stops both entrypoints from starting.
  *
@@ -54,13 +55,13 @@ function chainOn(network: 'TestAlbatross' | 'MainAlbatross'): FakeChain {
   return new FakeChain({ custody: CUSTODY, finalityDepth: 5, headHeight: 100, network })
 }
 
-/** Back to the state migration 001 leaves, with no binding of any kind. */
+/** Back to the state the migrations leave, with no binding of any kind. */
 async function resetControls(): Promise<void> {
   await pool.query(
     `UPDATE custody_controls
      SET singleton = true,
          paused = false,
-         max_live_principal_luna = 10000000,
+         max_live_principal_luna = NULL,
          max_live_drops = NULL,
          configured_fee_reserve_luna = 100000,
          operator_float_luna = 0,
@@ -110,7 +111,7 @@ describe.skipIf(!hasDb)('mainnet pilot posture (real Postgres)', () => {
 
   // ---- pilot defaults ---------------------------------------------------------
 
-  it('a fresh database bound to MainAlbatross starts paused, at one drop and 2 NIM', async () => {
+  it('a fresh database bound to MainAlbatross starts paused, at one drop, uncapped', async () => {
     const bound = await ensureChainBinding(pool, chainOn('MainAlbatross'))
     expect(bound.network).toBe('MainAlbatross')
 
@@ -119,18 +120,21 @@ describe.skipIf(!hasDb)('mainnet pilot posture (real Postgres)', () => {
       true,
     )
     expect(controls.maxLivePrincipalLuna).toBe(MAINNET_PILOT_DEFAULTS.maxLivePrincipalLuna)
-    expect(controls.maxLivePrincipalLuna, '2 NIM').toBe(200_000n)
-    expect(controls.maxLiveDrops).toBe(1)
+    expect(
+      controls.maxLivePrincipalLuna,
+      'migration 015: a drop’s size is the sponsor’s decision, not a pilot number',
+    ).toBeNull()
+    expect(controls.maxLiveDrops, 'one drop at a time is what is left of the pilot posture').toBe(1)
     expect(controls.configuredFeeReserveLuna).toBe(100_000n)
     expect(controls.operatorFloatLuna, 'the float is attested, never assumed').toBe(0n)
   })
 
-  it('a fresh database bound to TestAlbatross keeps migration 001’s values', async () => {
+  it('a fresh database bound to TestAlbatross keeps the migrations’ values', async () => {
     await ensureChainBinding(pool, chainOn('TestAlbatross'))
 
     const controls = await readControls(pool)
     expect(controls.paused).toBe(false)
-    expect(controls.maxLivePrincipalLuna).toBe(10_000_000n)
+    expect(controls.maxLivePrincipalLuna, 'no principal ceiling anywhere by default').toBeNull()
     expect(controls.maxLiveDrops, 'no drop-count limit on testnet').toBeNull()
     expect(controls.configuredFeeReserveLuna).toBe(100_000n)
   })
@@ -168,14 +172,34 @@ describe.skipIf(!hasDb)('mainnet pilot posture (real Postgres)', () => {
 
     await pool.query('UPDATE custody_controls SET paused = false WHERE singleton')
 
-    // 2 claims × 1 NIM = the whole 2 NIM cap, and it fits exactly.
-    const first = await draft(100_000n, 2)
-    expect(first.capacity.remainingLuna).toBe(0n)
-    expect(first.capacity.remainingDrops).toBe(0)
+    // The one the pilot still asks for: 200 NIM across 100 people goes through,
+    // because no policy number stands between a sponsor and the size of their
+    // own drop any more.
+    const first = await draft(200_000n, 100)
+    expect(first.expectedFundingLuna, '2 NIM each × 100 people').toBe(20_000_000n)
+    expect(first.capacity.remainingLuna, 'nothing to run out of').toBeNull()
+    expect(first.capacity.remainingDrops, 'the drop slot is what the pilot holds').toBe(0)
 
-    // Both limits now bite, and either alone would be enough.
+    // `max_live_drops` is now the only ceiling a fresh mainnet database has.
     await expect(draft(100_000n, 2)).rejects.toBeInstanceOf(NoHeadroomError)
-    await expect(draft(1_000n, 2)).rejects.toBeInstanceOf(NoHeadroomError)
+  })
+
+  it('an operator can put the principal cap back as a kill switch', async () => {
+    const chain = chainOn('MainAlbatross')
+    await ensureChainBinding(pool, chain)
+    await pool.query(
+      `UPDATE custody_controls
+       SET paused = false, max_live_drops = NULL, max_live_principal_luna = 500000
+       WHERE singleton`,
+    )
+    const draft = (amountEachLuna: bigint, claimCount: number) =>
+      createDraft(pool, chain, { sponsorLabel: 'Sponsor', amountEachLuna, claimCount })
+
+    // 10 NIM against a 5 NIM ceiling: refused before the sponsor pays anything.
+    await expect(draft(500_000n, 2)).rejects.toBeInstanceOf(DropTooLargeError)
+    // …and lifting the switch lets the same drop straight through.
+    await pool.query('UPDATE custody_controls SET max_live_principal_luna = NULL WHERE singleton')
+    await expect(draft(500_000n, 2)).resolves.toBeDefined()
   })
 
   // ---- the float attestation may not cross chains -----------------------------

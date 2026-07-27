@@ -99,14 +99,31 @@ describe.skipIf(!hasDb)('schema invariants (real Postgres)', () => {
     await pool?.end()
   })
 
-  it('seeds exactly one custody_controls row with launch caps', async () => {
+  it('seeds exactly one custody_controls row, uncapped, with a fee reserve', async () => {
     const { rows } = await pool.query(
       `SELECT paused, max_live_principal_luna, configured_fee_reserve_luna FROM custody_controls`,
     )
     expect(rows).toHaveLength(1)
     expect(rows[0].paused).toBe(false)
-    expect(BigInt(rows[0].max_live_principal_luna)).toBe(10_000_000n)
+    // Migration 015. 001 seeded a 100 NIM ceiling; the ceiling is now an
+    // operator kill switch that ships off, and the solvency invariant is what
+    // decides what a deployment can actually accept.
+    expect(rows[0].max_live_principal_luna).toBeNull()
     expect(BigInt(rows[0].configured_fee_reserve_luna)).toBe(100_000n)
+  })
+
+  it('accepts a principal cap when an operator sets one, and refuses a negative', async () => {
+    await pool.query('UPDATE custody_controls SET max_live_principal_luna = 500000 WHERE singleton')
+    await expect(
+      pool.query('UPDATE custody_controls SET max_live_principal_luna = -1 WHERE singleton'),
+    ).rejects.toThrow(/max_live_principal_non_negative|check/i)
+    await pool.query('UPDATE custody_controls SET max_live_principal_luna = NULL WHERE singleton')
+  })
+
+  it('still requires a non-negative fee reserve', async () => {
+    await expect(
+      pool.query('UPDATE custody_controls SET configured_fee_reserve_luna = -1 WHERE singleton'),
+    ).rejects.toThrow(/fee_reserve_non_negative|check/i)
   })
 
   it('rejects a drop whose expected funding mismatches count*amount', async () => {

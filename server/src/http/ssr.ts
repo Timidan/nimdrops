@@ -77,6 +77,15 @@ function escapeHtml(value: string): string {
 // what NimDrops is. It introduces the product, not the mechanism: "campaign" is
 // the sponsor's word for what they funded, never the recipient's word for a gift.
 const OG_DESCRIPTION = 'One link. A fixed share of NIM for everyone who opens it.'
+
+/**
+ * The landing page's own description. Longer than `OG_DESCRIPTION` because it
+ * is the one that has to work as a search result rather than as a chat preview:
+ * it names who it is for and what happens, where the chat card only has to say
+ * enough that a friend taps it.
+ */
+const LANDING_DESCRIPTION =
+  'Fund one drop, share one link, and let a fixed number of people each claim an equal share of NIM. Unclaimed value goes back to the sponsor.'
 const GENERIC_OG_TITLE = 'Someone is sharing NIM'
 
 function ogTitle(drop: DropPublic | null): string {
@@ -113,6 +122,16 @@ interface ShellInput {
   origin: string
   assetTags: string
   qrPath: string | null
+  /**
+   * The landing page, and only it, is meant to be found.
+   *
+   * Every other shell is `noindex` because an unguessable id is the only access
+   * control a campaign page has, so indexing one would publish it. That reason
+   * does not apply to `/`: it holds no id, it is the page that explains what
+   * NimDrops is, and hiding it from search costs the product its only
+   * discoverable surface.
+   */
+  indexable?: boolean
 }
 
 /**
@@ -121,20 +140,25 @@ interface ShellInput {
  * responses byte-identical above the body.
  */
 function shell(input: ShellInput): string {
-  const { drop, canonical, origin, assetTags, qrPath } = input
+  const { drop, canonical, origin, assetTags, qrPath, indexable = false } = input
   const deeplink = canonical === null ? null : `nimiqpay://miniapp?url=${encodeURIComponent(canonical)}`
 
   const head = [
     '    <meta charset="UTF-8" />',
     '    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />',
-    '    <title>NimDrops</title>',
+    indexable
+      ? '    <title>NimDrops — one link, a fixed share of NIM each</title>'
+      : '    <title>NimDrops</title>',
     // Unguessable ids are the only access control on a campaign page, so the
-    // page must never enter a search index (design §4.1).
-    '    <meta name="robots" content="noindex" />',
+    // page must never enter a search index (design §4.1). The landing page has
+    // no id to protect and is the one surface that has to be findable.
+    ...(indexable
+      ? [`    <meta name="description" content="${escapeHtml(LANDING_DESCRIPTION)}" />`]
+      : ['    <meta name="robots" content="noindex" />']),
     `    <meta property="og:type" content="website" />`,
     `    <meta property="og:site_name" content="NimDrops" />`,
     `    <meta property="og:title" content="${escapeHtml(ogTitle(drop))}" />`,
-    `    <meta property="og:description" content="${escapeHtml(OG_DESCRIPTION)}" />`,
+    `    <meta property="og:description" content="${escapeHtml(indexable ? LANDING_DESCRIPTION : OG_DESCRIPTION)}" />`,
     `    <meta property="og:image" content="${escapeHtml(`${origin}/og-envelope.png`)}" />`,
     '    <meta name="twitter:card" content="summary_large_image" />',
     '    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />',
@@ -254,22 +278,49 @@ export function registerSsr(app: Hono, opts: SsrOptions = {}): void {
     return configured.replace(/\/+$/, '')
   }
 
-  function html(body: string): Response {
+  function html(body: string, indexable = false): Response {
     return new Response(body, {
       status: 200,
       headers: {
         'content-type': 'text/html; charset=UTF-8',
         // Belt and braces with the meta tag: crawlers that never parse the body
-        // still see it, and it survives being fetched by a proxy.
-        'x-robots-tag': 'noindex',
-        'cache-control': 'no-store',
+        // still see it, and it survives being fetched by a proxy. The landing
+        // page is the one shell that opts out of both, because it is the only
+        // one with nothing to hide and something to gain from being found.
+        ...(indexable ? {} : { 'x-robots-tag': 'noindex' }),
+        // A campaign page must never be cached: its counts and its state move.
+        // The landing page is static markup whose numbers arrive over the API,
+        // so it can be held briefly — and `must-revalidate` keeps a deploy from
+        // being invisible to anyone who visited in the previous minute.
+        'cache-control': indexable ? 'public, max-age=60, must-revalidate' : 'no-store',
       },
     })
   }
 
-  // ---- GET /d/:publicId ------------------------------------------------------------
+  // ---- GET /drop/:publicId ---------------------------------------------------------
 
-  app.get('/d/:publicId', async (c) => {
+  /**
+   * `/d/:publicId` was the original shape and is kept as a permanent redirect
+   * rather than deleted. Nothing forces that: no mainnet link had been shared
+   * when this moved, so the migration is free today. But a drop link's whole
+   * purpose is to be pasted into a group chat and scanned off someone's screen,
+   * and a QR code that has already been printed cannot be edited. A dead claim
+   * link is a person not getting money they were sent, so this redirect stays
+   * even though today it has nothing to catch.
+   */
+  app.get('/d/:publicId', (c) => {
+    const publicId = c.req.param('publicId') ?? ''
+    if (!PUBLIC_ID_RE.test(publicId)) return c.notFound()
+    return c.redirect(`/drop/${publicId}`, 301)
+  })
+
+  app.get('/d/:publicId/qr.svg', (c) => {
+    const publicId = c.req.param('publicId') ?? ''
+    if (!PUBLIC_ID_RE.test(publicId)) return c.notFound()
+    return c.redirect(`/drop/${publicId}/qr.svg`, 301)
+  })
+
+  app.get('/drop/:publicId', async (c) => {
     const publicId = c.req.param('publicId') ?? ''
     const wellFormed = PUBLIC_ID_RE.test(publicId)
 
@@ -299,15 +350,15 @@ export function registerSsr(app: Hono, opts: SsrOptions = {}): void {
     return html(
       shell({
         drop,
-        canonical: wellFormed ? `${base}/d/${publicId}` : null,
+        canonical: wellFormed ? `${base}/drop/${publicId}` : null,
         origin: base,
         assetTags,
-        qrPath: wellFormed ? `/d/${publicId}/qr.svg` : null,
+        qrPath: wellFormed ? `/drop/${publicId}/qr.svg` : null,
       }),
     )
   })
 
-  // ---- GET /d/:publicId/qr.svg -------------------------------------------------------
+  // ---- GET /drop/:publicId/qr.svg ----------------------------------------------------
 
   /**
    * A QR of the canonical URL. It performs NO lookup: encoding an id the caller
@@ -315,11 +366,11 @@ export function registerSsr(app: Hono, opts: SsrOptions = {}): void {
    * free of database latency (and of any timing difference between a live and a
    * dead campaign).
    */
-  app.get('/d/:publicId/qr.svg', async (c) => {
+  app.get('/drop/:publicId/qr.svg', async (c) => {
     const publicId = c.req.param('publicId') ?? ''
     if (!PUBLIC_ID_RE.test(publicId)) return c.notFound()
 
-    const canonical = `${origin()}/d/${publicId}`
+    const canonical = `${origin()}/drop/${publicId}`
     const svg = await QRCode.toString(canonical, {
       type: 'svg',
       // Medium recovery survives a phone screenshot; the margin keeps the quiet
@@ -354,6 +405,31 @@ export function registerSsr(app: Hono, opts: SsrOptions = {}): void {
     return (await serveFile(safeJoin(join(staticRoot, 'assets'), relative))) ?? c.notFound()
   })
 
+  /**
+   * Everything Vite copies verbatim out of `web/public`.
+   *
+   * Only `/assets/*` was mounted, which is where the bundler puts what it has
+   * hashed. Anything referenced by a fixed path — the self-hosted typeface, the
+   * photography — was therefore 404ing in production while working perfectly in
+   * dev, because the Vite dev server serves `public/` and this did not. The
+   * font preload in `index.html` had been failing on mainnet since it shipped:
+   * the page still rendered, in a fallback face, which is exactly the kind of
+   * defect that survives review because nothing is obviously broken.
+   *
+   * These are immutable, content-stable files, so they get a long cache. They
+   * are also the only unauthenticated paths that read from disk by name, hence
+   * `safeJoin`, which is what keeps a `..` out of the filesystem.
+   */
+  for (const prefix of ['/fonts/', '/images/'] as const) {
+    app.get(`${prefix}*`, async (c) => {
+      const relative = c.req.path.slice(prefix.length)
+      const file = await serveFile(safeJoin(join(staticRoot, prefix.slice(1, -1)), relative))
+      if (!file) return c.notFound()
+      file.headers.set('cache-control', 'public, max-age=31536000, immutable')
+      return file
+    })
+  }
+
   /** The single art-directed preview image, owned by the server, not the build. */
   app.get('/og-envelope.png', async (c) => {
     return (await serveFile(join(assetRoot, 'og-envelope.png'))) ?? c.notFound()
@@ -369,10 +445,14 @@ export function registerSsr(app: Hono, opts: SsrOptions = {}): void {
 
   // ---- the SPA entry -----------------------------------------------------------------------
 
-  const spaShell = (): Response =>
-    html(shell({ drop: null, canonical: null, origin: origin(), assetTags, qrPath: null }))
+  const spaShell = (indexable = false): Response =>
+    html(
+      shell({ drop: null, canonical: null, origin: origin(), assetTags, qrPath: null, indexable }),
+      indexable,
+    )
 
-  app.get('/', () => spaShell())
+  /** The landing page: the only shell that may be indexed. */
+  app.get('/', () => spaShell(true))
   /** Client-routed pages that are not campaign links. */
   app.get('/create', () => spaShell())
 

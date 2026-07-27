@@ -1180,7 +1180,8 @@ async function main(): Promise<void> {
     )
 
     // -- 8. TEST LEVER: force expiry -----------------------------------------
-    // The production horizon is 24h after activation (drops.ts EXPIRY_HOURS).
+    // The horizon is the drop own expiry_hours after activation, 24h by default
+    // (drops.ts DEFAULT_EXPIRY_HOURS).
     // This UPDATE is the ONLY thing the script fakes; every transition after it
     // is produced by the shipped services.
     await pool.query(

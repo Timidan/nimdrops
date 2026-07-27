@@ -14,7 +14,9 @@ import {
 } from '../src/services/claims'
 import { ConflictError } from '../src/http/idempotency'
 import { DropNotFoundError, createDraft, submitFunding } from '../src/services/drops'
-import { PausedError } from '../src/services/solvency'
+import { settleTerminal } from '../src/services/expiry'
+import { outstandingPrincipalLuna, PausedError } from '../src/services/solvency'
+import { runWorkerTick } from '../src/services/transfers'
 // Side-effect import: installs the int8-as-string parser so BIGINT luna never
 // passes through a lossy JS number. This suite builds its own pool, so it still
 // depends on that global parser being registered.
@@ -230,7 +232,7 @@ describe.skipIf(!hasDb)('claim reservation, idempotency and races (real Postgres
     await pool.query(
       `UPDATE custody_controls
        SET paused = false,
-           max_live_principal_luna = 10000000,
+           max_live_principal_luna = NULL,
            configured_fee_reserve_luna = ${FEE_FLOAT},
            operator_float_luna = ${FEE_FLOAT},
            reconciled_confirmed_balance_luna = NULL,
@@ -647,6 +649,115 @@ describe.skipIf(!hasDb)('claim reservation, idempotency and races (real Postgres
   })
 
   // ---- status ---------------------------------------------------------------
+
+  // ---- migration 015: the drop the product exists for -------------------------
+  //
+  // "A creator can decide to create a 2 NIM per claim packet for 100 people; he
+  // needs to sign just one transaction to send 200 NIM to NimDrops." Every part
+  // of that sentence was forbidden before the caps came out — the 20-claim
+  // schema constraint, the 100 NIM launch cap, the 2 NIM mainnet ceiling — so
+  // this walks the whole path once, at that size, and checks the money adds up.
+
+  it('runs a 100-person, 200 NIM drop end to end and pays every slot exactly once', async () => {
+    const PEOPLE = 100
+    const EACH = 200_000n // 2 NIM
+    const TOTAL = EACH * BigInt(PEOPLE)
+    expect(TOTAL, '200 NIM').toBe(20_000_000n)
+
+    // One transaction from the sponsor funds all hundred payouts.
+    const draft = await createDraft(pool, chain, {
+      sponsorLabel: 'Sponsor',
+      amountEachLuna: EACH,
+      claimCount: PEOPLE,
+    })
+    expect(draft.expectedFundingLuna).toBe(TOTAL)
+    expect(draft.capacity.remainingLuna, 'nothing to run out of').toBeNull()
+    expect(draft.capacity.reservedLuna, 'the draft still reserves its principal').toBe(TOTAL)
+
+    const hash = `tx-${draft.publicId}`
+    chain.deposit({
+      hash,
+      sender: SPONSOR,
+      recipient: CUSTODY,
+      valueLuna: TOTAL,
+      dataUtf8: draft.fundingMemo,
+      includedHeight: FUND_HEIGHT,
+    })
+    chain.setHead(FUND_HEIGHT + FINALITY_DEPTH)
+    expect((await submitFunding(pool, chain, { publicId: draft.publicId, txHash: hash })).state).toBe(
+      'live',
+    )
+
+    // A hundred distinct wallets, each signing its own real challenge.
+    const wallets = Array.from({ length: PEOPLE }, () => newWallet())
+    for (const wallet of wallets) await claim(draft.publicId, wallet)
+
+    const claims = await readClaims(draft.publicId)
+    expect(claims, 'every slot reserved, none twice').toHaveLength(PEOPLE)
+    expect(new Set(claims.map((c) => c.slot_index)).size).toBe(PEOPLE)
+
+    // The last reservation closes the drop in the same transaction.
+    const { rows: state } = await pool.query<{ state: string }>(
+      'SELECT state FROM drops WHERE public_id = $1',
+      [draft.publicId],
+    )
+    expect(state[0].state).toBe('closing')
+
+    // One queued payout per claim, and not one luna more.
+    const { rows: queued } = await pool.query<{ n: string; total: string }>(
+      `SELECT count(*)::text AS n, COALESCE(SUM(amount_luna), 0)::text AS total
+       FROM outgoing_transfers WHERE purpose = 'payout'`,
+    )
+    expect(Number(queued[0].n)).toBe(PEOPLE)
+    expect(BigInt(queued[0].total)).toBe(TOTAL)
+
+    // ---- settle it, and count the ticks it takes -----------------------------
+    //
+    // `signNextQueued` signs at most ONE transfer per tick, and only when no
+    // open attempt made progress in that same tick. So the tick count here is a
+    // real measurement of how a large drop settles, not an implementation
+    // detail — see the note in the report and in `worker.ts`.
+    const alerts = { notify: async () => {} }
+    let ticks = 0
+    const MAX_TICKS = 2_000
+    for (; ticks < MAX_TICKS; ticks += 1) {
+      const worked = await runWorkerTick(pool, chain, alerts)
+      // FakeChain includes a broadcast transaction at the current head, so the
+      // head has to move for finality to be reachable.
+      chain.setHead((await chain.headHeight()) + FINALITY_DEPTH + 1)
+      if (worked === 'idle') break
+    }
+    expect(ticks, 'settled inside the tick budget').toBeLessThan(MAX_TICKS)
+    // MEASURED, and the number is the point: two ticks per payout. `runWorkerTick`
+    // signs at most one transfer, and only when no open attempt changed state in
+    // that same tick, so signing and progressing alternate. At the worker's
+    // 2 second interval that is about four seconds of settlement per claimant.
+    // If this bound ever has to be raised, a sponsor's wait got longer.
+    expect(ticks, 'about two worker ticks per payout').toBeLessThanOrEqual(PEOPLE * 3)
+
+    const { rows: paid } = await pool.query<{ n: string; total: string }>(
+      `SELECT count(*)::text AS n, COALESCE(SUM(amount_luna), 0)::text AS total
+       FROM outgoing_transfers WHERE purpose = 'payout' AND state = 'confirmed'`,
+    )
+    expect(Number(paid[0].n), 'every claimant paid').toBe(PEOPLE)
+    expect(BigInt(paid[0].total), 'exactly what the sponsor funded').toBe(TOTAL)
+
+    // Conservation: one attempt per transfer, and custody moved the total once.
+    const { rows: attempts } = await pool.query<{ n: string }>(
+      `SELECT count(*)::text AS n FROM transaction_attempts WHERE state = 'confirmed'`,
+    )
+    expect(Number(attempts[0].n)).toBe(PEOPLE)
+
+    // Nothing is outstanding once the payouts are final.
+    expect(await settleTerminal(pool)).toBe(1)
+    expect(await outstandingPrincipalLuna(pool)).toBe(0n)
+
+    // Reported so a change in worker scheduling shows up in the run log rather
+    // than only in a sponsor's wait.
+    process.stderr.write(`\n[throughput] ${PEOPLE} payouts settled in ${ticks} worker ticks\n`)
+    // A hundred real Ed25519 challenge signatures plus a hundred sequential
+    // signing ticks: this is the slowest test in the suite, and deliberately so.
+  }, 180_000)
 
   it('serves claim status to the bearer token holder only', async () => {
     const publicId = await liveDrop()

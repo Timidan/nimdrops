@@ -80,11 +80,11 @@ import { hashPhrase, parsePassphraseConfig } from '../src/gates/passphrase'
 import { type Tier, loadBank, questionsForTier } from '../src/gates/trivia/bank'
 import { parseTriviaConfig } from '../src/gates/trivia/sessions'
 import {
-  CapError,
-  MAX_CLAIMS,
-  MAX_TOTAL_LUNA,
+  DropShapeError,
+  MAX_CLAIM_COUNT,
+  MAX_LUNA,
   MIN_CLAIMS,
-  assertCaps,
+  assertDropShape,
   formatNim,
   lunaFromNim,
 } from '../src/money'
@@ -425,11 +425,20 @@ async function buildConfig(
 function printCapacity(title: string, capacity: CapacitySnapshot, addLuna: bigint | null): void {
   const committed = capacity.outstandingLuna + capacity.reservedLuna
   console.log(`\n--- ${title} ---`)
-  field('cap', `${nim(capacity.maxLivePrincipalLuna)} (max_live_principal_luna)`)
+  const cap =
+    capacity.maxLivePrincipalLuna === null
+      ? 'none (max_live_principal_luna is unset)'
+      : `${nim(capacity.maxLivePrincipalLuna)} (max_live_principal_luna)`
+  field('cap', cap)
   field('outstanding', nim(capacity.outstandingLuna))
   field('reserved', `${nim(capacity.reservedLuna)} in ${capacity.reservedDrafts} draft(s)`)
-  field('live principal', `${nim(committed)} of ${nim(capacity.maxLivePrincipalLuna)}`)
-  field('headroom', nim(capacity.remainingLuna))
+  field(
+    'live principal',
+    capacity.maxLivePrincipalLuna === null
+      ? `${nim(committed)} (uncapped)`
+      : `${nim(committed)} of ${nim(capacity.maxLivePrincipalLuna)}`,
+  )
+  field('headroom', capacity.remainingLuna === null ? 'unbounded' : nim(capacity.remainingLuna))
   field(
     'live drops',
     capacity.maxLiveDrops === null
@@ -439,8 +448,8 @@ function printCapacity(title: string, capacity: CapacitySnapshot, addLuna: bigin
   if (addLuna !== null) {
     field('this drop', nim(addLuna))
     assert(
-      capacity.remainingLuna >= addLuna,
-      `this drop needs ${nim(addLuna)} of live principal and only ${nim(capacity.remainingLuna)} ` +
+      capacity.remainingLuna === null || capacity.remainingLuna >= addLuna,
+      `this drop needs ${nim(addLuna)} of live principal and only ${nim(capacity.remainingLuna ?? 0n)} ` +
         'is left under max_live_principal_luna. Either make it smaller, wait for a live drop to ' +
         'settle, or advance the stage in spec §9.4 deliberately — do not raise the cap to fit ' +
         'one drop.',
@@ -473,19 +482,23 @@ async function run(): Promise<void> {
   const claimCount = integer(flags, '--claims')
   // `createDraft` runs `assertCaps` too. Running it first means a refusal
   // arrives before any output rather than half way through a report — and as a
-  // REFUSAL: a `CapError` is an argument an operator can fix, so it must not
-  // reach the top-level handler and print a stack trace at them.
+  // REFUSAL: a `DropShapeError` is an argument an operator can fix, so it must
+  // not reach the top-level handler and print a stack trace at them.
   const amountEachLuna = (() => {
     try {
       const luna = lunaFromNim(required(flags, '--nim-each'))
-      assertCaps(luna, claimCount)
+      assertDropShape(luna, claimCount)
       return luna
     } catch (err) {
-      if (err instanceof CapError) {
+      if (err instanceof DropShapeError) {
+        // No longer a CAP: the uncapping turned the old size ceiling into a
+        // shape check, so the only bounds left are a floor of two claims and the
+        // widths of the columns. How big a drop is, is the sponsor's decision;
+        // what the deployment can actually cover is the solvency invariant's.
         fail(
-          `${err.message} — ${claimCount} × ${flags.get('--nim-each')} NIM. The launch caps are ` +
-            `${MIN_CLAIMS}–${MAX_CLAIMS} claims and ${nim(MAX_TOTAL_LUNA)} total (money.ts); the ` +
-            'ladder in spec §9.1 fits inside them at every tier.',
+          `${err.message} — ${claimCount} × ${flags.get('--nim-each')} NIM. A drop needs at least ` +
+            `${MIN_CLAIMS} claims, at most ${MAX_CLAIM_COUNT}, and a total under ` +
+            `${nim(MAX_LUNA)} (money.ts).`,
         )
       }
       throw err

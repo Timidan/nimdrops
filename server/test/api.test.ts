@@ -181,12 +181,12 @@ interface DisclosureBody {
   expiryHours: number
   fundingWindowMinutes: number
   limits: {
-    perDropMax: string
-    perDropMaxLuna: string
-    aggregateMax: string
-    aggregateMaxLuna: string
-    remaining: string
-    remainingLuna: string
+    aggregateMax: string | null
+    aggregateMaxLuna: string | null
+    remaining: string | null
+    remainingLuna: string | null
+    atRisk: string
+    atRiskLuna: string
     maxLiveDrops: number | null
     liveDrops: number
     reservedDrafts: number
@@ -203,6 +203,7 @@ interface DraftBody {
   expectedFunding: string
   expectedFundingLuna: string
   shareUrl: string
+  expiryHours: number
   reservationExpiresAt: string | null
   disclosure: DisclosureBody
 }
@@ -226,16 +227,17 @@ function fundingHashFor(publicId: string): string {
 }
 
 /** Create, deposit exact funding, finalize, and activate through the API. */
-async function liveDrop(o: { claimCount?: number } = {}): Promise<DraftBody> {
+async function liveDrop(o: { claimCount?: number; expiryHours?: number } = {}): Promise<DraftBody> {
   const draft =
-    o.claimCount === undefined
+    o.claimCount === undefined && o.expiryHours === undefined
       ? await createDrop()
       : await createDrop({
           body: {
             sponsorLabel: 'Nimiq Community',
             message: 'thanks for shipping',
             amountEach: AMOUNT_EACH_NIM,
-            claimCount: o.claimCount,
+            claimCount: o.claimCount ?? CLAIM_COUNT,
+            ...(o.expiryHours === undefined ? {} : { expiryHours: o.expiryHours }),
           },
         })
   const txHash = fundingHashFor(draft.publicId)
@@ -322,7 +324,7 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
     await pool.query(
       `UPDATE custody_controls
        SET paused = false,
-           max_live_principal_luna = 10000000,
+           max_live_principal_luna = NULL,
            max_live_drops = NULL,
            configured_fee_reserve_luna = ${FEE_FLOAT},
            operator_float_luna = ${FEE_FLOAT},
@@ -378,7 +380,7 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
     expect(draft.fundingMemo).toBe(`ND1:${draft.publicId}`)
     expect(draft.expectedFunding).toBe('5')
     expect(draft.expectedFundingLuna).toBe('500000')
-    expect(draft.shareUrl).toBe(`${ORIGIN}/d/${draft.publicId}`)
+    expect(draft.shareUrl).toBe(`${ORIGIN}/drop/${draft.publicId}`)
 
     // 2. fund
     const txHash = fundingHashFor(draft.publicId)
@@ -469,15 +471,15 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
   // words and the numbers, and the web layer's job is to render all of them
   // above the fund button.
 
-  async function setCaps(o: { capLuna?: bigint; maxLiveDrops?: number | null }): Promise<void> {
+  async function setCaps(o: { capLuna?: bigint | null; maxLiveDrops?: number | null }): Promise<void> {
     await pool.query(
       `UPDATE custody_controls SET max_live_principal_luna = $1, max_live_drops = $2
        WHERE singleton`,
-      [(o.capLuna ?? 10_000_000n).toString(), o.maxLiveDrops ?? null],
+      [o.capLuna === undefined || o.capLuna === null ? null : o.capLuna.toString(), o.maxLiveDrops ?? null],
     )
   }
 
-  it('serves the custody disclosure unauthenticated, with live limits', async () => {
+  it('serves the custody disclosure unauthenticated, with no cap to point at', async () => {
     const body = await json<DisclosureBody>(await get('/api/custody'))
 
     expect(body.network).toBe('TestAlbatross')
@@ -485,21 +487,25 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
     expect(body.mainnetPilot).toBe(false)
     expect(body.paused).toBe(false)
     expect(body.expiryHours).toBe(24)
-    expect(body.limits.aggregateMax).toBe('100')
-    expect(body.limits.remaining).toBe('100')
+    expect(body.limits.aggregateMax, 'no ceiling is set by default').toBeNull()
+    expect(body.limits.remaining).toBeNull()
+    expect(body.limits.atRisk, 'the honest number: funded and unclaimed').toBe('0')
     expect(body.limits.liveDrops).toBe(0)
 
-    // Every disclosure the sponsor is owed, by id rather than by prose.
+    // Every disclosure the sponsor is owed, by id rather than by prose. There
+    // is no `limits` point and no `funding_window` point: with nothing capped
+    // there is no room to run out of and none to hold for anybody.
     const ids = body.points.map((p) => p.id)
     expect(ids).toEqual([
       'not_escrow',
+      'why_no_contract',
       'operator_key',
-      'limits',
+      'exposure',
+      'mitigations',
       'destination',
       'test_network',
       'expiry_clock',
       'refunds',
-      'funding_window',
     ])
     const text = body.points.map((p) => p.text).join('\n')
     expect(text, 'the custody address must be readable before approving').toContain(CUSTODY)
@@ -507,7 +513,29 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
       /only key.*can move everything/i,
     )
     expect(text).toMatch(/not an escrow contract/i)
+    // The claim the old copy made — that hard caps were the mitigation — is
+    // false now, and a false custody disclosure is worse than none.
+    expect(text, 'never promise a ceiling that does not exist').not.toMatch(/can hold up to/i)
+    expect(text, 'say why there is no contract, not just that there is none').toMatch(/HTLC/)
+    expect(text, 'name the exposure').toMatch(/nobody has claimed yet/i)
+    expect(text, 'and do not dress the mitigations up').toMatch(/is not cryptography/i)
     expect(text, 'no exclamation marks in interface copy').not.toContain('!')
+  })
+
+  it('names the operator’s cap only when the operator has set one', async () => {
+    await setCaps({ capLuna: 1_000_000n, maxLiveDrops: 2 })
+    const body = await json<DisclosureBody>(await get('/api/custody'))
+
+    expect(body.limits.aggregateMax).toBe('10')
+    expect(body.limits.remaining).toBe('10')
+    const ids = body.points.map((p) => p.id)
+    expect(ids).toContain('limits')
+    expect(ids, 'a reservation only means something when there is room to reserve').toContain(
+      'funding_window',
+    )
+    const limits = body.points.find((p) => p.id === 'limits')
+    expect(limits?.text).toContain('10 NIM')
+    expect(limits?.text).toContain('2 drops can run at a time')
   })
 
   it('names the mainnet pilot and the pause state in the disclosure', async () => {
@@ -515,6 +543,21 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
     const paused = await json<DisclosureBody>(await get('/api/custody'))
     expect(paused.paused).toBe(true)
     expect(paused.points[0].id, 'a closed door is the first thing to say').toBe('paused')
+  })
+
+  it('says the drop limit and holds the room, with no principal cap at all', async () => {
+    // The shape a mainnet deployment actually runs after migration 015: no
+    // principal ceiling, one drop at a time. The reservation still means
+    // something here — it is holding the one slot — so the window is still said.
+    await setCaps({ maxLiveDrops: 1 })
+    const body = await json<DisclosureBody>(await get('/api/custody'))
+
+    expect(body.limits.aggregateMax).toBeNull()
+    expect(body.limits.maxLiveDrops).toBe(1)
+    const limits = body.points.find((p) => p.id === 'limits')
+    expect(limits?.text).toBe('Only one drop can run at a time.')
+    expect(limits?.text, 'never name a NIM ceiling that is not set').not.toContain('NIM')
+    expect(body.points.map((p) => p.id)).toContain('funding_window')
   })
 
   it('carries the disclosure on the draft, with this drop already counted', async () => {
@@ -528,7 +571,6 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
     // shown the number that includes their own drop rather than a stale one.
     expect(draft.disclosure.limits.remaining).toBe('5')
     expect(draft.disclosure.limits.reservedDrafts).toBe(1)
-    expect(draft.disclosure.limits.perDropMax).toBe('10')
     expect(draft.disclosure.points.map((p) => p.id)).toContain('limits')
   })
 
@@ -541,6 +583,9 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
     const message = await expectEnvelope(res, 422, 'drop_too_large')
     expect(message).toContain('4 NIM')
     expect(message, 'retrying will never help, so do not suggest it').not.toMatch(/try again/i)
+    expect(message, 'the ceiling is the operator’s choice, not a property of drops').toMatch(
+      /operator has capped/i,
+    )
 
     const { rows } = await pool.query<{ count: string }>('SELECT count(*)::text FROM drops')
     expect(rows[0].count, 'a refused draft holds no room of its own').toBe('0')
@@ -576,6 +621,176 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
     expect(disclosure.points.find((p) => p.id === 'limits')?.text).toMatch(
       /Only one drop can run at a time/,
     )
+  })
+
+  // ---- the sponsor's claim window ------------------------------------------------
+  //
+  // The window is a decision now, and the two things that make it safe are both
+  // asserted here: the bound is the SERVER'S (a client mirror is a convenience,
+  // never the authority), and the disclosure the sponsor reads before funding
+  // names the window this drop will actually have rather than a constant.
+
+  async function readExpiry(publicId: string): Promise<{ hours: number; at: string | null }> {
+    const body = await json<{ expiryHours: number; expiresAt: string | null }>(
+      await get(`/api/drops/${publicId}`),
+    )
+    return { hours: body.expiryHours, at: body.expiresAt }
+  }
+
+  it('applies the 24 hour default when the field is absent, exactly as before', async () => {
+    const draft = await createDrop()
+    expect(draft.expiryHours).toBe(24)
+    expect(draft.disclosure.expiryHours).toBe(24)
+    expect(draft.disclosure.points.find((p) => p.id === 'expiry_clock')?.text).toMatch(
+      /^The 24 hour claim window starts when the network confirms your funding/,
+    )
+    expect((await readExpiry(draft.publicId)).hours).toBe(24)
+  })
+
+  it('honours a non-default window from the draft through to the stamped deadline', async () => {
+    const draft = await liveDrop({ expiryHours: 72 })
+    expect(draft.expiryHours).toBe(72)
+
+    const { hours, at } = await readExpiry(draft.publicId)
+    expect(hours).toBe(72)
+    // Three days from activation, not one. The clock still starts at
+    // activation: the deadline is measured from now, not from draft creation.
+    const ahead = Date.parse(at!) - Date.now()
+    expect(ahead).toBeGreaterThan(71.9 * 3600_000)
+    expect(ahead).toBeLessThan(72.1 * 3600_000)
+  })
+
+  it('refuses a window outside the bounds, server side, whatever the client believes', async () => {
+    for (const expiryHours of [0, -1, 337, 720, 1.5, 24.0001]) {
+      const res = await post('/api/drops', {
+        idemKey: randomUUID(),
+        body: {
+          sponsorLabel: 'S',
+          amountEach: AMOUNT_EACH_NIM,
+          claimCount: CLAIM_COUNT,
+          expiryHours,
+        },
+      })
+      // A whole-number check is a shape refusal; a range check is a window
+      // refusal. Both are 400, and neither creates a drop.
+      expect([400], `expiryHours=${expiryHours} must be refused`).toContain(res.status)
+      const body = await json(res)
+      const code = (body.error as { code: string }).code
+      expect(['invalid_request', 'invalid_expiry_window']).toContain(code)
+    }
+    // Both ends of the range ARE accepted, so the refusals above are the bound
+    // and not an accident of validation order.
+    expect((await createDrop({ body: { sponsorLabel: 'S', amountEach: AMOUNT_EACH_NIM, claimCount: CLAIM_COUNT, expiryHours: 1 } })).expiryHours).toBe(1)
+    expect((await createDrop({ body: { sponsorLabel: 'S', amountEach: AMOUNT_EACH_NIM, claimCount: CLAIM_COUNT, expiryHours: 336 } })).expiryHours).toBe(336)
+  })
+
+  it('refuses a window that is not a number at all', async () => {
+    const res = await post('/api/drops', {
+      idemKey: randomUUID(),
+      body: {
+        sponsorLabel: 'S',
+        amountEach: AMOUNT_EACH_NIM,
+        claimCount: CLAIM_COUNT,
+        expiryHours: '72',
+      },
+    })
+    await expectEnvelope(res, 400, 'invalid_request')
+  })
+
+  /**
+   * The security property, stated as a test.
+   *
+   * A sponsor who could shorten the window after people started claiming would
+   * strand the remaining claimants and take their shares back as a refund. So
+   * the value is fixed at draft creation and NO request body may move it. Every
+   * request that could plausibly try is tried here.
+   */
+  it('does not let any request body change the window after activation', async () => {
+    const draft = await liveDrop({ expiryHours: 168 })
+    const before = await readExpiry(draft.publicId)
+    expect(before.hours).toBe(168)
+
+    const txHash = fundingHashFor(draft.publicId)
+
+    // 1. The funding endpoint, carrying a window. Unknown properties are
+    //    rejected outright rather than ignored, which is why this is a 400 and
+    //    not a silent no-op.
+    await expectEnvelope(
+      await post(`/api/drops/${draft.publicId}/funding`, { body: { txHash, expiryHours: 1 } }),
+      400,
+      'invalid_request',
+    )
+
+    // 2. The funding endpoint's ordinary idempotent replay. It re-runs the
+    //    whole §7 predicate and re-enters `activate()`, which is the one place
+    //    that ever writes `expires_at` — so if the deadline could be recomputed
+    //    at all, it would move here.
+    const replay = await post(`/api/drops/${draft.publicId}/funding`, { body: { txHash } })
+    expect(replay.status).toBe(200)
+
+    // 3. Creating "the same" drop again with a different window on the same
+    //    idempotency key. The key is bound to a request hash that includes the
+    //    window, so this is a conflict, not a quiet overwrite.
+    const key = randomUUID()
+    const body = {
+      sponsorLabel: 'Nimiq Community',
+      amountEach: AMOUNT_EACH_NIM,
+      claimCount: CLAIM_COUNT,
+      expiryHours: 24,
+    }
+    expect((await post('/api/drops', { idemKey: key, body })).status).toBe(201)
+    await expectEnvelope(
+      await post('/api/drops', { idemKey: key, body: { ...body, expiryHours: 336 } }),
+      409,
+      'idempotency_key_reused',
+    )
+
+    const after = await readExpiry(draft.publicId)
+    expect(after.hours).toBe(168)
+    expect(after.at, 'the deadline a claimant was shown must be the deadline').toBe(before.at)
+  })
+
+  it('states the window this drop will have in the disclosure, in the units a person says', async () => {
+    const cases: [number, RegExp][] = [
+      [1, /^The 1 hour claim window /],
+      [6, /^The 6 hour claim window /],
+      [24, /^The 24 hour claim window /],
+      [72, /^The 3 day claim window /],
+      [336, /^The 14 day claim window /],
+    ]
+    for (const [expiryHours, phrase] of cases) {
+      const draft = await createDrop({
+        body: {
+          sponsorLabel: 'S',
+          amountEach: AMOUNT_EACH_NIM,
+          claimCount: CLAIM_COUNT,
+          expiryHours,
+        },
+      })
+      const point = draft.disclosure.points.find((p) => p.id === 'expiry_clock')?.text ?? ''
+      expect(point, `expiryHours=${expiryHours}`).toMatch(phrase)
+      // The consequence, stated rather than implied: a longer window is a
+      // longer time the operator is holding the money.
+      expect(point).toMatch(/operator holds your NIM for the whole window/)
+      expect(point).toMatch(/no one can end a drop early/)
+      expect(draft.disclosure.expiryHours).toBe(expiryHours)
+    }
+  })
+
+  it('describes the window the sponsor is considering on GET /api/custody', async () => {
+    const chosen = await json<DisclosureBody>(await get('/api/custody?expiryHours=168'))
+    expect(chosen.expiryHours).toBe(168)
+    expect(chosen.points.find((p) => p.id === 'expiry_clock')?.text).toMatch(/The 7 day claim window/)
+
+    // Omitted is the default, which is what a sponsor who has not chosen sees.
+    const plain = await json<DisclosureBody>(await get('/api/custody'))
+    expect(plain.expiryHours).toBe(24)
+
+    // And the read endpoint refuses what the create endpoint would refuse: it
+    // must never describe a window that could not actually be created.
+    await expectEnvelope(await get('/api/custody?expiryHours=337'), 400, 'invalid_expiry_window')
+    await expectEnvelope(await get('/api/custody?expiryHours=0'), 400, 'invalid_expiry_window')
+    await expectEnvelope(await get('/api/custody?expiryHours=abc'), 400, 'invalid_request')
   })
 
   // ---- idempotency -----------------------------------------------------------
@@ -721,10 +936,15 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
     expect(text).not.toContain(wallet.publicKeyHex)
 
     const pub = JSON.parse(text) as Record<string, unknown>
+    // The exact key set, so a field added later has to be argued for here
+    // rather than appearing on a public read by accident. `expiryHours` is the
+    // sponsor's own published choice and is already derivable from
+    // `expiresAt`; it says nothing about any claimant.
     expect(Object.keys(pub).sort()).toEqual([
       'amountEach',
       'claimCount',
       'expiresAt',
+      'expiryHours',
       'fundingTxHash',
       'message',
       'publicId',
@@ -743,9 +963,11 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
       { sponsorLabel: '', amountEach: '1', claimCount: 5 },
       { sponsorLabel: 'S', amountEach: 1, claimCount: 5 },
       { sponsorLabel: 'S', amountEach: '1', claimCount: 1 },
-      { sponsorLabel: 'S', amountEach: '1', claimCount: 21 },
       { sponsorLabel: 'S', amountEach: '1', claimCount: 2.5 },
-      { sponsorLabel: 'S', amountEach: '1000', claimCount: 20 },
+      { sponsorLabel: 'S', amountEach: '1', claimCount: -5 },
+      // Past the width of the INT column the count is stored in. Not a policy
+      // ceiling — an impossible request answered as a 400 rather than a 500.
+      { sponsorLabel: 'S', amountEach: '1', claimCount: 2_147_483_648 },
       { sponsorLabel: 'S', amountEach: '0', claimCount: 5 },
       { sponsorLabel: 'S', amountEach: '1.000001', claimCount: 5 },
       { sponsorLabel: 'S', amountEach: '1', claimCount: 5, extra: true },
