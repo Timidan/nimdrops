@@ -1,5 +1,6 @@
 import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { testAddress } from './fixtures/address'
 import { migrate } from '../src/db/migrate'
 import {
   ATTEMPT_WINDOW_MINUTES,
@@ -27,7 +28,7 @@ const SCHEMA = 'passphrase_test'
 const SALT = 'p'.repeat(32)
 const PHRASE = 'red panda'
 const HINT = 'said at the 3pm talk'
-const W = 'NQ07 ATTENDEE'
+const W = testAddress('ATTENDEE')
 
 describe('normalisePhrase', () => {
   it('casefolds, trims, and collapses internal whitespace', () => {
@@ -220,9 +221,39 @@ describe.skipIf(!hasDb)('submitPassphrase', () => {
 
   it('counts attempts per address, not globally', async () => {
     for (let i = 0; i < MAX_ATTEMPTS; i += 1) {
-      await expect(submit('wrong', 'NQ07 NOISY')).rejects.toThrow(GateRejectedError)
+      await expect(submit('wrong', testAddress('NOISY'))).rejects.toThrow(GateRejectedError)
     }
-    await expect(submit(PHRASE, 'NQ07 QUIET')).resolves.toEqual({ granted: true })
+    await expect(submit(PHRASE, testAddress('QUIET'))).resolves.toEqual({ granted: true })
+  })
+
+  it('does not hand a re-spelled address a fresh budget', async () => {
+    // The cap is enforced with `WHERE wallet_address = $1` on a text column, so it
+    // is a cap on a WALLET only if one wallet is one string. `NQ07 ABCD…`,
+    // `nq07abcd…` and `NQ07ABCD…` are one wallet, and reading them as three turns
+    // five guesses into fifteen without ever contending for the lock that makes
+    // the count atomic — a way ROUND the concurrency fix rather than through it.
+    const compact = W.replace(/\s/g, '')
+    for (let i = 0; i < MAX_ATTEMPTS; i += 1) {
+      await expect(submit('wrong')).rejects.toThrow(/bad_attempt/)
+    }
+    const spellings = [compact, compact.toLowerCase(), `${compact.slice(0, 4)} ${compact.slice(4)}`]
+    for (const spelling of spellings) {
+      await expect(submit('wrong', spelling)).rejects.toThrow(/too_many_attempts/)
+    }
+    // And the five that were spent sit under one spelling rather than spread
+    // across four.
+    expect(await countAttempts(compact)).toBe(String(MAX_ATTEMPTS))
+  })
+
+  it('refuses an address no wallet could hold rather than charging an attempt', async () => {
+    // `'NQ07 ATTENDEE'` is what this suite's fixtures used to be. It reads like an
+    // address and is not one: six payload characters instead of 32, and check
+    // digits that agree with nothing.
+    await expect(submit(PHRASE, 'NQ07 ATTENDEE')).rejects.toThrow(/bad_address/)
+    await expect(submit(PHRASE, 'hello')).rejects.toThrow(/bad_address/)
+    // Nothing charged and nothing granted: there was no wallet to charge.
+    expect(await countAttempts()).toBe('0')
+    expect(await countGrants()).toBe('0')
   })
 
   it('counts attempts per drop, so one drop does not lock out another', async () => {

@@ -8,10 +8,15 @@
  * known to be derived from a verified signature.
  *
  * A session starts under a CLIENT-ASSERTED wallet address and requires no
- * signature. That is safe because passing as address X only ever benefits the
- * holder of X: `reserveClaim` compares `gate_grants.wallet_address` against the
- * address derived from the claim signature. Requiring a signature here would cost
- * the player a native wallet prompt before they have received anything.
+ * signature. No MONEY is at risk in that: passing as address X only ever benefits
+ * the holder of X, because `reserveClaim` compares `gate_grants.wallet_address`
+ * against the address derived from the claim signature. Requiring a signature here
+ * would cost the player a native wallet prompt before they have received anything.
+ *
+ * What it does mean is that ADDRESSES ARE FREE, and no argument in this file may
+ * assume otherwise. Anything a session hands back is handed to anyone willing to
+ * invent an address, and any per-wallet limit — the cooldown, `trivia_seen` — binds
+ * only the address that asked, never the address that will eventually claim.
  *
  * Two rules here are load-bearing rather than tidy, and both come from §7.2:
  *
@@ -29,7 +34,13 @@
 import type { Pool, PoolClient } from 'pg'
 import { normaliseNimiqAddress } from '../../nimiq-address'
 import { issueGrant } from '../grants'
-import { GateError, GateRejectedError, type GateRow, assertGameLive } from '../types'
+import {
+  GateError,
+  GateRejectedError,
+  type GateRow,
+  assertGameLive,
+  requireGateWallet,
+} from '../types'
 import { type Bank, OPTIONS_PER_QUESTION, type Tier } from './bank'
 import { selectQuestionIds } from './select'
 
@@ -114,10 +125,14 @@ export interface AnswerOutcome {
    * The finished session, question by question. Present ONLY when `state` is no
    * longer `in_progress`, and absent while a question is still in play.
    *
-   * Safe to send precisely because a wallet never meets a question twice — see
-   * `trivia_seen` and `selectQuestionIds`. Without that rule this field would be
-   * the whole answer key: test one option across all five, read the verdicts,
-   * repeat, and pass on the fourth attempt knowing nothing.
+   * `wasCorrect` is always here; `correctIndex` is here only for a question whose
+   * answer is already published — see {@link ReviewedQuestion.correctIndex}.
+   *
+   * The earlier rule was that `trivia_seen` made the whole thing safe, because a
+   * wallet never meets a question twice. That is true and does not cover this: a
+   * session needs no signature, so the harvester's addresses are not the claimant's
+   * address, and their seen-sets constrain nothing. `disclosable` is what makes the
+   * reveal safe, and it is a property of the QUESTION rather than of the player.
    */
   review?: ReviewedQuestion[]
 }
@@ -128,7 +143,17 @@ export interface ReviewedQuestion {
   options: string[]
   /** What the player chose. Null if the deadline passed with no submission. */
   answerIndex: number | null
-  correctIndex: number
+  /**
+   * The right option, or `null` when this question's answer is not already
+   * public — see {@link Question.disclosable}.
+   *
+   * Null is the safe half of the pair, not a degraded one: `wasCorrect` still
+   * says whether the player got it, which is the whole of what a player asked
+   * for. What null withholds is the part that would let somebody who never
+   * intends to claim harvest an answer key five questions at a time, under
+   * throwaway addresses that cost nothing to invent.
+   */
+  correctIndex: number | null
   wasCorrect: boolean
   /**
    * The answer arrived after its deadline, so it was scored wrong whatever it said.
@@ -394,23 +419,36 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
     return row
   }
 
-  async function startOrResume(gate: GateRow, walletAddress: string): Promise<StartedSession> {
+  async function startOrResume(gate: GateRow, asserted: string): Promise<StartedSession> {
     if (gate.kind !== 'trivia') {
       throw new GateRejectedError('wrong_kind', 'this drop does not use trivia')
     }
     assertGameLive(gate)
     const config = parseTriviaConfig(gate.config, bank.version)
 
+    // One spelling, before it reaches the lock key, the seen-set, the session row
+    // or the grant. Three spellings of one address would be three disjoint
+    // `trivia_seen` sets, and the no-repeat rule is a rule about a WALLET.
+    const walletAddress = requireGateWallet(asserted)
+
     const client = await pool.connect()
     let committed = false
     try {
       await client.query('BEGIN')
 
-      // Serialize this wallet's sessions for this drop. An advisory lock rather
-      // than a row lock, because on the first call there is no row to lock yet —
-      // two tabs would otherwise each read "no session" and each insert one.
+      // Serialize this wallet's session creation ACROSS EVERY DROP. An advisory
+      // lock rather than a row lock, because on the first call there is no row to
+      // lock yet — two tabs would otherwise each read "no session" and each
+      // insert one.
+      //
+      // The key used to include the drop, and that was too narrow by exactly one
+      // dimension: `trivia_seen` is global per wallet, so two concurrent starts on
+      // DIFFERENT drops each read the same seen-set, each selected from the same
+      // unseen pool, and could pick the same question. Both sessions then served
+      // it while only one `trivia_seen` row survived the INSERT below. The lock
+      // has to cover the same scope as the table it protects.
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
-        `trivia:${gate.dropId}:${walletAddress}`,
+        `trivia:${walletAddress}`,
       ])
 
       // The grant is what blocks a retry, not a passed session row. A wallet that
@@ -518,12 +556,28 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
       // to the same wallet after a reveal is precisely the repetition this table
       // exists to prevent. Burning them on an abandoned session is the safe
       // direction to be wrong in.
-      await client.query(
+      //
+      // `ON CONFLICT DO NOTHING` stays, because the INSERT must not raise — but
+      // the row count is now checked. Under the wallet-wide lock above, every id
+      // here was read as unseen inside this transaction, so a conflict is
+      // IMPOSSIBLE; if one happens the lock is not doing what this comment claims
+      // and a question is about to be served twice to one wallet. Silently
+      // absorbing that is how the concurrency hole stayed invisible.
+      const seenWrite = await client.query(
         `INSERT INTO trivia_seen (wallet_address, question_id, session_id)
          SELECT $1, unnest($2::text[]), $3
          ON CONFLICT (wallet_address, question_id) DO NOTHING`,
         [walletAddress, questionIds, created[0].id],
       )
+      if (seenWrite.rowCount !== questionIds.length) {
+        // Rolls back the session too, via the catch below. A player sees a
+        // failure to start, which is recoverable; the alternative is a session
+        // built on questions this wallet has already answered.
+        throw new GateError(
+          `trivia_seen recorded ${seenWrite.rowCount} of ${questionIds.length} questions ` +
+            `for ${walletAddress}: selection raced despite the per-wallet lock`,
+        )
+      }
 
       await client.query('COMMIT')
       committed = true
@@ -644,7 +698,7 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
         prompt: question.prompt,
         options: [...question.options],
         answerIndex: row.answer_index,
-        correctIndex: question.answerIndex,
+        correctIndex: question.disclosable ? question.answerIndex : null,
         wasCorrect: row.is_correct === true,
         wasLate: row.was_late,
       }
@@ -798,7 +852,16 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
       // end the session — the player answers the rest and learns the outcome at
       // the end like everyone else. Lateness is not correctness, so telling them
       // the clock beat them leaks nothing about the answer.
-      if (row.late) {
+      //
+      // Only while a question is still in play, though. Throwing on the FIFTH
+      // late answer used to discard the outcome and the review this transaction
+      // had just built and committed: the session was over, scored, and possibly
+      // granted, and the player was handed `deadline_missed` with no way to ever
+      // retrieve what happened — the client treats a refusal as terminal, and no
+      // route serves a finished session. So a terminal state is returned, and the
+      // lateness is carried by `review[4].wasLate` instead, which is where the
+      // rest of the session's lateness already lives.
+      if (row.late && state === 'in_progress') {
         throw new GateRejectedError('deadline_missed', 'that answer arrived after the deadline')
       }
       return { state, answered, questionCount: config.questionCount, ...(review ? { review } : {}) }

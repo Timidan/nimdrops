@@ -126,7 +126,7 @@ export function useTriviaSession(publicId: string, walletAddress: string): Trivi
         setPhase('failed')
       }
     },
-    [publicId, question],
+    [publicId, question, walletAddress],
   )
 
   return {

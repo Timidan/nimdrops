@@ -74,6 +74,7 @@ function reviewed(index: number, over: Record<string, unknown> = {}) {
     answerIndex: 0,
     correctIndex: 0,
     wasCorrect: true,
+    wasLate: false,
     ...over,
   }
 }
@@ -538,6 +539,70 @@ describe('Game — the review of a finished round', () => {
     expect(row.textContent).not.toMatch(/you chose/i)
     // The right answer is still stated, because that is what a review is for.
     expect(row.textContent).toMatch(/the right answer is third/i)
+  })
+
+  it('says which answers were right without naming one the server withheld', async () => {
+    // `correctIndex: null` is the normal case for a bank whose questions the
+    // operator wrote: the server names the right option only where the answer was
+    // already published. A verdict on every question is the whole of what a player
+    // asked for, and it must survive on its own.
+    await play({
+      status: 200,
+      body: {
+        state: 'failed',
+        answered: 5,
+        questionCount: 5,
+        review: [
+          reviewed(0, { correctIndex: null }),
+          reviewed(1, { answerIndex: 1, correctIndex: null, wasCorrect: false }),
+          reviewed(2, { correctIndex: null }),
+          reviewed(3, { correctIndex: null }),
+          reviewed(4, { correctIndex: null }),
+        ],
+      },
+    })
+
+    await screen.findByTestId('trivia-review')
+    expect(screen.getByTestId('review-0-outcome').textContent).toMatch(/Correct$/)
+
+    const wrong = screen.getByTestId('review-1')
+    expect(wrong.textContent).toMatch(/not correct/i)
+    expect(wrong.textContent).toMatch(/you chose second/i)
+    // Nothing anywhere in the review names an answer. Indexing the options array
+    // with `null` would have quietly produced `options[0]` and named the FIRST
+    // option as the right one, which is worse than saying nothing at all.
+    expect(screen.getByTestId('trivia-review').textContent).not.toMatch(/the right answer/i)
+  })
+
+  it('reads a late answer as beaten by the clock, not as a wrong choice', async () => {
+    // A late answer carries the index the player picked and is scored wrong
+    // whatever it said — so `answerIndex === correctIndex` while `wasCorrect` is
+    // false. Without `wasLate` this row shows somebody their own correct answer
+    // labelled "Not correct", which reads as a bug in the scoring.
+    await play({
+      status: 200,
+      body: {
+        state: 'failed',
+        answered: 5,
+        questionCount: 5,
+        review: [
+          reviewed(0),
+          reviewed(1, { answerIndex: 0, correctIndex: 0, wasCorrect: false, wasLate: true }),
+          reviewed(2),
+          reviewed(3),
+          reviewed(4),
+        ],
+      },
+    })
+
+    const row = await screen.findByTestId('review-1')
+    expect(screen.getByTestId('review-1-outcome').textContent).toMatch(/Too late$/)
+    expect(row.textContent).not.toMatch(/not correct/i)
+    // They are still told what they picked, and why it did not count.
+    expect(row.textContent).toMatch(/you chose first/i)
+    expect(row.textContent).toMatch(/clock had already run out/i)
+    // It is not the same thing as never answering at all.
+    expect(row.textContent).not.toMatch(/ran out of time/i)
   })
 
   it('carries correctness in words rather than in colour', async () => {

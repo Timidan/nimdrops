@@ -1,5 +1,6 @@
 import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { testAddress } from './fixtures/address'
 import { migrate } from '../src/db/migrate'
 import { issueGrant } from '../src/gates/grants'
 import { type Bank, parseBank } from '../src/gates/trivia/bank'
@@ -23,11 +24,19 @@ const hasDb = Boolean(process.env.DATABASE_URL)
  */
 const SCHEMA = 'trivia_session_test'
 const SALT = 'z'.repeat(32)
-const PLAYER = 'NQ07 PLAYER'
+const PLAYER = testAddress('PLAYER')
 const SECONDS = 15
 
-/** 12 novice questions over 6 categories, so 5 distinct categories can be drawn. */
-function testBank(): Bank {
+/**
+ * 12 novice questions over 6 categories, so 5 distinct categories can be drawn.
+ *
+ * @param disclosable whether these questions' answers are already published.
+ *   Defaults to false, matching a bank an operator wrote themselves — which is
+ *   the case that must WITHHOLD the right option from a finished session's
+ *   review. The rest of the suite uses the default deliberately: a fixture that
+ *   opted into the reveal everywhere would leave the withholding path untested.
+ */
+function testBank(disclosable = false): Bank {
   const categories = ['geography', 'science', 'history', 'sport', 'music', 'film']
   return parseBank({
     version: 'v1',
@@ -40,6 +49,7 @@ function testBank(): Bank {
         options: ['a', 'b', 'c', 'd'],
         answerIndex: n,
         source: 'https://example.org',
+        disclosable,
       })),
     ),
   })
@@ -150,7 +160,8 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
     publicId = await seedGate()
   })
 
-  const service = () => makeTrivia({ pool, bank: testBank(), salt: SALT })
+  const service = (disclosable = false) =>
+    makeTrivia({ pool, bank: testBank(disclosable), salt: SALT })
   const gateFor = (id = publicId) => loadGate(pool, id)
 
   const questionIds = async (sessionId: string) =>
@@ -290,6 +301,76 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
     expect(after.filter((id) => before.includes(id))).toEqual([])
   })
 
+  it('treats every spelling of one address as one wallet', async () => {
+    // `trivia_seen` is keyed on a text column, so the no-repeat rule is a rule
+    // about a WALLET only if one wallet is one string. Two spellings would be two
+    // seen-sets, two cooldowns and — through `gate_grants` — two plays of a
+    // one-play-per-wallet gate.
+    const svc = service()
+    const gate = await gateFor()
+    const compact = PLAYER.replace(/\s/g, '')
+    const spellings = [compact, compact.toLowerCase(), `${compact.slice(0, 4)} ${compact.slice(4)}`]
+
+    const first = await svc.startOrResume(gate, spellings[0])
+    for (const spelling of spellings.slice(1)) {
+      // Resumed, not started afresh: the same session id comes back for each.
+      expect((await svc.startOrResume(gate, spelling)).sessionId).toBe(first.sessionId)
+    }
+
+    const { rows } = await pool.query<{ count: string; spellings: string }>(
+      `SELECT count(*)::text AS count, count(DISTINCT wallet_address)::text AS spellings
+       FROM trivia_sessions`,
+    )
+    expect(rows[0]).toEqual({ count: '1', spellings: '1' })
+  })
+
+  it('will not start a session under an address no wallet could hold', async () => {
+    // The HTTP layer rejects these first, so this is about the seam rather than
+    // the route: a spike script or an operator tool reaches this function directly,
+    // and a grant under an unclaimable address is one `reserveClaim` can never
+    // match — orphaned the moment it is written.
+    const svc = service()
+    const gate = await gateFor()
+    for (const junk of ['NQ07 PLAYER', 'hello', '', `NQ99${'0'.repeat(32)}`]) {
+      await expect(svc.startOrResume(gate, junk)).rejects.toThrow(/bad_address/)
+    }
+  })
+
+  it('does not deal one wallet the same question on two drops at once', async () => {
+    // The advisory lock used to include the drop, and `trivia_seen` is global per
+    // wallet — so two concurrent starts on DIFFERENT drops each read the same
+    // seen-set, each selected from the same unseen pool, and could pick the same
+    // question. One `trivia_seen` row then lost to `ON CONFLICT DO NOTHING` while
+    // both sessions kept serving it. The lock now covers the same scope as the
+    // table it protects.
+    const svc = service()
+
+    // Both gates resolved BEFORE either session starts. Written as
+    // `startOrResume(await gateFor(), …)` inside the array, the first session
+    // commits during the second element's `await` and the second simply reads its
+    // seen rows — which is the sequential case, and the old lock passed that.
+    const gates = [await gateFor(), await gateFor(await seedGate())]
+
+    // Two clients checked out and returned, so `pool.connect()` below hands both
+    // callers a warm client instead of serialising them behind one connection
+    // being established. Without this the "concurrent" calls are not concurrent.
+    const warm = await Promise.all([pool.connect(), pool.connect()])
+    for (const client of warm) client.release()
+
+    const [a, b] = await Promise.all(gates.map((gate) => svc.startOrResume(gate, PLAYER)))
+
+    const [first, second] = await Promise.all([questionIds(a.sessionId), questionIds(b.sessionId)])
+    expect(first.filter((id) => second.includes(id))).toEqual([])
+
+    // And every question of both sessions is recorded exactly once, which is the
+    // invariant the silent conflict was hiding.
+    const { rows } = await pool.query<{ count: string }>(
+      'SELECT count(*)::text AS count FROM trivia_seen WHERE wallet_address = $1',
+      [PLAYER],
+    )
+    expect(rows[0].count).toBe('10')
+  })
+
   it('records what was shown even if the session is abandoned', async () => {
     // A player who walks away has still SEEN the questions. Re-offering them
     // after a reveal is exactly the repetition trivia_seen exists to prevent.
@@ -313,11 +394,11 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
       .map((q) => q.id)
     await pool.query(
       `INSERT INTO trivia_seen (wallet_address, question_id)
-       SELECT 'NQ07 EXHAUSTED', unnest($1::text[])`,
-      [ids],
+       SELECT $2, unnest($1::text[])`,
+      [ids, testAddress('EXHAUSTED')],
     )
 
-    await expect(service().startOrResume(await gateFor(), 'NQ07 EXHAUSTED')).rejects.toThrow(
+    await expect(service().startOrResume(await gateFor(), testAddress('EXHAUSTED'))).rejects.toThrow(
       /already-seen|categories left/,
     )
   })
@@ -468,8 +549,8 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
 
     // Two different wallets so each gets its own session and its own question
     // set; what must match is the SHAPE of the answer they get back.
-    const right = await firstOutcome('NQ07 RIGHT', true)
-    const notRight = await firstOutcome('NQ07 WRONG', false)
+    const right = await firstOutcome(testAddress('RIGHT'), true)
+    const notRight = await firstOutcome(testAddress('WRONG'), false)
     expect(notRight).toEqual(right)
   })
 
@@ -502,7 +583,7 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
     expect(mid.review).toBeUndefined()
   })
 
-  it('reveals every answer once the session is over', async () => {
+  it('reviews every question once the session is over', async () => {
     const svc = service()
     const s = await svc.startOrResume(await gateFor(), PLAYER)
     const ids = await questionIds(s.sessionId)
@@ -516,14 +597,41 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
       expect(item).toMatchObject({
         questionIndex: i,
         prompt: question.prompt,
-        correctIndex: question.answerIndex,
         wasCorrect: false,
       })
       expect(item.options).toHaveLength(4)
-      // The player's own choice comes back too, so a reader can see what they
-      // picked and what it should have been side by side.
+      // The player's own choice comes back, so a reader can see what they picked
+      // against a verdict on it.
       expect(item.answerIndex).toBe((question.answerIndex + 1) % 4)
     }
+  })
+
+  it('withholds the right option for a bank that has not published its answers', async () => {
+    // The default fixture, i.e. questions an operator wrote. Every wrong answer
+    // is still reported as wrong — that is the whole of what a player asked for
+    // — and `correctIndex` is null, so nothing here is an answer key.
+    const svc = service()
+    const s = await svc.startOrResume(await gateFor(), PLAYER)
+    const outcome = await answerAll(svc, s.sessionId, false)
+
+    expect(outcome.review?.map((r) => r.correctIndex)).toEqual([null, null, null, null, null])
+    expect(outcome.review?.every((r) => r.wasCorrect === false)).toBe(true)
+  })
+
+  it('names the right option only for questions whose answers are already public', async () => {
+    // A session needs no signature, so an attacker opens as many as they like
+    // under addresses they invent, and five question/answer pairs per session is
+    // an answer key on request. `disclosable` is the whole of what stops that,
+    // and it says the answers were downloadable before we echoed them.
+    const svc = service(true)
+    const s = await svc.startOrResume(await gateFor(), PLAYER)
+    const ids = await questionIds(s.sessionId)
+    const bank = testBank(true)
+    const outcome = await answerAll(svc, s.sessionId, false)
+
+    expect(outcome.review?.map((r) => r.correctIndex)).toEqual(
+      ids.map((id) => bank.questions.find((x) => x.id === id)!.answerIndex),
+    )
   })
 
   it('issues exactly one grant when a session passes', async () => {
@@ -610,6 +718,45 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
     expect(rows[0].count).toBe('0')
   })
 
+  it('returns the outcome when it is the FIFTH answer that arrives late', async () => {
+    // This used to throw `deadline_missed` after committing the finished session,
+    // its score and its review — so the transaction did every bit of the work and
+    // the player got a refusal instead of the result. A client treats a refusal as
+    // terminal and no route serves a finished session, so that outcome was gone for
+    // good. Lateness is not correctness, so returning it leaks nothing.
+    const svc = service()
+    const s = await svc.startOrResume(await gateFor(), PLAYER)
+    const bank = testBank()
+    const ids = await questionIds(s.sessionId)
+    let last!: Awaited<ReturnType<typeof svc.submitAnswer>>
+    for (let i = 0; i < 5; i += 1) {
+      const q = await svc.currentQuestion(s.sessionId)
+      const truth = bank.questions.find((x) => x.id === ids[q.questionIndex])!.answerIndex
+      if (i === 4) {
+        await pool.query(
+          `UPDATE trivia_answers SET deadline_at = now() - interval '1 second'
+           WHERE session_id = $1 AND question_index = $2`,
+          [s.sessionId, q.questionIndex],
+        )
+      }
+      last = await svc.submitAnswer(s.sessionId, q.questionIndex, truth)
+    }
+
+    // Four right, the fifth right but late — so the session fails, and says so.
+    expect(last.state).toBe('failed')
+    expect(last.review).toHaveLength(5)
+    // The lateness is carried here rather than by a rejection, which is where the
+    // rest of the session's lateness already lived.
+    expect(last.review?.map((r) => r.wasLate)).toEqual([false, false, false, false, true])
+    expect(last.review?.[4].wasCorrect).toBe(false)
+    // ...while the index the player picked IS the right one, which is exactly why
+    // `wasLate` has to be reported: without it a screen shows somebody their own
+    // correct answer labelled "not correct".
+    expect(last.review?.[4].answerIndex).toBe(
+      bank.questions.find((x) => x.id === ids[4])!.answerIndex,
+    )
+  })
+
   it('rejects a second submission for the same question index', async () => {
     const svc = service()
     const s = await svc.startOrResume(await gateFor(), PLAYER)
@@ -670,7 +817,7 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
   // wallet does not make it a secret (the client asserts it either way); it makes
   // the leaked id on its own useless, which is the actual exposure.
   describe('session ownership', () => {
-    const STRANGER = 'NQ07 STRANGER'
+    const STRANGER = testAddress('STRANGER')
 
     it('refuses the question to a wallet the session does not belong to', async () => {
       const svc = service()
@@ -806,7 +953,7 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
       })
       const open = await seedGate({ config: { ...shippedConfig, unlockRequiresTier: null } })
       await expect(
-        service().startOrResume(await gateFor(open), 'NQ07 OTHER'),
+        service().startOrResume(await gateFor(open), testAddress('OTHER')),
       ).resolves.toMatchObject({ deliveredCount: 0 })
     })
 

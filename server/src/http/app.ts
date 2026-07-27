@@ -243,6 +243,10 @@ const GATE_MESSAGES: Record<GateRejectionCode, string> = {
   tier_locked: 'pass an easier one first to unlock this',
   bad_attestation: 'that confirmation could not be verified',
   attestation_replayed: 'that confirmation was already used',
+  // Every route above already rejects a bad address at the boundary, so this is
+  // normally unreachable over HTTP. It is here because the gates now check for
+  // themselves rather than trusting that — see `requireGateWallet`.
+  bad_address: 'that is not a valid Nimiq address',
   // 5xx: see GATE_STATUS.
   misconfigured: 'this drop is not set up correctly — nobody can claim it yet',
 }
@@ -270,6 +274,7 @@ const GATE_STATUS: Record<GateRejectionCode, ContentfulStatusCode> = {
   tier_locked: 403,
   bad_attestation: 400,
   attestation_replayed: 409,
+  bad_address: 400,
   misconfigured: 500,
 }
 

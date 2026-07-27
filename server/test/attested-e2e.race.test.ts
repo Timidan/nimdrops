@@ -74,6 +74,16 @@ function newWallet(): Wallet {
 
 const nowSeconds = () => Math.floor(Date.now() / 1000)
 
+/**
+ * The spelling a wallet address is STORED and RETURNED under.
+ *
+ * `toUserFriendlyAddress()` groups an address in fours, which is how a wallet
+ * displays it and how an attester will paste it into a message. Everything past
+ * the parser holds one spelling instead, so the grant a claim is matched against
+ * can never disagree with the address derived from a claim signature.
+ */
+const stored = (address: string) => address.replace(/\s/g, '')
+
 /** 128 fresh bits, lowercase hex, as the documented contract requires. */
 const freshNonce = () => randomBytes(16).toString('hex')
 
@@ -317,14 +327,14 @@ describe.skipIf(!hasDb)('attested drop, attestation to payout intent (real Postg
     const message = attestation({ drop: publicId, wallet: claimant.address })
     await expect(
       submitAttested({ submitTo: publicId, message, attester }),
-    ).resolves.toMatchObject({ granted: true, walletAddress: claimant.address })
+    ).resolves.toMatchObject({ granted: true, walletAddress: stored(claimant.address) })
 
     // The grant exists for the claimant and for nobody else — not for the
     // attester, not for anyone the request body could have named, because there
     // is no request body field for an address.
     const granted = await grantsFor(dropId)
     expect(granted).toHaveLength(1)
-    expect(granted[0].wallet_address).toBe(claimant.address)
+    expect(granted[0].wallet_address).toBe(stored(claimant.address))
     expect(granted[0].kind).toBe('attested')
     expect(granted[0].consumed_claim_id).toBeNull()
 
@@ -394,11 +404,11 @@ describe.skipIf(!hasDb)('attested drop, attestation to payout intent (real Postg
     const message = attestation({ drop: publicId, wallet: attester.address })
     await expect(
       submitAttested({ submitTo: publicId, message, attester }),
-    ).resolves.toMatchObject({ granted: true, walletAddress: attester.address })
+    ).resolves.toMatchObject({ granted: true, walletAddress: stored(attester.address) })
 
     const granted = await grantsFor(dropId)
     expect(granted).toHaveLength(1)
-    expect(granted[0].wallet_address).toBe(attester.address)
+    expect(granted[0].wallet_address).toBe(stored(attester.address))
 
     // The claimant holds no grant, so the claim is refused outright.
     await expectClaimRejection(claim(publicId, claimant), 'gate_required')
@@ -420,7 +430,7 @@ describe.skipIf(!hasDb)('attested drop, attestation to payout intent (real Postg
       const message = attestation({ drop: publicId, wallet: claimant.address })
       await expect(
         submitAttested({ submitTo: publicId, message, attester }),
-      ).resolves.toMatchObject({ granted: true, walletAddress: claimant.address })
+      ).resolves.toMatchObject({ granted: true, walletAddress: stored(claimant.address) })
     }
     // Both nonces are spent, and there is still exactly one grant.
     const { rows: nonces } = await pool.query<{ count: string }>(
@@ -440,7 +450,7 @@ describe.skipIf(!hasDb)('attested drop, attestation to payout intent (real Postg
     const later = attestation({ drop: publicId, wallet: claimant.address })
     await expect(
       submitAttested({ submitTo: publicId, message: later, attester }),
-    ).resolves.toMatchObject({ granted: true, walletAddress: claimant.address })
+    ).resolves.toMatchObject({ granted: true, walletAddress: stored(claimant.address) })
     const after = await grantsFor(dropId)
     expect(after).toHaveLength(1)
     expect(after[0].consumed_claim_id).toBe(result.claimId)
@@ -587,13 +597,23 @@ describe('docs/ATTESTATIONS.md §6 worked example', () => {
       network: 'TestAlbatross',
       origin: 'https://nimdrops.example',
       drop: 'k3nq7t2mv9x4',
-      wallet: 'NQ71 CAAV SDGU D6YE 5M54 M6QX UBJ2 TMS0 6SPA',
+      // Canonical, not as written. The document's line carries the address the
+      // way a wallet DISPLAYS it, and parsing returns the one spelling the grant
+      // is stored under. Verification is unaffected — a signature covers the
+      // bytes the attester sent, which are still exactly the 203 counted above.
+      wallet: 'NQ71CAAVSDGUD6YE5M54M6QXUBJ2TMS06SPA',
       issuedAt: 1_785_000_000,
       nonce: '7f3a1c9e2b48d05617ae3c8f2d194b60',
     })
     // The document also claims the two are the same bytes: the seven lines it
-    // prints are what `buildAttestationMessage` emits.
-    expect(buildAttestationMessage(parseAttestationMessage(MESSAGE))).toBe(MESSAGE)
+    // prints are what `buildAttestationMessage` emits for the fields an attester
+    // holds — the wallet among them spelled as their wallet shows it.
+    expect(
+      buildAttestationMessage({
+        ...parseAttestationMessage(MESSAGE),
+        wallet: 'NQ71 CAAV SDGU D6YE 5M54 M6QX UBJ2 TMS0 6SPA',
+      }),
+    ).toBe(MESSAGE)
   })
 
   it('publishes a raw signature that verifies under SIG_SCHEME=raw', () => {

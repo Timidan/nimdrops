@@ -1,5 +1,6 @@
+import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { BankError, parseBank, questionsForTier } from '../src/gates/trivia/bank'
+import { BankError, loadBank, parseBank, questionsForTier } from '../src/gates/trivia/bank'
 
 const ok = {
   version: 'v1',
@@ -43,6 +44,46 @@ describe('parseBank', () => {
 
   it('rejects a missing version', () => {
     expect(() => parseBank({ questions: ok.questions })).toThrow(BankError)
+  })
+})
+
+describe('parseBank / disclosable', () => {
+  const withFlag = (disclosable: unknown) =>
+    parseBank({ ...ok, questions: [{ ...ok.questions[0], disclosable }] }).questions[0].disclosable
+
+  /**
+   * The flag decides whether a finished session names the right option. Absent
+   * must mean false, because absent is what a hand-written question looks like
+   * before anyone has decided whether its answer is public — and the cost of
+   * being wrong in that direction is a review that says "not correct" without
+   * naming an answer, against an answer key handed out five questions at a time.
+   */
+  it('is false when the question does not mention it', () => {
+    expect(parseBank(ok).questions[0].disclosable).toBe(false)
+  })
+
+  it('is true only for the boolean, never for a truthy value', () => {
+    expect(withFlag(true)).toBe(true)
+    expect(withFlag(false)).toBe(false)
+  })
+
+  it('rejects a non-boolean rather than reading it as permission', () => {
+    // `"true"` is the shape a hand-edited JSON file takes when somebody quotes
+    // the value, and `1` is what a spreadsheet export produces. Truthiness would
+    // read both as "publish this answer".
+    expect(() => withFlag('true')).toThrow(BankError)
+    expect(() => withFlag(1)).toThrow(BankError)
+    expect(() => withFlag(null)).toThrow(BankError)
+  })
+
+  it('accepts the committed example bank, whose answers are already public', async () => {
+    // The example lives in a public repository, so its questions carry the flag
+    // honestly. This also proves the shipped file still parses under the stricter
+    // rule rather than only under the one it was written for.
+    const bank = await loadBank(
+      fileURLToPath(new URL('../src/gates/trivia/questions.example.json', import.meta.url)),
+    )
+    expect(bank.questions.every((q) => q.disclosable)).toBe(true)
   })
 })
 

@@ -4,6 +4,7 @@ import pg from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { FakeChain } from '../src/chain/fake'
 import { migrate } from '../src/db/migrate'
+import { issueGrant } from '../src/gates/grants'
 import { ClaimRejectedError, issueChallenge, reserveClaim } from '../src/services/claims'
 import { createDraft, submitFunding } from '../src/services/drops'
 // Side-effect import: installs the int8-as-string parser so BIGINT luna never
@@ -100,13 +101,19 @@ async function attachGate(dropId: string, kind = 'passphrase'): Promise<void> {
   )
 }
 
+/**
+ * Write a grant the way a kind writes one — through `issueGrant`, not raw SQL.
+ *
+ * This used to INSERT directly, and the difference is not cosmetic. `issueGrant`
+ * canonicalises the address, so a real grant holds the compact spelling while
+ * `addressFromPublicKey` hands the claim path the grouped one. A raw insert
+ * stored whatever the fixture typed, and so tested a spelling the product never
+ * writes — the exact gap that would let `reserveClaim` refuse every gated claim
+ * in production while this suite stayed green.
+ */
 async function grantTo(dropId: string, walletAddress: string): Promise<string> {
-  const { rows } = await pool.query<{ id: string }>(
-    `INSERT INTO gate_grants (drop_id, wallet_address, kind)
-     VALUES ($1, $2, 'passphrase') RETURNING id`,
-    [dropId, walletAddress],
-  )
-  return rows[0].id
+  const { grantId } = await issueGrant(pool, { dropId, walletAddress, kind: 'passphrase' })
+  return grantId
 }
 
 // `idemKey` is annotated rather than inferred: `randomUUID()` returns the
@@ -303,6 +310,18 @@ describe.skipIf(!hasDb)('gated claim reservation (real Postgres)', () => {
     await attachGate(dropId)
     const wallet = newWallet()
     const grantId = await grantTo(dropId, wallet.address)
+
+    // The two columns hold DIFFERENT spellings of one address, and the claim
+    // path bridges them. Asserted here so nobody removes the bridge as tidying:
+    // without it every gated claim is refused `gate_required` — condition
+    // satisfied, money unreachable — and no other test in this suite would say so
+    // once both sides happened to agree.
+    const { rows: spelling } = await pool.query<{ wallet_address: string }>(
+      'SELECT wallet_address FROM gate_grants WHERE id = $1',
+      [grantId],
+    )
+    expect(wallet.address).toContain(' ')
+    expect(spelling[0].wallet_address).toBe(wallet.address.replace(/\s/g, ''))
 
     const result = await claim(publicId, wallet)
     expect(result.state).toBe('reserved')

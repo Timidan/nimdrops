@@ -17,6 +17,7 @@
  * selection salt and the attester keys into the money path. A kind importing
  * back from `services/` would turn the one-way arrow into a cycle.
  */
+import { normaliseNimiqAddress } from '../nimiq-address'
 
 /** The conditions a drop can carry. Mirrors `drop_gates_kind_allowed`. */
 export type GateKind = 'trivia' | 'passphrase' | 'attested'
@@ -63,6 +64,8 @@ export type GateRejectionCode =
   /** A third-party attestation that does not verify, or does not apply here. */
   | 'bad_attestation'
   | 'attestation_replayed'
+  /** The wallet address given is not a valid Nimiq address. */
+  | 'bad_address'
 
 export class GateError extends Error {}
 
@@ -89,6 +92,33 @@ export interface GateRow {
    */
   config: Record<string, unknown>
   dropState: string
+}
+
+/**
+ * The one spelling of a wallet address, or a rejection.
+ *
+ * EVERY kind calls this on the way in, before the address reaches a lock key, a
+ * lookup, an insert or a grant. The HTTP layer already normalises, and this is
+ * not redundant with it: the boundary is where the rule is currently obeyed, and
+ * this is where it is enforced. A spike script, an operator tool or a route added
+ * later reaches the same functions without passing through `requireWalletAddress`
+ * in `http/app.ts`, and every one of those callers would otherwise be one paste
+ * away from splitting a wallet in two.
+ *
+ * Splitting a wallet in two is not cosmetic. `NQ07 ABCD…`, `nq07abcd…` and
+ * `NQ07ABCD…` are one wallet and three strings, so they are three `gate_grants`
+ * rows on a one-grant-per-wallet gate, three separate `passphrase_attempts`
+ * budgets against a cap of five, and three disjoint `trivia_seen` sets. Two of
+ * the three are also grants `reserveClaim` can never match, because it compares
+ * against an address DERIVED from a verified signature — which has exactly one
+ * spelling.
+ */
+export function requireGateWallet(raw: string): string {
+  const address = normaliseNimiqAddress(raw)
+  if (address === null) {
+    throw new GateRejectedError('bad_address', 'that is not a valid Nimiq address')
+  }
+  return address
 }
 
 /**

@@ -241,8 +241,22 @@ export interface ReviewedQuestion {
   options: string[]
   /** What the player chose; `null` if the deadline passed with no submission. */
   answerIndex: number | null
-  correctIndex: number
+  /**
+   * The right option, or `null` when the server withheld it.
+   *
+   * Withheld is the NORMAL case for a question the operator wrote themselves:
+   * the server names the right option only for questions whose answers are
+   * already published elsewhere. A screen must render both cases — "not correct"
+   * without naming an answer is a complete outcome, not a missing field.
+   */
+  correctIndex: number | null
   wasCorrect: boolean
+  /**
+   * The answer arrived after its deadline, so it was scored wrong whatever it
+   * said. Distinct from `answerIndex === null`, which means nothing was
+   * submitted at all — a late answer HAS an index, and it can be the right one.
+   */
+  wasLate: boolean
 }
 
 /**
@@ -250,10 +264,8 @@ export interface ReviewedQuestion {
  *
  * `state` is the only correctness signal WHILE A QUESTION IS STILL IN PLAY:
  * there is no per-question feedback mid-session, and `review` is absent until
- * the session is over. Once it is over the server sends the whole set back,
- * which is safe only because a wallet never meets a question twice — see
- * `trivia_seen` and `selectQuestionIds` on the server. So a client must never
- * treat `review` as optional-but-expected mid-play: absent means absent.
+ * the session is over. So a client must never treat `review` as
+ * optional-but-expected mid-play: absent means absent.
  */
 export interface TriviaOutcome {
   state: 'in_progress' | 'passed' | 'failed'

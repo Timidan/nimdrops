@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { isValidNimiqAddress, normaliseNimiqAddress } from '../src/nimiq-address'
+import { testAddress } from './fixtures/address'
 
 /**
  * Every Nimiq address written down in this repository.
@@ -198,5 +199,38 @@ describe('normaliseNimiqAddress', () => {
     // One character off a real address, same class, so the checksum is the only
     // thing standing between this and acceptance.
     expect(normaliseNimiqAddress('NQ56 039X 60U7 RJXX 8SFG NGQH VLBL VJS3 BSE5')).toBeNull()
+  })
+})
+
+describe('testAddress, the fixture the other suites are built on', () => {
+  /**
+   * Every DB suite now mints its wallets with this, so a bug here would make all
+   * of them pass against addresses the product would reject. Checked against the
+   * real validator, which the fixture deliberately does not call.
+   */
+  it('mints addresses the validator accepts, spelling the label', () => {
+    for (const label of ['PLAYER', 'ALICE', 'BOB', 'A', 'CLAIMANT SECRET', '0']) {
+      const address = testAddress(label)
+      expect(isValidNimiqAddress(address), `${label} -> ${address}`).toBe(true)
+      // Already in the one spelling, so a fixture never has to be normalised
+      // before being compared with a value that came back out of the database.
+      expect(normaliseNimiqAddress(address)).toBe(address)
+      // The label survives minus anything outside Nimiq's alphabet — `ALICE`
+      // reads as `ALCE`, because `I` is one of the four confusable characters
+      // the alphabet omits. Still readable in a failure message, which is the
+      // only thing the label is for.
+      expect(address).toContain([...label].filter((c) => ALPHABET.includes(c)).join(''))
+    }
+  })
+
+  it('gives different labels different addresses', () => {
+    expect(new Set(['ALICE', 'BOB', 'CAROL'].map(testAddress)).size).toBe(3)
+  })
+
+  it('refuses a label it cannot spell, rather than quietly truncating', () => {
+    // Silent truncation would make two long labels one wallet, and the suite that
+    // tripped over it would be testing something it did not mean to.
+    expect(() => testAddress('!!!')).toThrow()
+    expect(() => testAddress('A'.repeat(33))).toThrow()
   })
 })

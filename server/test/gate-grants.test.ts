@@ -1,5 +1,6 @@
 import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { testAddress } from './fixtures/address'
 import { migrate } from '../src/db/migrate'
 import { issueGrant } from '../src/gates/grants'
 // Side-effect import: installs the int8-as-string parser so BIGINT luna never
@@ -15,7 +16,7 @@ const hasDb = Boolean(process.env.DATABASE_URL)
  */
 const SCHEMA = 'gate_grants_test'
 
-const WALLET = 'NQ07 WALLET'
+const WALLET = testAddress('WALLET')
 
 describe.skipIf(!hasDb)('issueGrant', () => {
   let pool: pg.Pool
@@ -99,8 +100,8 @@ describe.skipIf(!hasDb)('issueGrant', () => {
   })
 
   it('keeps wallets independent on one drop', async () => {
-    await grant('NQ07 ALICE')
-    await grant('NQ07 BOB')
+    await grant(testAddress('ALICE'))
+    await grant(testAddress('BOB'))
     expect(await countGrants()).toBe('2')
   })
 

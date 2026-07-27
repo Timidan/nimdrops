@@ -38,11 +38,15 @@ function streamValue(salt: string, label: string): number {
  * @param exclude question ids this wallet has already been shown, from
  *   `trivia_seen`. Nothing in it can be selected again.
  *
- *   This is what lets a finished session REVEAL its answers. The two rules only
- *   work as a pair: a wallet never meets a question twice, so knowing its answer
- *   is worth nothing to that wallet, and therefore the answers can be shown.
+ *   This is a REPETITION rule, and only that: a wallet never sees the same
+ *   question twice, so a player is not asked what they were asked yesterday.
  *
- *   It also replaces the old bound rather than adding to it. Selection used to be
+ *   It was also once offered as the reason a finished session may reveal its
+ *   answers, and it is not. Sessions need no signature, so an attacker harvests
+ *   under addresses that will never claim, and their seen-sets constrain nothing
+ *   the claiming wallet does. What governs the reveal is `Question.disclosable`.
+ *
+ *   It does replace the old bound rather than adding to it. Selection used to be
  *   deterministic per (drop, wallet), so a retry served the identical set and a
  *   failure leaked one bit — brute force was 4^5 = 1024 attempts. Under a reveal
  *   that would collapse to about four: test one option across all five questions,

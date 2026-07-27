@@ -17,7 +17,7 @@
  *    worthless to whoever issued it.
  */
 import type { Queryable } from '../db/pool'
-import type { GateKind } from './types'
+import { type GateKind, requireGateWallet } from './types'
 
 export interface IssuedGrant {
   grantId: string
@@ -43,12 +43,20 @@ export async function issueGrant(
   db: Queryable,
   o: { dropId: string; walletAddress: string; kind: GateKind },
 ): Promise<IssuedGrant> {
+  // The last checkpoint, and the reason it is here rather than only in the kinds:
+  // this is the choke point every kind already funnels through, so a kind added
+  // later cannot store an address in a spelling of its own by forgetting a call.
+  // `UNIQUE (drop_id, wallet_address)` is what makes one grant per wallet true,
+  // and a unique index on a text column is only a rule about a WALLET when one
+  // wallet is one string.
+  const walletAddress = requireGateWallet(o.walletAddress)
+
   const { rows: inserted } = await db.query<{ id: string }>(
     `INSERT INTO gate_grants (drop_id, wallet_address, kind)
      VALUES ($1, $2, $3)
      ON CONFLICT (drop_id, wallet_address) DO NOTHING
      RETURNING id`,
-    [o.dropId, o.walletAddress, o.kind],
+    [o.dropId, walletAddress, o.kind],
   )
   if (inserted[0]) return { grantId: inserted[0].id, fresh: true }
 
@@ -57,7 +65,7 @@ export async function issueGrant(
   // kind got there first.
   const { rows: existing } = await db.query<{ id: string }>(
     'SELECT id FROM gate_grants WHERE drop_id = $1 AND wallet_address = $2',
-    [o.dropId, o.walletAddress],
+    [o.dropId, walletAddress],
   )
   const row = existing[0]
   if (!row) {

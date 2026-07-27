@@ -687,6 +687,13 @@ function convert(item: RawItem, ctx: ConvertContext): { question: Question } | {
       options: shuffled as [string, string, string, string],
       answerIndex: answerIndex as 0 | 1 | 2 | 3,
       source: SOURCE,
+      // Every question here comes from a public API whose answers anyone can
+      // download, so echoing one back in a finished session's review discloses
+      // nothing that was not already downloadable. This is the ONLY importer
+      // entitled to set the flag, and it is set from the source rather than
+      // configured — see `Question.disclosable`. A hand-written question added to
+      // a bank later must decide for itself, and defaults to withholding.
+      disclosable: true,
     },
   }
 }

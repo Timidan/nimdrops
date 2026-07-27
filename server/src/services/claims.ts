@@ -18,6 +18,10 @@ import type { Queryable } from '../db/pool'
 import { ConflictError, bindIdem, idemKeyHash, lookupIdem } from '../http/idempotency'
 import { statusToken, hashToken } from '../ids'
 import { formatNim } from '../money'
+// Dependency-free and NOT from `gates/`: the one-way arrow in `gates/types.ts`
+// says the money path imports no kind, and this is a 36-character checksum, not
+// a kind.
+import { normaliseNimiqAddress } from '../nimiq-address'
 import type { AlertKind } from './alerts'
 import { DropNotFoundError } from './drops'
 import { assertSolvent, lockControls } from './solvency'
@@ -514,11 +518,27 @@ export async function reserveClaim(pool: Pool, o: ReserveClaimInput): Promise<Cl
     )
     let grantId: string | null = null
     if (gate.length > 0) {
+      // Compared in the spelling `gate_grants` stores, which is the compact one.
+      //
+      // The two columns genuinely hold different spellings of the same address,
+      // and that is a decision rather than an oversight. `recipient` comes from
+      // `addressFromPublicKey`, which returns the grouped form a wallet displays
+      // — and `claims.recipient_address` keeps it, because it is what a person
+      // reads off a receipt and because changing it would restate every row this
+      // system has already written. Grants are canonicalised on the way in
+      // instead, since a grant's address arrives from a CLIENT and can be spelled
+      // any of several ways, while a derived one cannot.
+      //
+      // This line is the only place the two meet, so it is the only place that
+      // has to bridge them. Comparing the raw `recipient` against a canonical
+      // grant matches nothing, and every gated claim is refused with
+      // `gate_required` — the condition satisfied, the money unreachable.
+      const canonicalRecipient = normaliseNimiqAddress(recipient) ?? recipient
       const { rows: held } = await client.query<{ id: string }>(
         `SELECT id FROM gate_grants
          WHERE drop_id = $1 AND wallet_address = $2 AND consumed_claim_id IS NULL
          FOR UPDATE`,
-        [drop.id, recipient],
+        [drop.id, canonicalRecipient],
       )
       if (!held[0]) {
         throw new ClaimRejectedError(

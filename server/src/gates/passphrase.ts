@@ -16,7 +16,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import type { Pool } from 'pg'
 import { issueGrant } from './grants'
-import { type GateRow, GateRejectedError, assertGameLive } from './types'
+import { type GateRow, GateRejectedError, assertGameLive, requireGateWallet } from './types'
 
 /** Wrong guesses allowed per address per drop before an hour's refusal. */
 export const MAX_ATTEMPTS = 5
@@ -90,13 +90,20 @@ export async function submitPassphrase(
 
   const config = parsePassphraseConfig(o.gate.config)
 
+  // Canonicalised once, here, and used for every lock, count, insert and grant
+  // below. The cap is five attempts per wallet per hour, and it is only a cap on
+  // a WALLET if one wallet is one string — otherwise a caller re-spells its own
+  // address and buys another five guesses without touching the lock the fix in
+  // this file installed.
+  const walletAddress = requireGateWallet(o.walletAddress)
+
   // Already granted: return success rather than spending an attempt. A player
   // who taps twice, or whose page re-posts, has done nothing wrong — and this
   // check sits ahead of the cap so earlier wrong guesses cannot lock a wallet
   // out of an answer it has already been credited for.
   const { rows: held } = await pool.query<{ id: string }>(
     'SELECT id FROM gate_grants WHERE drop_id = $1 AND wallet_address = $2',
-    [o.gate.dropId, o.walletAddress],
+    [o.gate.dropId, walletAddress],
   )
   if (held[0]) return { granted: true }
 
@@ -118,7 +125,7 @@ export async function submitPassphrase(
   try {
     await client.query('BEGIN')
     await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
-      `passphrase:${o.gate.dropId}:${o.walletAddress}`,
+      `passphrase:${o.gate.dropId}:${walletAddress}`,
     ])
 
     const { rows: recent } = await client.query<{ attempts: number }>(
@@ -126,7 +133,7 @@ export async function submitPassphrase(
        FROM passphrase_attempts
        WHERE drop_id = $1 AND wallet_address = $2
          AND attempted_at > now() - make_interval(mins => $3::int)`,
-      [o.gate.dropId, o.walletAddress, ATTEMPT_WINDOW_MINUTES],
+      [o.gate.dropId, walletAddress, ATTEMPT_WINDOW_MINUTES],
     )
     if (recent[0].attempts >= MAX_ATTEMPTS) {
       await client.query('COMMIT')
@@ -142,7 +149,7 @@ export async function submitPassphrase(
       // rather than the count that let this one through.
       await client.query(
         'INSERT INTO passphrase_attempts (drop_id, wallet_address) VALUES ($1, $2)',
-        [o.gate.dropId, o.walletAddress],
+        [o.gate.dropId, walletAddress],
       )
       await client.query('COMMIT')
       committed = true
@@ -151,7 +158,7 @@ export async function submitPassphrase(
 
     await issueGrant(client, {
       dropId: o.gate.dropId,
-      walletAddress: o.walletAddress,
+      walletAddress,
       kind: 'passphrase',
     })
     await client.query('COMMIT')

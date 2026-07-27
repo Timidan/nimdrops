@@ -81,8 +81,42 @@ describe('buildAttestationMessage / parseAttestationMessage', () => {
     ])
   })
 
-  it('round-trips', () => {
-    expect(parseAttestationMessage(buildAttestationMessage(CANONICAL))).toEqual(CANONICAL)
+  it('round-trips every field, canonicalising the wallet', () => {
+    // Not an exact round-trip, deliberately. `CANONICAL.wallet` is spaced the way
+    // a wallet DISPLAYS an address, and parsing returns the one spelling the rest
+    // of the system stores. The signature covers the bytes the attester sent
+    // either way, so the only thing this changes is that an integrator may paste
+    // the address as they see it.
+    expect(parseAttestationMessage(buildAttestationMessage(CANONICAL))).toEqual({
+      ...CANONICAL,
+      wallet: CANONICAL.wallet.replace(/\s/g, ''),
+    })
+  })
+
+  it('canonicalises a lowercased or compacted wallet to one spelling', () => {
+    const compact = CANONICAL.wallet.replace(/\s/g, '')
+    for (const spelling of [compact, compact.toLowerCase(), CANONICAL.wallet]) {
+      expect(parseAttestationMessage(lines({ wallet: spelling }).join('\n')).wallet).toBe(compact)
+    }
+  })
+
+  it('refuses a wallet that is not an address a wallet could hold', () => {
+    // This field alone decides who the grant names, and nothing downstream can
+    // second-guess it: `reserveClaim` matches the grant against an address derived
+    // from a verified signature, so a grant naming `hello` is unclaimable by
+    // anyone, forever. It is the attester's mistake, so it reads as one.
+    const junk = [
+      'hello',
+      '',
+      'NQ07',
+      // Right shape, wrong check digits.
+      `NQ99${'0'.repeat(32)}`,
+      // Right length and check digits, but `I` is not in Nimiq's alphabet.
+      `NQ07${'0'.repeat(31)}I`,
+    ]
+    for (const wallet of junk) {
+      expect(() => parseAttestationMessage(lines({ wallet }).join('\n'))).toThrow(GateRejectedError)
+    }
   })
 
   it('refuses a missing line', () => {
@@ -188,7 +222,17 @@ describe.skipIf(!hasDb)('submitAttestation', () => {
   let pool: pg.Pool
   let publicId: string
   let attester: KeyPair
+  /** The spelling an attester writes: how a wallet DISPLAYS the address. */
   let beneficiary: string
+  /**
+   * The spelling the system stores and returns.
+   *
+   * `parseAttestationMessage` canonicalises, so an attester may paste the address
+   * as they see it and every grant, lookup and result still names one string. The
+   * two constants are kept apart here on purpose: asserting against `beneficiary`
+   * would pass whether or not that canonicalisation happens.
+   */
+  let stored: string
 
   beforeAll(async () => {
     const admin = new pg.Pool({ connectionString: process.env.DATABASE_URL })
@@ -241,6 +285,7 @@ describe.skipIf(!hasDb)('submitAttestation', () => {
     }
     attester = KeyPair.generate()
     beneficiary = KeyPair.generate().publicKey.toAddress().toUserFriendlyAddress()
+    stored = beneficiary.replace(/\s/g, '')
     publicId = await gatedDrop()
   })
 
@@ -286,12 +331,12 @@ describe.skipIf(!hasDb)('submitAttestation', () => {
 
   it('grants to the wallet named in the attestation', async () => {
     await expect(submit(attestation())).resolves.toMatchObject({ granted: true,
-      walletAddress: beneficiary,
+      walletAddress: stored,
     })
     const { rows } = await pool.query<{ wallet_address: string; kind: string }>(
       'SELECT wallet_address, kind FROM gate_grants',
     )
-    expect(rows[0].wallet_address).toBe(beneficiary)
+    expect(rows[0].wallet_address).toBe(stored)
     expect(rows[0].kind).toBe('attested')
   })
 
@@ -304,12 +349,12 @@ describe.skipIf(!hasDb)('submitAttestation', () => {
     const gate = await loadGate(pool, publicId)
     await expect(
       submitAttestation(pool, { gate, message, signatureHex: sign(message) }),
-    ).resolves.toMatchObject({ walletAddress: beneficiary })
+    ).resolves.toMatchObject({ walletAddress: stored })
     // A different wallet in the signed message moves the money, and nothing else
     // can: an attacker who re-signs with their own key is refused above.
     const other = KeyPair.generate().publicKey.toAddress().toUserFriendlyAddress()
     await expect(submit(attestation({ wallet: other }))).resolves.toMatchObject({
-      walletAddress: other,
+      walletAddress: other.replace(/\s/g, ''),
     })
   })
 
@@ -345,7 +390,7 @@ describe.skipIf(!hasDb)('submitAttestation', () => {
     const message = attestation()
     await expect(submit(message, signLikeNimiqPay(message))).resolves.toMatchObject({
       granted: true,
-      walletAddress: beneficiary,
+      walletAddress: stored,
     })
     const plain = attestation()
     await expect(submit(plain, sign(plain))).rejects.toMatchObject({ code: 'bad_attestation' })
@@ -508,7 +553,7 @@ describe.skipIf(!hasDb)('submitAttestation', () => {
     // A second, freshly-nonced attestation for the same wallet must not error
     // and must not create a second grant.
     await submit(attestation())
-    await expect(submit(attestation())).resolves.toMatchObject({ walletAddress: beneficiary })
+    await expect(submit(attestation())).resolves.toMatchObject({ walletAddress: stored })
     expect(await countGrants()).toBe('1')
     expect(await countNonces()).toBe('2')
   })

@@ -320,7 +320,18 @@ function ReviewRow({ question }: { question: ReviewedQuestion }) {
    */
   const outOfTime = question.answerIndex === null
   const chosen = question.answerIndex === null ? undefined : question.options[question.answerIndex]
-  const correct = question.options[question.correctIndex]
+  // `null` means the server withheld it, and that is routine rather than an
+  // error — see `ReviewedQuestion.correctIndex`. Indexing an array with `null`
+  // would have quietly produced `options[0]` and named the FIRST option as the
+  // right one, which is worse than saying nothing.
+  const correct = question.correctIndex === null ? undefined : question.options[question.correctIndex]
+  /**
+   * Answered, in time to be shown on screen, and still scored wrong for arriving
+   * late. Without this the player who picked the right option one second over is
+   * shown their own correct answer labelled "Not correct", which reads as a bug
+   * in the scoring rather than as the clock running out.
+   */
+  const late = !outOfTime && question.wasLate
 
   /**
    * The server's verdict, never a comparison of the two indices. A late answer
@@ -328,8 +339,14 @@ function ReviewRow({ question }: { question: ReviewedQuestion }) {
    * can agree while `wasCorrect` is false — and the scoring is what decided the
    * outcome of this session.
    */
-  const label = outOfTime ? 'Ran out of time' : question.wasCorrect ? 'Correct' : 'Not correct'
-  const mark = outOfTime ? '–' : question.wasCorrect ? '✓' : '✕'
+  const label = outOfTime
+    ? 'Ran out of time'
+    : late
+      ? 'Too late'
+      : question.wasCorrect
+        ? 'Correct'
+        : 'Not correct'
+  const mark = outOfTime || late ? '–' : question.wasCorrect ? '✓' : '✕'
 
   return (
     <li data-testid={`review-${question.questionIndex}`}>
@@ -362,6 +379,7 @@ function ReviewRow({ question }: { question: ReviewedQuestion }) {
       ) : chosen === undefined ? null : (
         <p className="mt-2 text-sm leading-relaxed text-ink/65">
           You chose <span className="font-medium text-ink">{chosen}</span>
+          {late ? ', but the clock had already run out' : null}
         </p>
       )}
 

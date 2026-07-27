@@ -24,6 +24,7 @@ import { createHash } from 'node:crypto'
 import type { Pool } from 'pg'
 import { checkWalletSignature } from '../auth/verify'
 import { requireNetwork, requireSigScheme } from '../config'
+import { normaliseNimiqAddress } from '../nimiq-address'
 import { issueGrant } from './grants'
 import { assertGameLive, GateRejectedError, type GateRow } from './types'
 
@@ -134,11 +135,22 @@ export function parseAttestationMessage(message: string): Attestation {
   if (!ISSUED_AT_PATTERN.test(values.issuedAt)) bad('issuedAt must be unix seconds')
   if (!NONCE_PATTERN.test(values.nonce)) bad('nonce must be 32 lowercase hex characters')
 
+  // The beneficiary must be an address a wallet can actually hold, and it is
+  // returned in ONE spelling. Neither was checked here, and both matter: this
+  // field is the only thing that decides who a grant names, so `wallet=hello`
+  // signed by a correctly configured attester used to write a grant nothing could
+  // ever claim, and a spaced or lowercased spelling of a real address wrote one
+  // `reserveClaim` could never match. The signature covers the bytes the attester
+  // sent, so canonicalising afterwards changes nothing about verification — it
+  // only means an integrator may paste an address the way a wallet displays it.
+  const wallet = normaliseNimiqAddress(values.wallet)
+  if (wallet === null) bad('wallet is not a valid Nimiq address')
+
   return {
     network: values.network,
     origin: values.origin,
     drop: values.drop,
-    wallet: values.wallet,
+    wallet,
     issuedAt: Number(values.issuedAt),
     nonce: values.nonce,
   }
