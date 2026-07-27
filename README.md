@@ -25,7 +25,7 @@ Read this before funding anything.
 
 ## Current status
 
-NimDrops is live on Nimiq mainnet at [nimdrops.timidan.xyz](https://nimdrops.timidan.xyz). Drop size and headcount are uncapped; the deployment still runs one drop at a time. Being exact about what is proven matters more here than sounding finished.
+NimDrops is deployed on Nimiq mainnet at [nimdrops.timidan.xyz](https://nimdrops.timidan.xyz). The public pilot is capped at 2 NIM and one live drop. As checked on 27 July, the worker is healthy but funding is paused and the existing live drop uses all available capacity. The site is reachable; it is not yet judge-ready.
 
 **Proven.** The end-to-end settlement gate passed on the intended judging deployment (docker compose: Postgres + API + one worker) against TestAlbatross, run `s3_20260726040800` on 2026-07-26. Full evidence: [`docs/evidence/g1-vps-s3_20260726040800.md`](./docs/evidence/g1-vps-s3_20260726040800.md). In one 361.6-second run, through the shipped service functions rather than a re-implementation:
 
@@ -42,10 +42,10 @@ Exactly one thing in that run is forced: `expires_at` is set one second into the
 
 **Not proven, and not claimed.**
 
-- **No mainnet run has happened.** Every transaction above is TestAlbatross. The mainnet spike is blocked on operator provisioning (mainnet custody key generated on the host, mainnet NIM). Three things must be re-measured, not assumed, before mainnet: whether a 0-luna fee is still accepted, the finality wall-clock, and consensus establishment time from the deployment host. **Do not read this README as a claim of mainnet readiness.**
+- **The complete mainnet product path has not been proven on real devices.** The public API is bound to MainAlbatross and its worker is healthy, but there is no recorded sponsor funding → external recipient claim → payout → refund run through Nimiq Pay. The finality wall-clock and cold-open behavior still need to be measured on that run. **Do not read deployment health as a claim of release readiness.**
 - **No real Nimiq Pay device signature fixture exists yet.** `SIG_SCHEME` is now set from Nimiq's own published format — a wallet signs `sha256('\x16Nimiq Signed Message:\n' + message.length + message)`, so `nimiq-signed-message` is the value, and `server/test/fixtures/device-sign.json` locks it. That fixture is **source-derived, not device-captured**: it is generated from the documented format with a throwaway key, so it proves the server verifies what the format says, not that Nimiq Pay obeys the format. A capture from a real phone is still owed. The exact return shape of `sendBasicTransactionWithData` (hash, or serialized transaction from which the hash must be derived) is likewise still to be settled on device; the bridge passes the provider's string through unchanged and logs the raw value.
-- **TLS and a public hostname are not configured.** `Caddyfile` still names `drops.example.com`; no DNS name has been provided, so the stack currently listens only on the docker network.
-- **The Day-0 (G0) mainnet gate and the real-device release matrix in [`docs/HACKATHON.md`](./docs/HACKATHON.md) are open**, as is the final adversarial code review of the settlement gate.
+- **TLS and the public hostname work, but the external-channel path is unproven.** A clean device still has to open a real chat preview into Nimiq Pay and complete the claim without developer intervention.
+- **The real-device release matrix in [`docs/HACKATHON.md`](./docs/HACKATHON.md) is open.** Funding must stay paused until the current liability settles and the operator deliberately restores capacity.
 - **The deposit reconciliation report enumerates only against a test double.** See [Security and threat boundary](#security-and-threat-boundary).
 
 ---
