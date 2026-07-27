@@ -1,29 +1,3 @@
-/* ===========================================================================
- * The open-in-app gate
- * ===========================================================================
- *
- * Lives beside its component rather than in `index.css`, for two reasons. The
- * sealed gate's block in `index.css` is being rewritten by another process and
- * this must not collide with it; and nothing here is a shared primitive — every
- * rule below belongs to one component, whereas `index.css` is the design
- * system's own file.
- *
- * Two constraints it inherits from that system and keeps:
- *
- *  - **Nothing is blurred.** Exactly one element in the tree is ever a
- *    `backdrop-filter` surface and it is `GlassSheet`. Every plate here is a
- *    RECESS: light subtracted from the field, not another pane of glass.
- *  - **Secondary text never sits unprotected on the field.** A vermilion bloom
- *    bright enough to read as a light source cannot carry 64%-alpha ink. Copy
- *    that sits on the bare field here is full-strength near-white and does its
- *    de-emphasis with weight; muted ink appears only inside a recess.
- *
- * Nothing on this screen starts hidden and nothing waits for a transition. With
- * animation switched off entirely the gate renders complete, which is the same
- * rule the claim surface is held to and matters for the same reason: this is the
- * only screen a stranded visitor gets.
- */
-
 .nd-openin {
   display: flex;
   flex: 1;
@@ -34,14 +8,6 @@
   padding: 1.5rem var(--nd-gutter) 2rem;
 }
 
-/**
- * One column, and it stays a column at every width.
- *
- * A desktop is not given a two-up composition here on purpose. This screen
- * exists because the device cannot complete the transaction; spreading it into
- * a poster would dress up a dead end as a destination. It centres, it keeps its
- * measure, and it points at the phone.
- */
 .nd-openin-col {
   width: 100%;
   max-width: 24rem;
@@ -57,7 +23,6 @@
   text-wrap: balance;
 }
 
-/* Full strength, weight-de-emphasised: see the header note. */
 .nd-openin-lede {
   margin: 0.625rem 0 0;
   font-size: 0.9375rem;
@@ -85,8 +50,6 @@
   color: var(--nd-on-surface);
   text-align: center;
 }
-
-/* ---- the QR, and the link that replaces it ------------------------------- */
 
 .nd-openin-qr {
   margin-top: 1rem;
@@ -131,14 +94,11 @@
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.8125rem;
   color: var(--nd-on-surface);
-  /* Read one character at a time, so it breaks anywhere rather than pushing the
-     page sideways, and it stays selectable. */
   overflow-wrap: anywhere;
   user-select: text;
   -webkit-user-select: text;
 }
 
-/* ---- get the app --------------------------------------------------------- */
 .nd-getapp {
   margin-top: 1rem;
 }
@@ -189,8 +149,6 @@
   color: var(--nd-on-surface);
   font-weight: 500;
 }
-
-/* ---- inside the claim screen's sealed gate ------------------------------- */
 
 .nd-gate-getapp {
   width: 100%;

@@ -856,12 +856,6 @@ function DropOneBack({ amount }: { amount: string }) {
   )
 }
 
-/**
- * The claimant reached the claim screen and then turned out to have no wallet
- * to sign with — the bridge answered `unavailable` at claim time rather than at
- * boot. Landing here fresh gets the full-screen sealed envelope instead; this
- * is the mid-session fallback, so it is short and it is a deep link.
- */
 function NoWallet() {
   const here = typeof window === 'undefined' ? '' : window.location.href
   return (
@@ -873,28 +867,11 @@ function NoWallet() {
         Open in Nimiq Pay
       </a>
       <p className="nd-note mt-2.5 text-center">Claiming needs your own wallet to sign.</p>
-      {/* And if there is no wallet to open, the deep link above does nothing at
-          all — silently. This is the same block the sealed gate carries. */}
       <GetNimiqPay />
     </div>
   )
 }
 
-/**
- * The two circular affordances on the rail.
- *
- * While a funded share remains, both buttons pass on this drop: every recipient
- * can recruit the next wallet without first becoming a sponsor. Once the drop
- * is closed or empty, Share recommends the product instead of sending a dead
- * claim link. Copy remains literal and always copies the current drop.
- *
- * `text` matters as much as the URL. WhatsApp routinely drops `title` and shows
- * a bare link, so the product's one-line description travels in the message
- * body or not at all.
- *
- * Both report back in a live region rather than by changing their own label: an
- * icon button has no label to change, and "copied" has to be announced.
- */
 function CopyLinkButton({ publicId }: { publicId: string }) {
   const [copied, setCopied] = useState(false)
   return (

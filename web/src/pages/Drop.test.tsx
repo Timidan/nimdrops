@@ -470,7 +470,6 @@ describe('Drop — claiming', () => {
     Object.defineProperty(navigator, 'share', { value: share, configurable: true })
     mount()
 
-    // A 44px circle on the rail: its name is the label, not its text.
     const button = await screen.findByTestId('share-link')
     expect(button.getAttribute('aria-label')).toBe('Share this drop')
     fireEvent.click(button)
@@ -498,8 +497,6 @@ describe('Drop — claiming', () => {
     })
 
     expect(writeText).toHaveBeenCalledWith(`${window.location.origin}/drop/${PUBLIC_ID}`)
-    // Silence after a tap reads as a broken button. An icon button has no
-    // label to change, so it reports into a live region instead.
     await waitFor(() => expect(screen.getByText('Drop link copied')).toBeTruthy())
   })
 

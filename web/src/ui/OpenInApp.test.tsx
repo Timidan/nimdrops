@@ -7,12 +7,6 @@ import OpenInApp, {
   NIMIQ_PAY_GOOGLE_PLAY_URL,
 } from './OpenInApp'
 
-/**
- * The gate exists because a `nimiqpay://` link that nothing handles fails in
- * total silence. Every assertion below is a way of saying the same thing: a
- * visitor arriving on any device must leave this screen with somewhere to go.
- */
-
 afterEach(cleanup)
 
 const DEEP_LINK = 'nimiqpay://miniapp?url=https%3A%2F%2Fnimdrops.example%2Fdrop%2Fabc'
@@ -38,12 +32,6 @@ describe('the way out, on every device', () => {
     expect(screen.getByRole('link', { name: /google play/i })).toBeTruthy()
   })
 
-  /**
-   * THE point of the component. A deep link that fails is indistinguishable
-   * from one that worked — the page simply does not move either way — so there
-   * is nothing to time out on and nothing to detect. The store has to be
-   * readable in the same frame as the button that may do nothing.
-   */
   it('shows the stores on the first paint, behind no timer and no interaction', () => {
     gate()
     const stores = within(screen.getByTestId('get-nimiq-pay')).getAllByRole('link')
@@ -61,14 +49,11 @@ describe('the way out, on every device', () => {
 
     expect(apple).toBe(NIMIQ_PAY_APP_STORE_URL)
     expect(google).toBe(NIMIQ_PAY_GOOGLE_PLAY_URL)
-    // Apple's id-only form redirects to the visitor's own storefront; the
-    // Google listing is the package id. Neither carries a campaign tag.
     expect(apple).toBe('https://apps.apple.com/app/id6471844738')
     expect(google).toBe('https://play.google.com/store/apps/details?id=com.nimiq.pay')
     expect(`${apple}${google}`).not.toMatch(/utm_|referrer|pcampaignid|[?&]ct=/)
   })
 
-  /** Installing must not cost the visitor the drop link they arrived on. */
   it('opens the stores in a new tab, safely', () => {
     gate()
     for (const store of within(screen.getByTestId('get-nimiq-pay')).getAllByRole('link')) {
@@ -91,14 +76,9 @@ describe('the way out, on every device', () => {
 
     expect(screen.queryByRole('img', { name: /qr/i })).toBeNull()
     expect(screen.getByTestId('open-in-app-url').textContent).toContain(URL)
-    // And the stores survive the QR failing.
     expect(screen.getByRole('link', { name: /google play/i })).toBeTruthy()
   })
 
-  /**
-   * Nothing on this screen may be a dead control. It is the LAST screen a
-   * stranded visitor sees, so a disabled button here is the end of the road.
-   */
   it('has no disabled control anywhere on it', () => {
     gate({ qrSrc: '/drop/abc/qr.svg' })
     expect(document.querySelectorAll('[disabled], [aria-disabled="true"]')).toHaveLength(0)
@@ -119,7 +99,6 @@ describe('which store goes first', () => {
     expect(detectPlatform(MAC, 0)).toBe('other')
   })
 
-  /** iPadOS 13+ reports a desktop Safari agent; touch points are the only tell. */
   it('separates an iPad from a Mac by touch points alone', () => {
     expect(detectPlatform(MAC, 5)).toBe('ios')
   })
@@ -162,11 +141,6 @@ describe('which store goes first', () => {
     for (const src of sources) expect(src).not.toMatch(/^https?:/)
   })
 
-  /**
-   * Being wrong about the platform must cost a glance, never a path. A desktop
-   * marks neither store, because the browser cannot know which phone the reader
-   * owns — and every option stays reachable on every device regardless.
-   */
   it('marks neither store when it cannot tell, and keeps both reachable', () => {
     render(<GetNimiqPay platform="other" />)
     const links = within(screen.getByTestId('get-nimiq-pay')).getAllByRole('link')
