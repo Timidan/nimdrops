@@ -1,12 +1,15 @@
 import type { Pool, PoolClient } from 'pg'
+import { withChainDeadline } from '../chain/deadline'
 import { MEMO_MAX_BYTES, type ChainClient } from '../chain/types'
 import { errorMessage, validityWindowBlocks } from '../config'
 import type { Queryable } from '../db/pool'
 import { logInfo, logWarn } from '../http/redact'
 import type { AlertKind, Alerts } from './alerts'
 import {
+  type Controls,
   PausedError,
   SolvencyError,
+  type SolvencyFeeOptions,
   StaleReconciliationError,
   assertSolvent,
   lockControls,
@@ -77,10 +80,38 @@ if (Buffer.byteLength(CLAIM_MEMO, 'utf8') > MEMO_MAX_BYTES) {
 export interface WindowOptions {
   /** @internal test-only override; production reads the floored config. */
   windowBlocks?: number
+  /**
+   * @internal TEST-ONLY override of {@link CHAIN_CALL_TIMEOUT_MS}.
+   *
+   * Same seam, same reasoning: production callers never pass it, so a
+   * deployment always runs on the module constant. Tests that need to prove a
+   * hung lookup does not stall the tick pass a few milliseconds here rather
+   * than waiting ten seconds for the real bound.
+   */
+  chainTimeoutMs?: number
+}
+
+/** Options for one worker tick, on top of {@link WindowOptions}. */
+export interface TickOptions extends WindowOptions {
+  /**
+   * @internal TEST-ONLY override of {@link ATTEMPT_SCAN_BUDGET_MS}.
+   */
+  scanBudgetMs?: number
+  /**
+   * @internal TEST-ONLY override of {@link ATTEMPT_SCAN_LIMIT}.
+   */
+  scanLimit?: number
 }
 
 function windowOf(opts?: WindowOptions): number {
   return opts?.windowBlocks ?? validityWindowBlocks()
+}
+
+/** Run one chain call under the money engine's deadline. See `chain/deadline.ts`. */
+function chainCall<T>(label: string, opts: WindowOptions | undefined, call: () => Promise<T>): Promise<T> {
+  return opts?.chainTimeoutMs === undefined
+    ? withChainDeadline(label, call)
+    : withChainDeadline(label, call, opts.chainTimeoutMs)
 }
 
 /**
@@ -131,6 +162,44 @@ export const UNRESOLVED_BUDGET_MS = 15 * 60_000
  * cost stays proportional to recent activity rather than to all history.
  */
 export const PROVEN_DEAD_RESCAN_GRACE_BLOCKS = 7_200
+
+/**
+ * How much of one tick may be spent polling open attempts, and how many may be
+ * loaded to poll.
+ *
+ * Both exist because the tick is GLOBAL. `runWorkerTick` materialises every open
+ * attempt and polls them one at a time, and only when that scan finishes does it
+ * sign anything — and the same tick carries refunds, expiry, settlement and
+ * every other drop in the deployment. Before the caps came out the number of
+ * open attempts was bounded by 20 claims on one live drop. It is now bounded by
+ * nothing, so one enormous drop mid-settlement could make every tick as long as
+ * its own payout queue and starve everybody else.
+ *
+ * The scan is oldest-first (see {@link loadOpenAttempts}), so what a bound
+ * defers is always the NEWEST unresolved money, and the oldest — which is the
+ * most urgent, and the closest to resolving and leaving the set — is always
+ * serviced. Attempts whose last lookup FAILED sort behind the rest, so a hash
+ * the chain will not answer for cannot hold the front of the queue tick after
+ * tick.
+ *
+ * `ATTEMPT_SCAN_BUDGET_MS` is 10 s = five tick intervals, and is checked before
+ * each attempt rather than interrupting one, so a tick is bounded by the budget
+ * plus at most one chain deadline (`CHAIN_CALL_TIMEOUT_MS`) — about twenty
+ * seconds in the worst case, against unbounded before.
+ *
+ * `ATTEMPT_SCAN_LIMIT` is 250. Steady state is far below it: finality is 64
+ * blocks (~64 s) and the worker signs roughly one payout every two ticks, so
+ * about 32 attempts are open at once even on a large drop. 250 is eight times
+ * that, which means the row cap never binds in normal operation and only
+ * engages after something has already gone wrong — a stalled chain, a long
+ * outage, a mass restart — where refusing to load tens of thousands of rows into
+ * one tick is the point.
+ *
+ * Neither bound applies to `reconcileOnStartup`, which must still resolve EVERY
+ * open attempt before new work is signed (design §8.3).
+ */
+export const ATTEMPT_SCAN_BUDGET_MS = 10_000
+export const ATTEMPT_SCAN_LIMIT = 250
 
 // ---- advisory lock -------------------------------------------------------------
 
@@ -251,6 +320,25 @@ const ATTEMPT_SELECT = `
 
 const OPEN_ATTEMPT_SELECT = `${ATTEMPT_SELECT} WHERE a.state IN ('signed', 'broadcast')`
 
+/**
+ * The order every attempt scan uses, and the reason it is not just `created_at`.
+ *
+ * Oldest first, because the oldest unresolved payment is the most urgent one and
+ * the one nearest to resolving and leaving the set — which is what makes a
+ * bounded scan (see {@link ATTEMPT_SCAN_BUDGET_MS}) fair over time rather than
+ * merely truncated.
+ *
+ * Ahead of that, attempts whose last lookup FAILED sort to the BACK. A hash the
+ * chain cannot answer for — a node that hangs on it, an RPC that errors on it —
+ * is both the least likely to become answerable this tick and, under a scan
+ * budget, the one thing that could hold the front of the queue every tick and
+ * starve everything behind it. Demoting it costs nothing: it is still scanned
+ * whenever the budget reaches it, and any branch that makes progress
+ * (`applyBroadcastMark`, `applyConfirm`) clears `last_error` and restores its
+ * place.
+ */
+const ATTEMPT_SCAN_ORDER = `ORDER BY (a.last_error IS NOT NULL), a.created_at, a.sequence`
+
 function toOpenAttempt(row: OpenAttemptRow): OpenAttempt {
   return {
     attemptId: row.id,
@@ -312,14 +400,25 @@ export async function clearAbsenceSeries(db: Queryable, attemptId: string): Prom
   )
 }
 
-/** Every attempt whose outcome is not yet known. Startup reconciles all of them. */
-export async function loadOpenAttempts(pool: Pool, transferId?: string): Promise<OpenAttempt[]> {
+/**
+ * Every attempt whose outcome is not yet known, in {@link ATTEMPT_SCAN_ORDER}.
+ *
+ * Startup reconciles ALL of them and passes no `limit`, per design §8.3. The
+ * tick passes {@link ATTEMPT_SCAN_LIMIT}, so one enormous drop cannot make a
+ * single tick as long as its own payout queue.
+ */
+export async function loadOpenAttempts(
+  pool: Pool,
+  transferId?: string,
+  limit?: number,
+): Promise<OpenAttempt[]> {
+  const bound = limit === undefined ? '' : ` LIMIT ${Math.max(1, Math.floor(limit))}`
   const { rows } = transferId
     ? await pool.query<OpenAttemptRow>(
-        `${OPEN_ATTEMPT_SELECT} AND a.transfer_id = $1 ORDER BY a.created_at, a.sequence`,
+        `${OPEN_ATTEMPT_SELECT} AND a.transfer_id = $1 ${ATTEMPT_SCAN_ORDER}${bound}`,
         [transferId],
       )
-    : await pool.query<OpenAttemptRow>(`${OPEN_ATTEMPT_SELECT} ORDER BY a.created_at, a.sequence`)
+    : await pool.query<OpenAttemptRow>(`${OPEN_ATTEMPT_SELECT} ${ATTEMPT_SCAN_ORDER}${bound}`)
   return rows.map(toOpenAttempt)
 }
 
@@ -343,12 +442,14 @@ export async function loadRecentProvenDeadAttempts(
   pool: Pool,
   head: number,
   opts?: WindowOptions,
+  limit?: number,
 ): Promise<OpenAttempt[]> {
+  const bound = limit === undefined ? '' : ` LIMIT ${Math.max(1, Math.floor(limit))}`
   const { rows } = await pool.query<OpenAttemptRow>(
     `${ATTEMPT_SELECT}
      WHERE a.state = 'proven_dead'
        AND a.validity_start_height + $1::bigint + $2::bigint >= $3::bigint
-     ORDER BY a.created_at, a.sequence`,
+     ${ATTEMPT_SCAN_ORDER}${bound}`,
     [windowOf(opts).toString(), PROVEN_DEAD_RESCAN_GRACE_BLOCKS.toString(), head.toString()],
   )
   return rows.map(toOpenAttempt)
@@ -394,12 +495,16 @@ export async function evaluateProvenDead(
   headHeight?: number,
   opts?: WindowOptions,
 ): Promise<ProvenDeadEvidence> {
-  const head = headHeight ?? (await chain.headHeight())
+  const head = headHeight ?? (await chainCall('headHeight', opts, () => chain.headHeight()))
   const deadlineHeight = attempt.validityStartHeight + windowOf(opts)
   const windowPast = head > deadlineHeight
 
   try {
-    const tx = await chain.getTransaction(attempt.txHash)
+    // Under a deadline. A lookup that times out lands in the catch below and
+    // becomes `unknown`, never `absent` — which is the whole point: `absent` is
+    // half the proof that authorises spending the same money again, and "the
+    // node did not answer" is not evidence of anything at all.
+    const tx = await chainCall('getTransaction', opts, () => chain.getTransaction(attempt.txHash))
     const absent = tx === null
     return { provenDead: absent && windowPast, absent, windowPast, unknown: false, head, deadlineHeight }
   } catch (err) {
@@ -437,13 +542,56 @@ export async function signAndPersistAttempt(
   intent: TransferIntent,
   validityStartHeight: number,
 ): Promise<StoredAttempt> {
-  const built = await chain.buildSignedBasic({
+  const built = await buildAttempt(chain, intent, validityStartHeight)
+  return persistAttempt(client, intent, built, validityStartHeight)
+}
+
+/** The exact bytes, hash and fee of one attempt. What `buildSignedBasic` returns. */
+export interface BuiltAttempt {
+  rawTxHex: string
+  txHash: string
+  feeLuna: bigint
+}
+
+/**
+ * Construct and sign ONE attempt and nothing else: no database, no network.
+ *
+ * Split out of {@link signAndPersistAttempt} so the outgoing signing path can
+ * learn the transaction's ACTUAL fee before it decides whether it may commit to
+ * paying it. The alternative — asking the chain client what fee it intends to
+ * use — would be a quote about a future call rather than a fact about these
+ * bytes, and a solvency invariant should be checked against the second.
+ *
+ * Building is pure and local. It touches no socket (`NimiqChain.buildSignedBasic`
+ * does not connect; the WASM key derivation and signing are in-process), writes
+ * nothing, and broadcasts nothing. Bytes built and then discarded never existed
+ * anywhere but this process's memory, so a caller that builds and then refuses
+ * has spent nothing and left nothing behind — which is what makes it safe to
+ * decide in this order. Nothing can pay until {@link persistAttempt} commits.
+ */
+export async function buildAttempt(
+  chain: ChainClient,
+  intent: TransferIntent,
+  validityStartHeight: number,
+): Promise<BuiltAttempt> {
+  return chain.buildSignedBasic({
     to: intent.recipientAddress,
     valueLuna: intent.amountLuna,
     dataUtf8: CLAIM_MEMO,
     validityStartHeight,
   })
+}
 
+/**
+ * Persist already-built bytes as a `signed` attempt and move the intent to
+ * `in_progress`. The commit half of {@link signAndPersistAttempt}.
+ */
+export async function persistAttempt(
+  client: PoolClient,
+  intent: TransferIntent,
+  built: BuiltAttempt,
+  validityStartHeight: number,
+): Promise<StoredAttempt> {
   const { rows: seqRows } = await client.query<{ next_sequence: number }>(
     `SELECT COALESCE(MAX(sequence), 0) + 1 AS next_sequence
      FROM transaction_attempts WHERE transfer_id = $1`,
@@ -695,7 +843,7 @@ export async function progressAttempt(
   headHeight?: number,
   opts?: WindowOptions,
 ): Promise<Progress> {
-  const head = headHeight ?? (await chain.headHeight())
+  const head = headHeight ?? (await chainCall('headHeight', opts, () => chain.headHeight()))
 
   const client = await pool.connect()
   let outcome: AttemptOutcome
@@ -755,7 +903,17 @@ async function progressLocked(
 
   let tx
   try {
-    tx = await chain.getTransaction(attempt.txHash)
+    // THE LOOKUP IS BOUNDED, and this is the one that matters most: it is made
+    // with the attempt's row lock held, inside a transaction, once per open
+    // attempt per tick. Without a bound, one node that accepts the request and
+    // never answers holds that row lock and this pool connection open forever,
+    // stops this tick, and — because the tick is global — stops every refund,
+    // expiry, settlement and signature for every other drop with it.
+    //
+    // A timeout arrives here as an ordinary lookup failure. Note what the catch
+    // does NOT do: it records no absence observation. "We could not ask" cannot
+    // become half of a `proven_dead` proof.
+    tx = await chainCall('getTransaction', opts, () => chain.getTransaction(attempt.txHash))
   } catch (err) {
     // "We could not ask." Not absence, not failure — just no information.
     const message = errorMessage(err)
@@ -991,7 +1149,7 @@ export async function reconcileOnStartup(
     const anyDead = await pool.query(`SELECT 1 FROM transaction_attempts WHERE state = 'proven_dead' LIMIT 1`)
     if (anyDead.rows.length === 0) return
   }
-  const head = await chain.headHeight()
+  const head = await chainCall('headHeight', opts, () => chain.headHeight())
   const attempts = [...open, ...(await loadRecentProvenDeadAttempts(pool, head, opts))]
   for (const attempt of attempts) {
     try {
@@ -1020,20 +1178,41 @@ export async function runWorkerTick(
   pool: Pool,
   chain: ChainClient,
   alerts: Alerts,
-  opts?: WindowOptions,
+  opts?: TickOptions,
 ): Promise<'idle' | 'worked'> {
   let worked = false
 
-  const open = await loadOpenAttempts(pool)
+  const scanLimit = opts?.scanLimit ?? ATTEMPT_SCAN_LIMIT
+  const open = await loadOpenAttempts(pool, undefined, scanLimit)
   // S5: recently dead attempts are scanned alongside the open ones. A dead
   // attempt that landed is the one condition under which two payments for the
   // same intent can both be live, so it must be looked for on the same
   // schedule as everything else — not only when a human happens to check.
   const anyDead = await pool.query(`SELECT 1 FROM transaction_attempts WHERE state = 'proven_dead' LIMIT 1`)
   if (open.length > 0 || anyDead.rows.length > 0) {
-    const head = await chain.headHeight()
-    const attempts = [...open, ...(await loadRecentProvenDeadAttempts(pool, head, opts))]
+    const head = await chainCall('headHeight', opts, () => chain.headHeight())
+    const attempts = [
+      ...open,
+      ...(await loadRecentProvenDeadAttempts(pool, head, opts, scanLimit)),
+    ]
+    // The scan is BOUNDED (see ATTEMPT_SCAN_BUDGET_MS). Checked between
+    // attempts, never mid-attempt: whatever `progressAttempt` started, it
+    // finishes, so nothing is left half-decided. What is deferred is the tail of
+    // an oldest-first list, and the next tick starts from the same place — so an
+    // attempt is only ever postponed by attempts that are older than it.
+    const deadline = Date.now() + (opts?.scanBudgetMs ?? ATTEMPT_SCAN_BUDGET_MS)
+    let scanned = 0
     for (const attempt of attempts) {
+      if (Date.now() >= deadline) {
+        logWarn('attempt_scan_deferred', {
+          scanned,
+          deferred: attempts.length - scanned,
+          loaded: attempts.length,
+          scanLimit,
+        })
+        break
+      }
+      scanned += 1
       if ((await progressAttempt(pool, chain, alerts, attempt, head, opts)) === 'changed') {
         worked = true
       }
@@ -1041,7 +1220,7 @@ export async function runWorkerTick(
   }
   if (worked) return 'worked'
 
-  return (await signNextQueued(pool, chain, alerts)) ? 'worked' : 'idle'
+  return (await signNextQueued(pool, chain, alerts, opts)) ? 'worked' : 'idle'
 }
 
 /**
@@ -1053,7 +1232,12 @@ export async function runWorkerTick(
  * A head that is a block or two stale is harmless — it only shortens a 7200
  * block validity window.
  */
-async function signNextQueued(pool: Pool, chain: ChainClient, alerts: Alerts): Promise<boolean> {
+async function signNextQueued(
+  pool: Pool,
+  chain: ChainClient,
+  alerts: Alerts,
+  opts?: WindowOptions,
+): Promise<boolean> {
   // Unlocked pre-check. Without it a paused system with nothing to pay would
   // still take the custody lock and alert every two seconds.
   const { rows: pending } = await pool.query(
@@ -1063,7 +1247,7 @@ async function signNextQueued(pool: Pool, chain: ChainClient, alerts: Alerts): P
   )
   if (pending.length === 0) return false
 
-  const head = await chain.headHeight()
+  const head = await chainCall('headHeight', opts, () => chain.headHeight())
   const client = await pool.connect()
   let stored: StoredAttempt | null = null
 
@@ -1121,36 +1305,65 @@ async function signNextQueued(pool: Pool, chain: ChainClient, alerts: Alerts): P
     }
 
     // Design §10.2: every outgoing signature re-checks the invariant. The
-    // principal is already outstanding, so nothing new is added — this call is
-    // the fee-reserve and cap guard, not an allocation.
-    try {
-      await assertSolvent(client, controls, 0n)
-    } catch (err) {
-      if (err instanceof SolvencyError) {
-        await client.query(
-          `UPDATE outgoing_transfers
-           SET last_error = $2,
-               next_attempt_at = now() + make_interval(secs => $3::float8 / 1000)
-           WHERE id = $1`,
-          [intent.id, errorMessage(err), RETRY_BACKOFF_MS],
-        )
-        await client.query('COMMIT')
-        logWarn('transfer_deferred', { transferId: intent.id, reason: errorMessage(err) })
-        // Money is owed and the invariant refuses to sign for it. Silence here
-        // would look exactly like an idle worker, so page the operator; the
-        // caller's throttling keeps a stuck queue from alerting every 2s.
-        await alerts.notify('insolvent', {
-          stage: 'transfer_worker',
-          transferId: intent.id,
-          purpose: intent.purpose,
-          message: errorMessage(err),
-        })
-        return false
-      }
-      throw err
+    // principal is already outstanding, so nothing new is added — these calls
+    // are the fee-reserve and cap guard, not an allocation.
+    //
+    // THERE ARE TWO OF THEM, AND THE SECOND ONE IS THE FIX.
+    //
+    // There used to be one, made here, before the transaction existed — so the
+    // number it was guarding, the fee reserve, was checked against a fee it
+    // could not yet know. A fee only becomes knowable at `buildSignedBasic`, and
+    // the ledger only learns it when the attempt CONFIRMS. A deployment sitting
+    // exactly on its reserve therefore signed, broadcast, and discovered the
+    // shortfall afterwards — leaving an accepted, funded drop part-paid and the
+    // rest of its claimants queued behind an insolvency it had just caused. The
+    // README claimed the first such transaction failed closed. It did not.
+    //
+    //  1. The FIRST pass is the original check, unchanged, and it runs before
+    //     anything is built. A deployment whose reserve is already gone never
+    //     constructs a transaction at all — which is the property the crash-
+    //     window suite asserts by counting the chain client's calls.
+    //  2. Then the bytes are built. That is pure and local (see `buildAttempt`):
+    //     no socket, no row, no broadcast.
+    //  3. The SECOND pass adds the fee read off those exact bytes. A refusal
+    //     here rolls the transaction back and drops them; they were never
+    //     persisted, so nothing can rebroadcast them and the hash never left
+    //     this process. What is signed is not what is spent — `persistAttempt`
+    //     plus COMMIT is, and this check stands between them.
+    //
+    // Both passes also charge for `unsettledFeesLuna`, so the payout after this
+    // one cannot pass by ignoring the fee this one has just committed.
+    let refusal = await solvencyRefusal(client, controls)
+    let built: BuiltAttempt | null = null
+    if (!refusal) {
+      built = await buildAttempt(chain, intent, head)
+      refusal = await solvencyRefusal(client, controls, { prospectiveFeeLuna: built.feeLuna })
     }
 
-    stored = await signAndPersistAttempt(client, chain, intent, head)
+    if (refusal !== null || built === null) {
+      const reason = errorMessage(refusal ?? new SolvencyError('solvency check produced no verdict'))
+      await client.query(
+        `UPDATE outgoing_transfers
+         SET last_error = $2,
+             next_attempt_at = now() + make_interval(secs => $3::float8 / 1000)
+         WHERE id = $1`,
+        [intent.id, reason, RETRY_BACKOFF_MS],
+      )
+      await client.query('COMMIT')
+      logWarn('transfer_deferred', { transferId: intent.id, reason })
+      // Money is owed and the invariant refuses to sign for it. Silence here
+      // would look exactly like an idle worker, so page the operator; the
+      // caller's throttling keeps a stuck queue from alerting every 2s.
+      await alerts.notify('insolvent', {
+        stage: 'transfer_worker',
+        transferId: intent.id,
+        purpose: intent.purpose,
+        message: reason,
+      })
+      return false
+    }
+
+    stored = await persistAttempt(client, intent, built, head)
     await client.query('COMMIT')
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {})
@@ -1162,4 +1375,27 @@ async function signNextQueued(pool: Pool, chain: ChainClient, alerts: Alerts): P
   // COMMITTED. Only now do the bytes leave the process.
   await broadcastStored(pool, chain, stored)
   return true
+}
+
+/**
+ * Run the invariant and return its refusal rather than throwing it.
+ *
+ * `signNextQueued` asks twice — once before building and once with the built
+ * transaction's own fee — and both refusals are handled identically, so the
+ * handling lives in one place and the two call sites stay readable. Only
+ * {@link SolvencyError} is caught: a database fault is not a refusal and must
+ * still roll the transaction back.
+ */
+async function solvencyRefusal(
+  client: PoolClient,
+  controls: Controls,
+  fees?: SolvencyFeeOptions,
+): Promise<SolvencyError | null> {
+  try {
+    await assertSolvent(client, controls, 0n, fees)
+    return null
+  } catch (err) {
+    if (err instanceof SolvencyError) return err
+    throw err
+  }
 }

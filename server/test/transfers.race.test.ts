@@ -4,7 +4,7 @@ import pg from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { FakeChain } from '../src/chain/fake'
 import { NimiqChain, nimiqChainFromEnv } from '../src/chain/nimiq'
-import { MEMO_MAX_BYTES, type ChainClient } from '../src/chain/types'
+import { MEMO_MAX_BYTES, type ChainClient, type ChainTx } from '../src/chain/types'
 import { FINALITY_DEPTH_FLOOR_BLOCKS, validityWindowBlocks } from '../src/config'
 import { migrate } from '../src/db/migrate'
 import type { AlertKind, Alerts } from '../src/services/alerts'
@@ -648,6 +648,177 @@ describe.skipIf(!hasDb)('transfer worker crash windows (real Postgres)', () => {
     expect(transfer.state).toBe('queued')
     expect(transfer.last_error).toMatch(/fee reserve|balance/i)
     expect(chain.calls).toHaveLength(0)
+  })
+
+  // ---- the prospective fee -----------------------------------------------------
+  //
+  // The reserve used to be checked only against fees that had ALREADY been
+  // spent. `assertSolvent` ran with `addLuna = 0` before the transaction was
+  // even constructed, the transaction's own fee only became knowable at
+  // `buildSignedBasic`, and the ledger only learned it once the attempt
+  // confirmed. A deployment sitting exactly on its reserve therefore signed and
+  // broadcast, and the shortfall appeared afterwards — with an accepted, funded
+  // drop already part-paid and the rest of its claimants queued behind an
+  // insolvency it had just caused itself.
+  //
+  // This suite pre-funds `operator_float_luna` to exactly
+  // `configured_fee_reserve_luna`, so the slack over the reserve is zero and ONE
+  // luna of fee is the whole difference. That is the reviewer's scenario at its
+  // smallest.
+
+  it('refuses a fee-bearing payout before signing it, not after the fee is spent', async () => {
+    const payout = await queuedPayout()
+    chain.setFee(1n)
+
+    expect(await runWorkerTick(pool, chain, alerts)).toBe('idle')
+
+    // Nothing persisted, so nothing can ever be rebroadcast…
+    expect(await readAttempts(payout.transferId)).toHaveLength(0)
+    // …and nothing left the process. The bytes may be BUILT — that is pure,
+    // local and the only way to learn the fee — but a build is not a payment
+    // and the count that matters is this one.
+    expect(chain.calls.filter((c) => c.op === 'broadcast')).toHaveLength(0)
+    expect(custodyPayments()).toHaveLength(0)
+
+    const transfer = await readTransfer(payout.transferId)
+    expect(transfer.state).toBe('queued')
+    expect(transfer.last_error, 'the refusal names the fee it refused for').toMatch(
+      /fee on this transaction 1/,
+    )
+    expect(alerts.alertNames()).toContain('insolvent')
+  })
+
+  it('signs the same payout once the float covers that one luna of fee', async () => {
+    const payout = await queuedPayout()
+    chain.setFee(1n)
+    expect(await runWorkerTick(pool, chain, alerts)).toBe('idle')
+
+    // One more luna of attested float, backed by a real deposit so the chain
+    // cross-check still agrees with the books.
+    chain.deposit({
+      hash: 'operator-fee-float-topup',
+      sender: 'NQ07 OPERATOR',
+      recipient: CUSTODY,
+      valueLuna: 1n,
+      includedHeight: 1,
+    })
+    await pool.query('UPDATE custody_controls SET operator_float_luna = $1 WHERE singleton', [
+      (FEE_FLOAT + 1n).toString(),
+    ])
+    await pool.query('UPDATE outgoing_transfers SET next_attempt_at = NULL WHERE id = $1', [
+      payout.transferId,
+    ])
+    await reconcile(pool, chain, alerts)
+
+    expect(await runWorkerTick(pool, chain, alerts)).toBe('worked')
+
+    const [attempt] = await readAttempts(payout.transferId)
+    expect(attempt.state).toBe('broadcast')
+    expect(attempt.fee_luna).toBe('1')
+  })
+
+  it('will not sign a second fee-bearing payout on the strength of an unconfirmed first', async () => {
+    // The multi-attempt half of the same hole. Fees are only in the ledger once
+    // an attempt CONFIRMS, so a check that only knew about its own transaction
+    // would let payout after payout through while none of them had finalized —
+    // and the reserve would be gone by the time the ledger noticed.
+    const publicId = await liveDrop()
+    const first = await reserveOn(publicId)
+    const second = await reserveOn(publicId)
+
+    // One luna of headroom over the reserve: enough for one fee, not for two.
+    chain.deposit({
+      hash: 'operator-fee-float-one',
+      sender: 'NQ07 OPERATOR',
+      recipient: CUSTODY,
+      valueLuna: 1n,
+      includedHeight: 1,
+    })
+    await pool.query('UPDATE custody_controls SET operator_float_luna = $1 WHERE singleton', [
+      (FEE_FLOAT + 1n).toString(),
+    ])
+    await reconcile(pool, chain, alerts)
+    chain.setFee(1n)
+
+    expect(await runWorkerTick(pool, chain, alerts)).toBe('worked')
+    const signedFirst = (await readAttempts(first.transferId)).length === 1
+    const firstId = signedFirst ? first.transferId : second.transferId
+    const secondId = signedFirst ? second.transferId : first.transferId
+    expect(await readAttempts(firstId)).toHaveLength(1)
+
+    // The first attempt is broadcast and unconfirmed, so its fee is nowhere in
+    // the ledger. It is nonetheless charged for, and the second payout waits.
+    await runWorkerTick(pool, chain, alerts)
+    await runWorkerTick(pool, chain, alerts)
+
+    expect(await readAttempts(secondId), 'the second fee is not affordable yet').toHaveLength(0)
+    const deferred = await readTransfer(secondId)
+    expect(deferred.state).toBe('queued')
+    expect(deferred.last_error).toMatch(/unsettled fees 1/)
+  })
+
+  // ---- a chain lookup that never answers ---------------------------------------
+
+  it('does not let one hung lookup stall the tick, and never reads it as absence', async () => {
+    // A node that accepts the request and never answers. Before the money
+    // engine put a deadline on its own chain calls, this awaited forever — with
+    // the attempt's row lock held, inside a transaction, on a tick that also
+    // carries refunds, expiry, settlement and every other drop.
+    const publicId = await liveDrop()
+    const hung = await reserveOn(publicId)
+    expect(await runWorkerTick(pool, chain, alerts)).toBe('worked')
+    expect(await readAttempts(hung.transferId)).toHaveLength(1)
+
+    // A second claimant, queued behind the hung one.
+    const behind = await reserveOn(publicId)
+
+    let resolveHang: (() => void) | undefined
+    const neverAnswers = chainWith(chain, {
+      getTransaction: () =>
+        new Promise<ChainTx | null>((resolve) => {
+          resolveHang = () => resolve(null)
+        }),
+    })
+
+    const startedAt = Date.now()
+    const outcome = await runWorkerTick(pool, neverAnswers, alerts, { chainTimeoutMs: 50 })
+    const elapsedMs = Date.now() - startedAt
+    resolveHang?.()
+
+    // The tick FINISHED, and it finished on the order of the deadline rather
+    // than of the node's patience.
+    expect(elapsedMs).toBeLessThan(5_000)
+    // And it got past the hung attempt to the work behind it: the claimant who
+    // queued second is signed for while the first is unanswerable.
+    expect(outcome).toBe('worked')
+    expect(await readAttempts(behind.transferId), 'the queue behind it moved').toHaveLength(1)
+
+    // The timeout is "we could not ask" and nothing more. No absence is
+    // recorded, so it can never become half of a `proven_dead` proof — which is
+    // the half that authorises spending the same money twice.
+    const [attempt] = await readAttempts(hung.transferId)
+    expect(attempt.state).toBe('broadcast')
+    expect(attempt.absent_checks, 'a timeout is not an absence').toBe(0)
+    expect(attempt.first_absent_at).toBeNull()
+    expect(attempt.last_error).toMatch(/timed out/i)
+  })
+
+  it('scans oldest-first and defers the rest of the tick rather than running long', async () => {
+    const publicId = await liveDrop()
+    const first = await reserveOn(publicId)
+    await runWorkerTick(pool, chain, alerts)
+    const second = await reserveOn(publicId)
+    await runWorkerTick(pool, chain, alerts)
+    await runWorkerTick(pool, chain, alerts)
+    expect(await readAttempts(first.transferId)).toHaveLength(1)
+    expect(await readAttempts(second.transferId)).toHaveLength(1)
+
+    // A scan budget of zero: the loop stops before it starts, and no attempt is
+    // touched. What matters is that the tick RETURNS — a budget that could not
+    // interrupt the scan would be no bound at all.
+    const before = await readAttempts(first.transferId)
+    expect(await runWorkerTick(pool, chain, alerts, { scanBudgetMs: 0 })).toBe('idle')
+    expect(await readAttempts(first.transferId)).toEqual(before)
   })
 
   // ---- unresolvable ------------------------------------------------------------

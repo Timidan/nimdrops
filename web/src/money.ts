@@ -10,11 +10,23 @@
  * There is no size ceiling here and no headcount ceiling. The total a drop holds
  * is the sponsor's decision, and the only limit left is whatever the deployment
  * publishes in `GET /api/custody` — read live and shown on the form, never
- * hard-coded in this file.
+ * hard-coded in this file. The two rules mirrored below are both floors: at
+ * least {@link MIN_CLAIMS} people, and at least {@link MIN_AMOUNT_EACH_LUNA}
+ * each.
  */
 export const LUNA_PER_NIM = 100_000n
 /** A one-person drop is a Cashlink, not a drop. Two is the floor. */
 export const MIN_CLAIMS = 2
+
+/**
+ * The smallest share a drop may promise one person, mirrored from
+ * `server/src/money.ts` — where the reasoning lives and where it is enforced.
+ *
+ * It is a FLOOR, not a ceiling: any total and any headcount are still the
+ * sponsor's to choose. It is here so the form can say so while the sponsor is
+ * still typing, instead of letting them fill in a whole drop and be refused.
+ */
+export const MIN_AMOUNT_EACH_LUNA = 10_000n
 
 /**
  * The widths of the two columns the server stores a drop in — NOT ceilings on
@@ -91,12 +103,17 @@ export function formatNim(luna: bigint): string {
   return frac ? `${whole}.${frac}` : `${whole}`
 }
 
-export type ShapeProblem = 'amount' | 'claims'
+export type ShapeProblem = 'amount' | 'too-small' | 'claims'
 
 /**
- * The two things about a drop's shape the server refuses outright, phrased for
- * a form: an amount that is not a positive NIM figure, and fewer than
- * {@link MIN_CLAIMS} people.
+ * The things about a drop's shape the server refuses outright, phrased for a
+ * form: an amount that is not a positive NIM figure, a share below
+ * {@link MIN_AMOUNT_EACH_LUNA}, and fewer than {@link MIN_CLAIMS} people.
+ *
+ * `'too-small'` is separated from `'amount'` because they need different
+ * sentences. `'amount'` means "that is not a number I can read"; `'too-small'`
+ * means "I read it, and it is under the floor" — which is a refusal the sponsor
+ * can act on, and one they should be told the number for.
  *
  * Everything else — how big the total is, how many people it is spread across —
  * is the sponsor's to choose. `null` means the shape is fine, which is not the
@@ -108,6 +125,7 @@ export function shapeProblem(
   claimCount: number,
 ): ShapeProblem | null {
   if (amountEachLuna === null || amountEachLuna <= 0n) return 'amount'
+  if (amountEachLuna < MIN_AMOUNT_EACH_LUNA) return 'too-small'
   if (!Number.isInteger(claimCount) || claimCount < MIN_CLAIMS) return 'claims'
   if (claimCount > MAX_CLAIM_COUNT) return 'claims'
   if (amountEachLuna > MAX_LUNA / BigInt(claimCount)) return 'amount'

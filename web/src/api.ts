@@ -49,7 +49,11 @@ export interface DisclosurePoint {
  * principal ceiling, which is the default. `null` is NOT zero and not unknown:
  * it means no policy number stands between a sponsor and the size of their
  * drop, and the server's solvency invariant decides what can actually be paid.
- * `atRisk` is the honest number in its place — funded and not yet claimed.
+ * `atRisk` is the honest number in its place — everything sponsors have funded
+ * that the operator has not finished paying out. It is the sum of
+ * `outstandingLuna` (drops that went live) and `unactivatedFundedLuna` (funding
+ * that was verified and never activated, usually zero), and the server owns the
+ * sentence that explains it.
  */
 export interface PilotLimits {
   aggregateMax: string | null
@@ -58,6 +62,8 @@ export interface PilotLimits {
   remainingLuna: string | null
   atRisk: string
   atRiskLuna: string
+  outstandingLuna: string
+  unactivatedFundedLuna: string
   /** `null` when there is no limit on how many drops may run at once. */
   maxLiveDrops: number | null
   liveDrops: number
@@ -302,6 +308,8 @@ function isLimits(value: unknown): value is PilotLimits {
     nullableString(l?.remainingLuna) &&
     typeof l?.atRisk === 'string' &&
     typeof l.atRiskLuna === 'string' &&
+    typeof l.outstandingLuna === 'string' &&
+    typeof l.unactivatedFundedLuna === 'string' &&
     nullableNumber(l.maxLiveDrops) &&
     typeof l.liveDrops === 'number' &&
     typeof l.reservedDrafts === 'number' &&

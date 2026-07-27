@@ -187,6 +187,8 @@ interface DisclosureBody {
     remainingLuna: string | null
     atRisk: string
     atRiskLuna: string
+    outstandingLuna: string
+    unactivatedFundedLuna: string
     maxLiveDrops: number | null
     liveDrops: number
     reservedDrafts: number
@@ -489,7 +491,9 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
     expect(body.expiryHours).toBe(24)
     expect(body.limits.aggregateMax, 'no ceiling is set by default').toBeNull()
     expect(body.limits.remaining).toBeNull()
-    expect(body.limits.atRisk, 'the honest number: funded and unclaimed').toBe('0')
+    expect(body.limits.atRisk, 'the honest number: held and not yet paid out').toBe('0')
+    expect(body.limits.outstandingLuna, 'and it decomposes').toBe('0')
+    expect(body.limits.unactivatedFundedLuna).toBe('0')
     expect(body.limits.liveDrops).toBe(0)
 
     // Every disclosure the sponsor is owed, by id rather than by prose. There
@@ -517,7 +521,11 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
     // false now, and a false custody disclosure is worse than none.
     expect(text, 'never promise a ceiling that does not exist').not.toMatch(/can hold up to/i)
     expect(text, 'say why there is no contract, not just that there is none').toMatch(/HTLC/)
-    expect(text, 'name the exposure').toMatch(/nobody has claimed yet/i)
+    expect(text, 'name the exposure').toMatch(/has not finished paying out/i)
+    // "unclaimed" was untrue in both directions: the figure keeps shares that
+    // are allocated and broadcast but not yet final, and it now also counts
+    // funding that was verified and never activated.
+    expect(text, 'and do not call it unclaimed').not.toMatch(/nobody has claimed/i)
     expect(text, 'and do not dress the mitigations up').toMatch(/is not cryptography/i)
     expect(text, 'no exclamation marks in interface copy').not.toContain('!')
   })
@@ -536,6 +544,51 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
     const limits = body.points.find((p) => p.id === 'limits')
     expect(limits?.text).toContain('10 NIM')
     expect(limits?.text).toContain('2 drops can run at a time')
+  })
+
+  it('reports the money as at risk when funding went final and activation refused', async () => {
+    // The disclosure used to derive its one number from `outstandingPrincipalLuna`
+    // alone, which counts ACTIVATED drops. A funding transaction that reaches
+    // finality while activation fails closed — paused custody here, and equally a
+    // stale reconciliation or any other prerequisite — leaves the operator
+    // holding that sponsor's NIM with `activated_height` still NULL. The figure
+    // said "0 NIM", verbatim, to the next sponsor about to fund.
+    const draft = await createDrop()
+    const txHash = fundingHashFor(draft.publicId)
+    chain.deposit({
+      hash: txHash,
+      sender: SPONSOR,
+      recipient: CUSTODY,
+      valueLuna: BigInt(draft.expectedFundingLuna),
+      dataUtf8: draft.fundingMemo,
+      includedHeight: FUND_HEIGHT,
+    })
+    chain.setHead(FUND_HEIGHT + FINALITY_DEPTH)
+    await pool.query('UPDATE custody_controls SET paused = true WHERE singleton')
+
+    // The transaction is final and every §7 predicate passes; only activation
+    // refuses. The sponsor's money is in the custody wallet either way.
+    const refused = await post(`/api/drops/${draft.publicId}/funding`, { body: { txHash } })
+    expect(refused.status).toBe(503)
+
+    const { rows } = await pool.query<{ activated_height: string | null; funding_tx_hash: string | null }>(
+      'SELECT activated_height, funding_tx_hash FROM drops WHERE public_id = $1',
+      [draft.publicId],
+    )
+    expect(rows[0].activated_height, 'nothing activated').toBeNull()
+    expect(rows[0].funding_tx_hash, 'but the deposit is written down').toBe(txHash)
+
+    const body = await json<DisclosureBody>(await get('/api/custody'))
+    expect(body.limits.atRiskLuna).toBe(draft.expectedFundingLuna)
+    expect(body.limits.outstandingLuna, 'no drop went live').toBe('0')
+    expect(body.limits.unactivatedFundedLuna, 'and this is where it is').toBe(
+      draft.expectedFundingLuna,
+    )
+    expect(body.limits.atRisk).toBe('5')
+
+    const exposure = body.points.find((p) => p.id === 'exposure')
+    expect(exposure?.text, 'the sentence carries the same number').toContain('5 NIM')
+    expect(body.summary).toContain('holding 5 NIM')
   })
 
   it('names the mainnet pilot and the pause state in the disclosure', async () => {

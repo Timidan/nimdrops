@@ -573,8 +573,28 @@ export async function submitFunding(
     throw new FundingRejectedError('invalid_sender', 'funding transaction has no valid sender')
   }
 
+  // EVERY §7 predicate has now passed, so the hash is recorded BEFORE anything
+  // else is attempted — final or not.
+  //
+  // It used to be recorded only on the not-yet-final branch, on the reasoning
+  // that a final transaction was about to activate anyway. That reasoning has a
+  // hole the width of every reason activation can refuse: paused custody, a
+  // stale reconciliation, a detected shortfall, an indeterminate broadcast. A
+  // sponsor whose transaction reached finality before their first poll — or
+  // whose only poll came after it — then had verified money sitting in the
+  // custody wallet with NOTHING in the database pointing at it. The drop stayed
+  // `awaiting_funding` with a NULL hash, its draft reservation expired, draft GC
+  // was free to cancel it, and no figure anywhere counted the deposit.
+  //
+  // Recording first costs nothing and is the same write either way: the row is
+  // taken out of `gcDrafts`' reach, its capacity reservation stops expiring
+  // (`reservedPrincipalLuna`), and `unactivatedFundedPrincipalLuna` — which is
+  // what the sponsor-facing disclosure reads — can see the money. `activate`
+  // accepts `funding_pending` and re-checks the whole predicate under the
+  // custody lock, so nothing here is trusted by it.
+  await recordPending(pool, publicId, txHash)
+
   if (!chain.isFinal(tx, await chain.headHeight())) {
-    await recordPending(pool, publicId, txHash)
     return getPublic(pool, publicId)
   }
 
@@ -590,13 +610,16 @@ export async function submitFunding(
 }
 
 /**
- * Record a verified-but-not-yet-final funding transaction against the drop.
+ * Record a VERIFIED funding transaction against the drop.
+ *
+ * Called for every transaction that passes the §7 predicates, whether or not it
+ * is final yet — see the call site for why the finality distinction was the
+ * wrong place to draw this line.
  *
  * `cancelled` is accepted here for the same reason `activate` accepts it
- * (finding 7): the transaction has already passed every §7 predicate except our
- * own finality, so the drop has verified money pointed at it and must stop
- * being garbage. Recording the hash also takes it out of `gcDrafts`' reach for
- * good.
+ * (finding 7): the transaction has already passed every §7 predicate, so the
+ * drop has verified money pointed at it and must stop being garbage. Recording
+ * the hash also takes it out of `gcDrafts`' reach for good.
  */
 async function recordPending(pool: Pool, publicId: string, txHash: string): Promise<void> {
   try {

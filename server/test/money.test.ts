@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { assertDropShape, formatNim, lunaFromNim, LUNA_PER_NIM } from '../src/money'
+import {
+  assertDropShape,
+  formatNim,
+  lunaFromNim,
+  LUNA_PER_NIM,
+  MIN_AMOUNT_EACH_LUNA,
+} from '../src/money'
 
 describe('money', () => {
   it('parses NIM decimal strings to luna exactly', () => {
@@ -28,6 +34,25 @@ describe('money', () => {
     // invariant against its own ledger.
     expect(() => assertDropShape(200_000n, 100)).not.toThrow() // 200 NIM, 100 people
     expect(() => assertDropShape(100_000n, 10_000)).not.toThrow()
-    expect(() => assertDropShape(1n, 2)).not.toThrow() // 0.00001 NIM each
+    expect(() => assertDropShape(MIN_AMOUNT_EACH_LUNA, 1_000_000)).not.toThrow()
+  })
+
+  // ---- the share floor ---------------------------------------------------------
+
+  it('refuses a share below the floor, and takes the floor itself', () => {
+    // The floor is what makes HEADCOUNT cost something now that nothing caps
+    // it. A 14,400-person drop of one luna each cost 0.144 NIM and bought
+    // 14,400 payouts in a worker every other drop shares.
+    expect(() => assertDropShape(1n, 2)).toThrow(/at least 0\.1 NIM/)
+    expect(() => assertDropShape(MIN_AMOUNT_EACH_LUNA - 1n, 2)).toThrow(/at least 0\.1 NIM/)
+    expect(() => assertDropShape(MIN_AMOUNT_EACH_LUNA, 2)).not.toThrow()
+  })
+
+  it('leaves every real drop expressible', () => {
+    // The smallest use anyone named: a meetup handing out 0.5 NIM a head. It
+    // is five times the floor, and it must not have become harder to express.
+    expect(() => assertDropShape(50_000n, 40)).not.toThrow()
+    // And nothing above it is bounded: the floor is a floor, not a cap.
+    expect(() => assertDropShape(100_000_000n, 2_000)).not.toThrow()
   })
 })

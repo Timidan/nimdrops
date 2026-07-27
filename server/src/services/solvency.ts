@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from 'pg'
+import { withChainDeadline } from '../chain/deadline'
 import type { ChainClient } from '../chain/types'
 import { type NetworkName, validityWindowBlocks } from '../config'
 import type { Queryable } from '../db/pool'
@@ -141,11 +142,17 @@ export interface Controls {
    * `(float − reserve) / f` outgoing transactions for the life of that float,
    * across every drop.
    *
-   * Nothing here knows `f`: it belongs to the chain client. An operator who
-   * sets a non-zero fee has to size the float for the drops they expect, and
-   * the failure mode if they do not is a drop that funds and then stops paying
-   * part-way through, with the worker deferring and alerting rather than
-   * signing. See the README's note on `NIMIQ_FEE_LUNA`.
+   * `f` belongs to the chain client and this file never reads it. What
+   * {@link assertSolvent} charges for instead is the fee on the exact
+   * transaction a caller is about to persist, handed to it by the signing path
+   * (`prospectiveFeeLuna`), plus {@link unsettledFeesLuna} for the fees open
+   * attempts have already committed. That is what makes the arithmetic above a
+   * PRE-condition rather than a post-mortem: an operator who sets a non-zero fee
+   * still has to size the float for the drops they expect, and the failure mode
+   * if they do not is a drop that funds and then stops paying part-way through,
+   * with the worker deferring and alerting BEFORE it signs rather than
+   * discovering the shortfall once the fee has been taken. See the README's note
+   * on `NIMIQ_FEE_LUNA`.
    */
   configuredFeeReserveLuna: bigint
   /**
@@ -393,12 +400,58 @@ export async function liveDropCount(db: Queryable): Promise<number> {
   return rows[0].n
 }
 
+/**
+ * Principal of drops that have a VERIFIED funding transaction recorded against
+ * them and have not activated.
+ *
+ * The gap this closes is in the DISCLOSURE, not in the invariant. A funding
+ * transaction that passes every design §7 predicate and then fails to activate —
+ * paused custody, a stale reconciliation, any solvency prerequisite — leaves the
+ * operator holding a sponsor's money with `activated_height` still NULL. That
+ * drop is absent from {@link outstandingPrincipalLuna}, which counts activated
+ * drops only, so `/api/custody` could report "0 NIM at risk" while custody held
+ * real deposits — and the person reading that sentence is about to add to them.
+ *
+ * `funding_tx_hash IS NOT NULL` is the predicate because that column is only
+ * ever written for a transaction this system has already verified against the
+ * custody address, the exact amount and the exact memo (`recordPending`,
+ * `activate`). Finality is deliberately NOT required: a verified deposit that
+ * has not yet been buried is still in the custody wallet, and for a disclosure
+ * the conservative direction is to name it.
+ *
+ * Terminal drops are excluded — `settled` and `refunded` have already had their
+ * money leave. `cancelled` is deliberately INCLUDED: draft GC only ever cancels
+ * a draft with no funding hash, so a cancelled drop that has one is precisely
+ * the stranded-deposit case this figure exists to surface.
+ *
+ * NOT used by the invariant. `assertSolvent` weighs liabilities the ledger has
+ * also been credited for, and this money has not been credited — `activate()`
+ * does that, in the same transaction that stamps `activated_height`. Adding it
+ * to `outstanding` alone would make the books refuse themselves.
+ */
+export async function unactivatedFundedPrincipalLuna(db: Queryable): Promise<bigint> {
+  const { rows } = await db.query<{ luna: string }>(`
+    SELECT COALESCE(SUM(expected_funding_luna), 0)::BIGINT AS luna
+    FROM drops
+    WHERE activated_height IS NULL
+      AND funding_tx_hash IS NOT NULL
+      AND state NOT IN ('settled', 'refunded')
+  `)
+  return BigInt(rows[0].luna)
+}
+
 /** Everything a create screen needs to say what will and will not fit. */
 export interface CapacitySnapshot {
   /** The operator kill switch, or `null` when no principal ceiling is set. */
   maxLivePrincipalLuna: bigint | null
   /** Principal of drops whose funding was accepted and is not yet settled. */
   outstandingLuna: bigint
+  /**
+   * Principal of drops holding a verified funding transaction that has not
+   * activated: custody money `outstandingLuna` cannot see. Disclosure only —
+   * see {@link unactivatedFundedPrincipalLuna}.
+   */
+  unactivatedFundedLuna: bigint
   /** Principal promised to drafts that have not activated. */
   reservedLuna: bigint
   /** `max − outstanding − reserved`, floored at zero; `null` when uncapped. */
@@ -423,6 +476,7 @@ export async function readCapacity(
   controls: Controls,
 ): Promise<CapacitySnapshot> {
   const outstandingLuna = await outstandingPrincipalLuna(db)
+  const unactivatedFundedLuna = await unactivatedFundedPrincipalLuna(db)
   const reserved = await reservedPrincipalLuna(db)
   const liveDrops = await liveDropCount(db)
   const committedLuna = outstandingLuna + reserved.luna
@@ -432,6 +486,7 @@ export async function readCapacity(
   return {
     maxLivePrincipalLuna: controls.maxLivePrincipalLuna,
     outstandingLuna,
+    unactivatedFundedLuna,
     reservedLuna: reserved.luna,
     remainingLuna: remainingLuna === null ? null : remainingLuna > 0n ? remainingLuna : 0n,
     maxLiveDrops: controls.maxLiveDrops,
@@ -813,7 +868,12 @@ export async function resolveIndeterminateBroadcasts(
         await client.query('ROLLBACK')
         continue
       }
-      const tx = await chain.getTransaction(row.tx_hash)
+      // Under a deadline, and under the attempt's row lock. A lookup that never
+      // answers would otherwise hold that lock — and this pool connection — for
+      // as long as the node cared to keep the socket open. A timeout throws,
+      // which lands in the catch below: the attempt stays indeterminate, which
+      // is the fail-closed state it was already in.
+      const tx = await withChainDeadline('getTransaction', () => chain.getTransaction(row.tx_hash))
       if (tx === null) {
         // "The chain does not have it" is not an answer either — it is
         // mempool-blind (G0 §5A). No absence is recorded here: the absence
@@ -844,11 +904,57 @@ export async function resolveIndeterminateBroadcasts(
 }
 
 /**
+ * Fees that custody has committed to paying and the ledger has not been charged
+ * for yet.
+ *
+ * `ledgerMovementsLuna` subtracts `fee_luna` from CONFIRMED attempts only, which
+ * is right for a balance and leaves a hole in front of the invariant: between
+ * signing an attempt and its confirmation, its fee is a real future debit that
+ * no term in `assertSolvent` mentioned. The worker could therefore sign one
+ * fee-bearing payout after another, each check passing against a ledger that had
+ * not learned about any of the fees already committed, and the shortfall only
+ * appeared once they finalized.
+ *
+ * `signed` and `broadcast` are exactly the attempts whose fee may still be
+ * taken. `confirmed` has already been taken, and is in the ledger.
+ * `proven_dead` never will be: an operator proved it unincludable and signed a
+ * replacement, and that replacement is an open attempt of its own, counted here.
+ *
+ * Deliberately NOT bounded by the validity window. An attempt past its deadline
+ * cannot be included and so cannot really cost its fee, but it is also an
+ * attempt an operator has to resolve by hand (`staleInFlightOutgoing` alerts on
+ * exactly that set), and holding its fee back until they do is the direction
+ * that cannot strand a claimant.
+ */
+export async function unsettledFeesLuna(db: Queryable): Promise<bigint> {
+  const { rows } = await db.query<{ luna: string }>(
+    `SELECT COALESCE(SUM(fee_luna), 0)::BIGINT AS luna
+     FROM transaction_attempts
+     WHERE state IN ('signed', 'broadcast')`,
+  )
+  return BigInt(rows[0].luna)
+}
+
+/** What {@link assertSolvent} must charge for beyond the principal it is asked about. */
+export interface SolvencyFeeOptions {
+  /**
+   * The fee on a transaction this caller is about to persist, in luna.
+   *
+   * Only the outgoing signing path passes it, and it passes the fee of the
+   * EXACT bytes it has just built rather than a quote about a future call — see
+   * `transfers.signNextQueued`. Everything else adds no new transaction and
+   * leaves this at zero.
+   */
+  prospectiveFeeLuna?: bigint
+}
+
+/**
  * Enforce design §10.2 before adding `addLuna` of new principal (a funding
  * activation passes the drop's expected funding; allocation and outgoing
  * signatures pass `0n`, since that principal is already outstanding):
  *
  *   ledger balance + addLuna        >= outstanding principal + addLuna + fee reserve
+ *                                      + unsettled fees + prospective fee
  *   outstanding principal + addLuna <= max_live_principal_luna   (only if set)
  *
  * THE TWO LINES ARE NOT THE SAME KIND OF THING, and migration 015 turned the
@@ -881,13 +987,39 @@ export async function resolveIndeterminateBroadcasts(
  * holding room would strand a finalized deposit in the custody wallet. The two
  * checks are asymmetric on purpose, and the asymmetry is what makes a promise
  * worth something: whoever reserved first is the one who cannot be crowded out.
+ *
+ * THE TWO FEE TERMS ARE NEW, and they exist because the reserve was being
+ * checked only after it had been spent. `configured_fee_reserve_luna` is a flat
+ * floor the ledger may not fall below, and the ledger only learns a fee once the
+ * attempt carrying it CONFIRMS. So every check between signing and confirmation
+ * was made against a balance that did not yet know about fees already committed,
+ * and the outgoing path's own check — `assertSolvent(client, controls, 0n)`,
+ * made before the transaction was even constructed — could not know about the
+ * fee it was about to commit either. A deployment sitting exactly on its reserve
+ * would sign, broadcast, and only discover the shortfall when the payment
+ * finalized, leaving an accepted, funded drop part-paid with the rest queued
+ * behind an insolvency it had just created.
+ *
+ *  - {@link unsettledFeesLuna} covers the fees open attempts have committed.
+ *  - `prospectiveFeeLuna` covers the fee on the transaction the caller is about
+ *    to persist, and only the signing path passes it.
+ *
+ * Both are charged to the REQUIRED side rather than credited to the available
+ * side, because both are debits custody has not taken yet. Both are structurally
+ * zero at `NIMIQ_FEE_LUNA = 0`, which is the default AND what
+ * `docker-compose.yml` gives both containers — so this changes nothing for a
+ * deployment running at zero fees, which is exactly why it was the right moment
+ * to fix it rather than a reason not to.
  */
 export async function assertSolvent(
   client: Queryable,
   controls: Controls,
   addLuna: bigint,
+  fees?: SolvencyFeeOptions,
 ): Promise<void> {
   if (addLuna < 0n) throw new SolvencyError('addLuna must be non-negative')
+  const prospectiveFeeLuna = fees?.prospectiveFeeLuna ?? 0n
+  if (prospectiveFeeLuna < 0n) throw new SolvencyError('prospectiveFeeLuna must be non-negative')
 
   // The chain cross-check must have run at least once. The invariant no longer
   // spends this number, but a system that has never compared its books against
@@ -926,13 +1058,18 @@ export async function assertSolvent(
 
   const outstanding = await outstandingPrincipalLuna(client)
   const ledger = await ledgerBalanceLuna(client, controls)
+  // Fees the ledger has not been charged for yet: those already committed by
+  // open attempts, plus the one this caller is about to commit. See above.
+  const unsettledFees = await unsettledFeesLuna(client)
 
   const available = ledger + addLuna
-  const required = outstanding + addLuna + controls.configuredFeeReserveLuna
+  const required =
+    outstanding + addLuna + controls.configuredFeeReserveLuna + unsettledFees + prospectiveFeeLuna
   if (available < required) {
     throw new InsolventError(
       `ledger balance ${ledger} (operator float ${controls.operatorFloatLuna}) < outstanding principal ` +
-        `${outstanding} + added ${addLuna} + fee reserve ${controls.configuredFeeReserveLuna}`,
+        `${outstanding} + added ${addLuna} + fee reserve ${controls.configuredFeeReserveLuna}` +
+        ` + unsettled fees ${unsettledFees} + fee on this transaction ${prospectiveFeeLuna}`,
     )
   }
 
@@ -1038,8 +1175,15 @@ export async function reconcile(
   )
   const observationSeq = BigInt(seqRows[0].seq)
 
-  const height = await chain.headHeight()
-  const chainBalanceLuna = await chain.confirmedBalanceLuna(chain.custodyAddress())
+  // Both reads under the money engine's chain deadline. `reconcile` runs on the
+  // worker's own loop and on the funding path, and neither may be parked
+  // indefinitely on a node that accepted the request and never answered. A
+  // throw here leaves the reconciliation timestamp untouched, which fails closed
+  // on staleness — the correct direction.
+  const height = await withChainDeadline('headHeight', () => chain.headHeight())
+  const chainBalanceLuna = await withChainDeadline('confirmedBalanceLuna', () =>
+    chain.confirmedBalanceLuna(chain.custodyAddress()),
+  )
 
   // ROUND-4 S3 — resolve indeterminate broadcasts, and do it AFTER the balance
   // read, never before.

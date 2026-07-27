@@ -20,6 +20,7 @@ import {
   formatNim,
   lunaFromNim,
   MAX_CLAIM_COUNT,
+  MIN_AMOUNT_EACH_LUNA,
   MIN_CLAIMS,
   shapeProblem,
 } from '../money'
@@ -839,6 +840,17 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
       <div className="nd-upper">
         {/* The money the sponsor is about to send, derived as they type. */}
         <Money nim={totalFigure} caption={`total for ${claimCount} people`} testId="derived-total" />
+
+        {/* The share floor, said only once the sponsor has typed something the
+            form can read as a number. Below it the fund button is dead, and a
+            dead button with no sentence next to it is the form refusing without
+            saying why. */}
+        {problem === 'too-small' ? (
+          <Alert testId="share-too-small">
+            Each person needs at least {formatNim(MIN_AMOUNT_EACH_LUNA)} NIM. Raise the amount per
+            person.
+          </Alert>
+        ) : null}
 
         {overCapacity && custody ? (
           <Alert testId="over-cap">

@@ -68,13 +68,15 @@ function disclosure(over: Partial<CustodyDisclosure> = {}): CustodyDisclosure {
       remainingLuna: '25000000',
       atRisk: '0',
       atRiskLuna: '0',
+      outstandingLuna: '0',
+      unactivatedFundedLuna: '0',
       maxLiveDrops: null,
       liveDrops: 0,
       reservedDrafts: 0,
       remainingDrops: null,
     },
     summary:
-      'Your NIM goes to a wallet the operator controls, not to an escrow contract. 0 NIM is sitting there unclaimed right now.',
+      'Your NIM goes to a wallet the operator controls, not to an escrow contract. The operator is holding 0 NIM in it right now.',
     points: [
       {
         id: 'not_escrow',
@@ -90,7 +92,7 @@ function disclosure(over: Partial<CustodyDisclosure> = {}): CustodyDisclosure {
       },
       {
         id: 'exposure',
-        text: 'Nothing limits the size of a drop, so the amount at risk is whatever sponsors have funded and nobody has claimed yet. That is 0 NIM right now, and your drop adds to it.',
+        text: 'Nothing limits the size of a drop, so the amount at risk is whatever sponsors have funded and the operator has not finished paying out. That is 0 NIM right now, and your drop adds to it.',
       },
       {
         id: 'mitigations',
@@ -150,7 +152,7 @@ function pilotDisclosure(over: Partial<CustodyDisclosure> = {}): CustodyDisclosu
       remainingDrops: 1,
     },
     summary:
-      'Your NIM goes to a wallet the operator controls, not to an escrow contract. 0 NIM is sitting there unclaimed right now.',
+      'Your NIM goes to a wallet the operator controls, not to an escrow contract. The operator is holding 0 NIM in it right now.',
     points: [
       ...base.points.slice(0, 5),
       {
@@ -188,6 +190,8 @@ function uncappedDisclosure(over: Partial<CustodyDisclosure> = {}): CustodyDiscl
       remainingLuna: null,
       atRisk: '412.5',
       atRiskLuna: '41250000',
+      outstandingLuna: '41250000',
+      unactivatedFundedLuna: '0',
     },
     points: base.points
       .filter((p) => p.id !== 'limits' && p.id !== 'funding_window')
@@ -195,7 +199,7 @@ function uncappedDisclosure(over: Partial<CustodyDisclosure> = {}): CustodyDiscl
         p.id === 'exposure'
           ? {
               ...p,
-              text: 'Nothing limits the size of a drop, so the amount at risk is whatever sponsors have funded and nobody has claimed yet. That is 412.5 NIM right now, and your drop adds to it.',
+              text: 'Nothing limits the size of a drop, so the amount at risk is whatever sponsors have funded and the operator has not finished paying out. That is 412.5 NIM right now, and your drop adds to it.',
             }
           : p,
       ),
@@ -889,7 +893,7 @@ describe('Create — no ceiling', () => {
     await renderUncapped()
     fireEvent.click(screen.getByTestId('custody-card'))
     const sheet = screen.getByRole('dialog')
-    expect(sheet.textContent).toMatch(/nobody has claimed yet/i)
+    expect(sheet.textContent).toMatch(/has not finished paying out/i)
     expect(sheet.textContent).toMatch(/412\.5 NIM right now/)
     expect(sheet.textContent, 'say why no contract can hold it').toMatch(/HTLC/)
     expect(sheet.textContent, 'no ceiling may be promised').not.toMatch(/can hold up to/i)

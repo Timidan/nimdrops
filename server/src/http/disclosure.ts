@@ -21,9 +21,14 @@ import type { CapacitySnapshot } from '../services/solvency'
  * say a drop could hold at most N NIM, and to lean on that number as the
  * mitigation. There is no such number any more: how much a drop holds is the
  * sponsor's decision, so the honest disclosure names the exposure instead of a
- * ceiling — how much sponsors have funded and not yet had claimed — and names
- * the four mitigations that actually exist. A stale limit here would be a lie
- * shown to the one person being asked to trust it.
+ * ceiling — how much sponsors have funded that the operator has not finished
+ * paying out — and names the four mitigations that actually exist. A stale limit
+ * here would be a lie shown to the one person being asked to trust it.
+ *
+ * The exposure figure is the one number on this page a sponsor could check, so
+ * it has to be the number it claims to be. It sums BOTH halves of what the
+ * operator holds: activated drops that have not finished paying out, and
+ * verified funding that never activated at all. See `buildDisclosure`.
  *
  * Rules the copy follows (repo `better-writing`): plain words, sentence case,
  * no exclamation marks, no blame, verbs a thumb can act on. Nothing here
@@ -54,9 +59,26 @@ export interface PilotLimits {
   /** How much of the aggregate cap is free at this moment; `null` when uncapped. */
   remaining: string | null
   remainingLuna: string | null
-  /** Funded principal that has not been paid out yet: the money at risk today. */
+  /**
+   * Sponsor money the operator is holding right now: everything funded, less
+   * everything finalized out. The number the exposure sentence names.
+   *
+   * It is the SUM of the two figures below, and it is deliberately the one a
+   * sponsor is shown, because from their side the distinction between "this
+   * drop activated" and "this deposit is stuck at the door" is a distinction
+   * about our bookkeeping, not about whose NIM the operator is holding.
+   */
   atRisk: string
   atRiskLuna: string
+  /** The part of {@link atRisk} belonging to drops that went live. */
+  outstandingLuna: string
+  /**
+   * The part of {@link atRisk} belonging to drops whose funding was verified and
+   * which never activated — a paused, stale or otherwise refused activation
+   * leaves the money in custody with nothing live to spend it on. Usually zero,
+   * and when it is not, it is the number nobody was being shown.
+   */
+  unactivatedFundedLuna: string
   /** `null` when there is no limit on how many drops may run at once. */
   maxLiveDrops: number | null
   liveDrops: number
@@ -143,7 +165,21 @@ export function buildDisclosure(o: {
   const aggregate =
     capacity.maxLivePrincipalLuna === null ? null : formatNim(capacity.maxLivePrincipalLuna)
   const remaining = capacity.remainingLuna === null ? null : formatNim(capacity.remainingLuna)
-  const atRisk = formatNim(capacity.outstandingLuna)
+  /**
+   * What the operator is holding, and it is TWO sums because one of them was
+   * invisible.
+   *
+   * `outstandingLuna` counts activated drops only. A funding transaction that
+   * reaches finality while activation fails closed — paused custody, a stale
+   * reconciliation, any solvency prerequisite — leaves the operator holding that
+   * sponsor's NIM with `activated_height` still NULL, and this figure said "0
+   * NIM" about it. The sentence below is rendered verbatim to the next sponsor
+   * immediately before they fund, so the one state in which the operator is
+   * demonstrably holding money it cannot pay out was the one state the number
+   * denied.
+   */
+  const atRiskLuna = capacity.outstandingLuna + capacity.unactivatedFundedLuna
+  const atRisk = formatNim(atRiskLuna)
 
   const points: DisclosurePoint[] = [
     {
@@ -160,9 +196,19 @@ export function buildDisclosure(o: {
     },
     {
       id: 'exposure',
+      // "…and has not finished paying out" replaced "…and nobody has claimed
+      // yet", which was untrue in both directions at once. The figure counts a
+      // claim as gone only when its payout is FINAL, so shares that are
+      // allocated, signed and broadcast are still inside it — conservative for
+      // solvency, and simply not what "unclaimed" means. And it now includes
+      // verified funding that never activated, which the old figure could not
+      // see at all. What both halves have in common is the only thing a sponsor
+      // is actually being asked to trust: the operator is holding this NIM and
+      // has not yet finished sending it on.
       text:
         'Nothing limits the size of a drop, so the amount at risk is whatever sponsors have ' +
-        `funded and nobody has claimed yet. That is ${atRisk} NIM right now, and your drop adds to it.`,
+        `funded and the operator has not finished paying out. That is ${atRisk} NIM right now, ` +
+        'and your drop adds to it.',
     },
     {
       id: 'mitigations',
@@ -236,15 +282,20 @@ export function buildDisclosure(o: {
       remaining,
       remainingLuna: capacity.remainingLuna?.toString() ?? null,
       atRisk,
-      atRiskLuna: capacity.outstandingLuna.toString(),
+      atRiskLuna: atRiskLuna.toString(),
+      outstandingLuna: capacity.outstandingLuna.toString(),
+      unactivatedFundedLuna: capacity.unactivatedFundedLuna.toString(),
       maxLiveDrops: capacity.maxLiveDrops,
       liveDrops: capacity.liveDrops,
       reservedDrafts: capacity.reservedDrafts,
       remainingDrops: capacity.remainingDrops,
     },
     summary:
+      // "unclaimed" was the same untrue word as in the exposure point, in the
+      // one line that sits next to the fund button. What the figure means is
+      // money the operator is holding and has not finished sending on.
       `Your NIM goes to a wallet the operator controls, not to an escrow contract. ` +
-      `${atRisk} NIM is sitting there unclaimed right now.`,
+      `The operator is holding ${atRisk} NIM in it right now.`,
     points,
   }
 }
