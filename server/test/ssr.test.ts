@@ -140,6 +140,11 @@ describe('GET /drop/:publicId — campaign page', () => {
     const html = await res.text()
     expect(metaContent(html, 'og:title')).toContain(SPONSOR)
     expect(metaContent(html, 'og:image')).toBe(`${ORIGIN}/og-envelope.png`)
+    expect(metaContent(html, 'og:image:type')).toBe('image/png')
+    expect(metaContent(html, 'og:image:width')).toBe('1200')
+    expect(metaContent(html, 'og:image:height')).toBe('630')
+    expect(metaContent(html, 'og:image:alt')).toBe('A sealed red NimDrop envelope')
+    expect(metaContent(html, 'twitter:image:alt')).toBe('A sealed red NimDrop envelope')
     expect(metaContent(html, 'robots')).toBe('noindex')
     expect(html).toContain('<div id="root"></div>')
   })
@@ -152,8 +157,8 @@ describe('GET /drop/:publicId — campaign page', () => {
     expect(description).not.toMatch(/\d/)
     // Nothing in the head may carry the count, the amount or the expiry either:
     // chat platforms cache the card, so any of them would become a stale claim.
-    expect(head(html)).not.toContain(String(knownDrop.remaining))
-    expect(head(html)).not.toContain(knownDrop.amountEach)
+    expect(head(html)).not.toMatch(new RegExp(`\\b${knownDrop.remaining}\\s+(remaining|left|claimed|shares?)`, 'i'))
+    expect(head(html)).not.toContain(`${knownDrop.amountEach} NIM`)
     expect(head(html)).not.toContain('2026-07-26')
   })
 

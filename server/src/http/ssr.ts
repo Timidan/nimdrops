@@ -160,7 +160,12 @@ function shell(input: ShellInput): string {
     `    <meta property="og:title" content="${escapeHtml(ogTitle(drop))}" />`,
     `    <meta property="og:description" content="${escapeHtml(indexable ? LANDING_DESCRIPTION : OG_DESCRIPTION)}" />`,
     `    <meta property="og:image" content="${escapeHtml(`${origin}/og-envelope.png`)}" />`,
+    '    <meta property="og:image:type" content="image/png" />',
+    '    <meta property="og:image:width" content="1200" />',
+    '    <meta property="og:image:height" content="630" />',
+    '    <meta property="og:image:alt" content="A sealed red NimDrop envelope" />',
     '    <meta name="twitter:card" content="summary_large_image" />',
+    '    <meta name="twitter:image:alt" content="A sealed red NimDrop envelope" />',
     '    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />',
     assetTags,
   ]
