@@ -7,7 +7,7 @@ import { migrate } from '../src/db/migrate'
 import type { AlertKind, Alerts } from '../src/services/alerts'
 import { ClaimRejectedError, issueChallenge, reserveClaim } from '../src/services/claims'
 import { CloseRejectedError, closeDropBySponsor, issueCloseChallenge } from '../src/services/close'
-import { createDraft, submitFunding } from '../src/services/drops'
+import { createDraft, getPublic, submitFunding } from '../src/services/drops'
 import { settleTerminal, sweepExpiry } from '../src/services/expiry'
 import { PausedError } from '../src/services/solvency'
 import { runWorkerTick } from '../src/services/transfers'
@@ -392,6 +392,43 @@ describe.skipIf(!hasDb)('sponsor-initiated early close (real Postgres)', () => {
 
     // Every luna accounted for exactly once.
     expect(await allocatedLuna(publicId)).toBe(AMOUNT_EACH * BigInt(CLAIM_COUNT))
+  })
+
+  /**
+   * The claimant's screen says "the sponsor ended this early" on the strength
+   * of this field, and it used to say it on the strength of a client-side
+   * guess: left `live`, shares still showing, deadline still ahead. The guess
+   * failed in the case it existed for — a sponsor closing in the last minutes
+   * of the window reads as an ordinary expiry — so the reason is served.
+   */
+  it('publishes WHY the drop closed, and publishes nothing while it is open', async () => {
+    const { publicId, sponsor } = await liveDrop()
+
+    // Open: no reason at all. Not `expired` by default, not an omitted field.
+    expect((await getPublic(pool, publicId)).closingReason).toBeNull()
+
+    await closeAs(publicId, sponsor)
+    expect((await getPublic(pool, publicId)).closingReason).toBe('closed_by_sponsor')
+
+    // And it survives the refund: the claimant who opens the link tomorrow is
+    // owed the same sentence as the one who opened it a second after the close.
+    await drainWorker()
+    await settleTerminal(pool)
+    const after = await getPublic(pool, publicId)
+    expect(after.state).toBe('refunded')
+    expect(after.closingReason).toBe('closed_by_sponsor')
+  })
+
+  it('publishes `expired` for the sweeper\'s close, which is a different sentence', async () => {
+    const { publicId } = await liveDrop()
+    await expireNow(publicId)
+    await sweepExpiry(pool, alerts)
+
+    // Same shape as an early close from the outside — a drop that left `live`
+    // with shares unclaimed — and the reader is told the truth about which.
+    const pub = await getPublic(pool, publicId)
+    expect(pub.remaining).toBeGreaterThan(0)
+    expect(pub.closingReason).toBe('expired')
   })
 
   it('honours a claim reserved a millisecond earlier: closing never takes it back', async () => {

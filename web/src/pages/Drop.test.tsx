@@ -587,7 +587,13 @@ describe('Drop — states that are not a claim', () => {
   })
 
   it('names the sponsor when they closed the drop early, and says who is still paid', async () => {
-    installFetch({ drop: { status: 200, body: dropBody({ state: 'closing', remaining: 3 }) } })
+    installFetch({
+      drop: {
+        status: 200,
+        // The server's reason, not a shape this screen reads a reason out of.
+        body: dropBody({ state: 'closing', closingReason: 'closed_by_sponsor', remaining: 3 }),
+      },
+    })
     mount()
 
     expect(await screen.findByText(/the sponsor closed this drop/i)).toBeTruthy()

@@ -140,6 +140,19 @@ export interface DropPublic {
    */
   expiryHours?: number
   expiresAt: string | null
+  /**
+   * Why the drop is no longer claimable, or `null` while it still is.
+   *
+   * The server's word, not a derivation from `state`, `remaining` and the
+   * deadline — that guess got the one case it existed for wrong, reading a
+   * sponsor's close in the drop's last minutes as an ordinary expiry.
+   *
+   * Optional in the type for the same reason `expiryHours` is: a build talking
+   * to a server from before this field existed must say nothing rather than
+   * conclude something. `undefined` and `null` therefore both mean "no reason
+   * to show", and no screen may read either as a close.
+   */
+  closingReason?: 'expired' | 'exhausted' | 'closed_by_sponsor' | null
   fundingTxHash?: string
 }
 

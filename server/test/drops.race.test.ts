@@ -1169,11 +1169,15 @@ describe.skipIf(!hasDb)('drop drafts and exact funding activation (real Postgres
     expect(serialized).not.toContain(rows[0].id)
     // `expiryHours` is on this list deliberately: it is the sponsor's own
     // published choice, already derivable from `expiresAt`, and it says nothing
-    // about any claimant. Every other addition has to be argued for here too.
+    // about any claimant. `closingReason` is here on the same terms: it says
+    // only why the holder of the link cannot claim, and names no address, no
+    // amount and no time. Every other addition has to be argued for here too.
+    expect(pub.closingReason, 'an open drop reports no reason, not a default').toBeNull()
     expect(Object.keys(pub).sort()).toEqual(
       [
         'amountEach',
         'claimCount',
+        'closingReason',
         'expiresAt',
         'expiryHours',
         'fundingTxHash',

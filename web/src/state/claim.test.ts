@@ -157,7 +157,11 @@ describe('useClaim — landing', () => {
       drop: {
         status: 200,
         // Closing WITH the deadline behind it: the ordinary expiry.
-        body: dropBody({ state: 'closing', expiresAt: new Date(Date.now() - 1000).toISOString() }),
+        body: dropBody({
+          state: 'closing',
+          closingReason: 'expired',
+          expiresAt: new Date(Date.now() - 1000).toISOString(),
+        }),
       },
     })
     const { result } = mount()
@@ -169,9 +173,7 @@ describe('useClaim — landing', () => {
     installFetch({
       drop: {
         status: 200,
-        // Shares still unclaimed and the deadline still ahead: nothing but a
-        // sponsor's own close can put a drop in this shape.
-        body: dropBody({ state: 'closing', remaining: 3 }),
+        body: dropBody({ state: 'closing', closingReason: 'closed_by_sponsor', remaining: 3 }),
       },
     })
     const { result } = mount()
@@ -179,12 +181,77 @@ describe('useClaim — landing', () => {
     await waitFor(() => expect(result.current.state).toBe('closed'))
   })
 
-  it('lands in `exhausted`, not `closed`, when the last share was taken', async () => {
-    installFetch({ drop: { status: 200, body: dropBody({ state: 'closing', remaining: 0 }) } })
+  // ---- the reason is the server's, and only the server's -------------------------
+  //
+  // These four are the cases the old client-side derivation got wrong. It read
+  // "left `live`, shares still showing, deadline still ahead" as a sponsor
+  // close, which made the answer depend on the deadline and on the reader's own
+  // clock rather than on what happened.
+
+  it('says `closed` for a sponsor close whose deadline has since passed', async () => {
+    installFetch({
+      drop: {
+        status: 200,
+        // The sponsor closed it minutes before the window ran out; the refund
+        // settled after. Derived, this was an ordinary expiry — which told the
+        // claimant they had been too slow, when in fact they never had a chance.
+        body: dropBody({
+          state: 'refunded',
+          closingReason: 'closed_by_sponsor',
+          remaining: 3,
+          expiresAt: new Date(Date.now() - 60_000).toISOString(),
+        }),
+      },
+    })
     const { result } = mount()
 
-    // No shares left is the exhausted case even with the deadline ahead: the
-    // early-close derivation must never claim a drop that simply filled up.
+    await waitFor(() => expect(result.current.state).toBe('closed'))
+  })
+
+  it('says `expired` for an expiry a slow device still thinks is in the future', async () => {
+    installFetch({
+      drop: {
+        status: 200,
+        // An hour-slow phone reading an expired drop. Derived, this accused a
+        // sponsor of ending a drop they never touched.
+        body: dropBody({
+          state: 'closing',
+          closingReason: 'expired',
+          remaining: 3,
+          expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+        }),
+      },
+    })
+    const { result } = mount()
+
+    await waitFor(() => expect(result.current.state).toBe('expired'))
+  })
+
+  it('concludes nothing when the server sends no reason at all', async () => {
+    installFetch({
+      drop: {
+        status: 200,
+        // A build talking to a server from before the field existed. The shape
+        // the derivation would have called a sponsor close.
+        body: dropBody({ state: 'closing', remaining: 3 }),
+      },
+    })
+    const { result } = mount()
+
+    await waitFor(() => expect(result.current.state).toBe('expired'))
+  })
+
+  it('lands in `exhausted`, not `closed`, when the last share was taken', async () => {
+    installFetch({
+      drop: {
+        status: 200,
+        body: dropBody({ state: 'closing', closingReason: 'exhausted', remaining: 0 }),
+      },
+    })
+    const { result } = mount()
+
+    // No shares left is the exhausted case even with the deadline ahead: a drop
+    // that simply filled up was never closed by anybody.
     await waitFor(() => expect(result.current.state).toBe('expired'))
   })
 

@@ -994,10 +994,14 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
     // The exact key set, so a field added later has to be argued for here
     // rather than appearing on a public read by accident. `expiryHours` is the
     // sponsor's own published choice and is already derivable from
-    // `expiresAt`; it says nothing about any claimant.
+    // `expiresAt`; it says nothing about any claimant. `closingReason` is the
+    // argument for itself: it says only WHY the holder of this link cannot
+    // claim, which is the one thing they are owed, and it names no address, no
+    // amount and no time of the decision.
     expect(Object.keys(pub).sort()).toEqual([
       'amountEach',
       'claimCount',
+      'closingReason',
       'expiresAt',
       'expiryHours',
       'fundingTxHash',
@@ -1007,6 +1011,10 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
       'sponsorLabel',
       'state',
     ])
+    // A drop that has not closed reports NULL. Not a default, not 'expired',
+    // and not an absent key — the claim screen tells "still open" from "we are
+    // not saying" by exactly this value.
+    expect(pub.closingReason).toBeNull()
   })
 
   // ---- validation ----------------------------------------------------------------

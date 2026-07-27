@@ -149,21 +149,21 @@ function clearStored(publicId: string): void {
 /**
  * Whether a drop that is no longer open was ended EARLY by its sponsor.
  *
- * Derived rather than served, because the public projection carries no closing
- * reason — and the derivation is sound: a drop only leaves `live` for three
- * reasons. Its deadline passed (then `expiresAt` is in the past), its last share
- * was taken (then `remaining` is 0), or the sponsor closed it. Shares still
- * showing as remaining, with the deadline still ahead, leaves only the third.
+ * The server's `closingReason`, not a derivation. This used to be inferred from
+ * `state`, `remaining` and the deadline — a drop that had left `live` with
+ * shares still showing and its deadline still ahead was read as a sponsor
+ * close — and that inference was wrong in both directions:
  *
- * Ties go to `expired`: a deadline that has just passed is the ordinary case and
- * the ordinary sentence is the safer one to be wrong with.
+ *  - a sponsor closing a drop in its last minutes, or a refund that settled
+ *    after the deadline passed, read as an ordinary expiry; and
+ *  - the clock it compared against was the READER'S, so a device an hour slow
+ *    turned an expired drop into "the sponsor ended this".
+ *
+ * A server that predates the field sends nothing, and nothing is what this
+ * says: `undefined` is not a close.
  */
 export function closedEarly(drop: DropPublic): boolean {
-  if (drop.state !== 'closing' && drop.state !== 'refunded') return false
-  if (drop.remaining <= 0) return false
-  if (drop.expiresAt === null) return false
-  const deadline = Date.parse(drop.expiresAt)
-  return Number.isFinite(deadline) && deadline > Date.now()
+  return drop.closingReason === 'closed_by_sponsor'
 }
 
 /** What the public drop projection means for someone who wants to claim. */

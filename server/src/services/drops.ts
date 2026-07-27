@@ -245,6 +245,31 @@ export interface FundingChainOptions {
   chainTimeoutMs?: number
 }
 
+/**
+ * Why a drop stopped being claimable, as `drops.closing_reason` records it.
+ *
+ * Every value the column may hold, not only the two {@link ClosingReason} a
+ * close writes: `exhausted` is written by the claim that takes the last slot.
+ * `null` — a drop that has not closed — is the projection's own absence, never
+ * a default.
+ */
+export type PublicClosingReason = 'expired' | 'exhausted' | 'closed_by_sponsor'
+
+const PUBLIC_CLOSING_REASONS: readonly string[] = ['expired', 'exhausted', 'closed_by_sponsor']
+
+/**
+ * The column, narrowed to what this projection promises.
+ *
+ * A value this build does not know about becomes `null` rather than travelling
+ * as an unrecognised string: a screen that branched on it would be branching on
+ * a word nobody here chose, and "we are not telling you why" is the honest
+ * degradation. Unreachable while `drops_closing_reason_allowed` stands.
+ */
+function toClosingReason(raw: string | null): PublicClosingReason | null {
+  if (raw === null || !PUBLIC_CLOSING_REASONS.includes(raw)) return null
+  return raw as PublicClosingReason
+}
+
 /** Public-safe projection of a drop. Never carries claimant addresses or row ids. */
 export interface DropPublic {
   publicId: string
@@ -263,6 +288,19 @@ export interface DropPublic {
    */
   expiryHours: number
   expiresAt: Date | null
+  /**
+   * Why this drop is no longer claimable, or `null` while it still is.
+   *
+   * Served rather than inferred. The claimant's screen used to derive "the
+   * sponsor ended this early" from state, remaining and the deadline, which is
+   * a guess that breaks in exactly the case it exists for — a sponsor closing a
+   * drop in its last minutes reads as an ordinary expiry.
+   *
+   * Safe on an unauthenticated projection: it says only why the person holding
+   * the link cannot claim, which is the one thing they are owed. It names no
+   * sponsor address, no claimant, no time of the decision and no amount.
+   */
+  closingReason: PublicClosingReason | null
   fundingTxHash?: string
 }
 
@@ -406,13 +444,14 @@ interface DropRow {
   activated_height: string | null
   expiry_hours: number
   expires_at: Date | null
+  closing_reason: string | null
   claims_reserved: string
 }
 
 const SELECT_DROP = `
   SELECT d.id, d.public_id, d.sponsor_label, d.message, d.claim_count,
          d.amount_each_luna, d.expected_funding_luna, d.state, d.funding_tx_hash,
-         d.activated_height, d.expiry_hours, d.expires_at,
+         d.activated_height, d.expiry_hours, d.expires_at, d.closing_reason,
          (SELECT count(*) FROM claims c WHERE c.drop_id = d.id)::text AS claims_reserved
   FROM drops d
   WHERE d.public_id = $1
@@ -437,6 +476,7 @@ function toPublic(row: DropRow): DropPublic {
     state: row.state,
     expiryHours: row.expiry_hours,
     expiresAt: row.expires_at,
+    closingReason: toClosingReason(row.closing_reason),
     ...(row.funding_tx_hash === null ? {} : { fundingTxHash: row.funding_tx_hash }),
   }
 }

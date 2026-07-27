@@ -393,6 +393,11 @@ function publicBody(drop: DropPublic): Record<string, unknown> {
     state: drop.state,
     expiryHours: drop.expiryHours,
     expiresAt: drop.expiresAt === null ? null : drop.expiresAt.toISOString(),
+    // Always present, `null` while the drop is still open. Sent as a field
+    // rather than omitted, because "no reason" and "an older server that does
+    // not send one" are different facts and a claimant screen distinguishes
+    // them: the first is a live drop, the second is nothing it may conclude.
+    closingReason: drop.closingReason,
     ...(drop.fundingTxHash === undefined ? {} : { fundingTxHash: drop.fundingTxHash }),
   }
 }
