@@ -201,6 +201,16 @@ const scrimmed = (band: string): Rgb => {
 const FIELD_TOP = scrimmed('--nd-scrim-top')
 const FIELD_BOTTOM = scrimmed('--nd-scrim-bottom')
 
+/**
+ * The custody block is not bare field: `DropView` gives it a 6% near-white
+ * plate and a 16% border, so the copy inside sits on a LIFT. That is the same
+ * arithmetic that broke the quiet pill — a lift raises the floor under the text
+ * on it — and leaving it out of the model would flatter the one line on the
+ * screen that explains who is holding the money. Modelled here rather than
+ * fixed there, because the lift lives in a component this task does not own.
+ */
+const FIELD_CUSTODY: Rgb = literal('rgb(244 243 247)', 0.06, FIELD_BOTTOM)
+
 const SATURATE = Number(token('--nd-saturate').replace('%', '')) / 100
 
 // ---- the card, on each of its three rendering paths --------------------------------
@@ -368,9 +378,15 @@ function fieldPairs(o: Option): Pair[] {
       floor: 4.5,
     },
     {
-      what: 'the custody line, in the bottom scrim band',
-      fg: on(MUTED, FIELD_BOTTOM),
-      bg: FIELD_BOTTOM,
+      what: 'the custody line, on its plate in the bottom scrim band',
+      fg: on(MUTED, FIELD_CUSTODY),
+      bg: FIELD_CUSTODY,
+      floor: 4.5,
+    },
+    {
+      what: 'the custody heading, on the same plate',
+      fg: on(INK, FIELD_CUSTODY),
+      bg: FIELD_CUSTODY,
       floor: 4.5,
     },
   ]
@@ -541,6 +557,31 @@ describe('the gold-versus-vermilion collision', () => {
     for (const c of PATHS) {
       expect(round(ratio(GOLD, c.well)), c.path).toBeGreaterThanOrEqual(4.5)
     }
+  })
+
+  /**
+   * The gold `DropView` paints that is not the currency mark. These are not
+   * `--nd-accent` — they are the raw `text-gold` / `border-gold` utilities, so
+   * they stay Nimiq gold under both options and have to be checked on their
+   * own. All are non-text marks beside copy that states the same fact, so the
+   * floor is 3:1.
+   *
+   * They are pinned here because the stylesheet's commentary once claimed gold
+   * appeared exactly once and the render disagreed. A claim about how rare a
+   * colour is should fail a build when it stops being true, not age quietly in
+   * a comment.
+   */
+  it('keeps every other gold mark legal where it actually sits', () => {
+    for (const c of PATHS) {
+      expect(
+        round(ratio(GOLD, c.sheet)),
+        `the message keyline, the opening pulse and the outcome mark, ${c.path}`,
+      ).toBeGreaterThanOrEqual(3)
+    }
+    // The custody shield is the only gold on the field, and it survives only
+    // because it sits on a plate inside the bottom scrim band.
+    expect(round(ratio(GOLD, FIELD_CUSTODY))).toBeGreaterThanOrEqual(3)
+    expect(round(ratio(GOLD, FIELD_MAX)), 'and would not survive off it').toBeLessThan(3)
   })
 
   /**

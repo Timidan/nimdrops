@@ -252,17 +252,33 @@ describe('the field is stacked the way the contrast model says it is', () => {
    * half gone by then protects nothing — and the contrast model would be
    * claiming protection that is not there.
    */
-  it('holds each scrim band at full strength to a real depth', () => {
+  it('holds each scrim band at full strength across the furniture it protects', () => {
     const stops = block('.nd-field-scrim').match(/var\(--nd-scrim-[\w-]+\)\s+\d+%/g) ?? []
     const at = (token: string) =>
       stops
         .filter((s) => s.startsWith(`var(--nd-scrim-${token})`))
         .map((s) => Number(s.match(/(\d+)%/)![1]))
 
-    // Each band is declared twice, at 0%/10% and at 90%/100%, so it is a held
-    // plateau rather than a point.
-    expect(at('top')).toEqual([0, 10])
-    expect(at('bottom')).toEqual([90, 100])
+    /**
+     * Where the furniture actually is, measured in the owner's Chrome at
+     * 320x720, 390x844 and 1280x800, as a percentage of the field's height:
+     * the masthead occupies 2.1%-5.4% and the custody block 81.7%-97.2%.
+     * Each plateau has to cover its own band with slack, or the contrast model
+     * is giving credit for protection that is not there — which it was, at a
+     * bottom plateau of 90%, leaving the top of the custody block at 4.37:1.
+     */
+    const MASTHEAD_ENDS = 5.4
+    const CUSTODY_BEGINS = 81.7
+
+    const [topFrom, topTo] = at('top')
+    expect(topFrom).toBe(0)
+    expect(topTo, 'the top plateau must outlast the masthead').toBeGreaterThan(MASTHEAD_ENDS)
+
+    const [bottomFrom, bottomTo] = at('bottom')
+    expect(bottomTo).toBe(100)
+    expect(bottomFrom, 'the bottom plateau must start above the custody block').toBeLessThan(
+      CUSTODY_BEGINS,
+    )
     expect(at('clear').length).toBeGreaterThan(0)
   })
 

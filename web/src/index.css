@@ -210,12 +210,15 @@
    * makes the card's blurred region re-read a changed backdrop. Three moving
    * layers measured ~29fps at 6x CPU throttle. One moves here.
    *
-   * The bloom is six stops, not two, and that is not decoration. A two-stop
+   * The bloom is six colours, not two, and that is not decoration. A two-stop
    * wash from vermilion to black is a gradient; a fall-off that passes through
    * a deep oxblood on the way down is a light source, because that is what the
    * inverse-square of a real bloom looks like once the bright core has clipped.
-   * The stops are front-loaded — most of the alpha is spent in the first 40% of
-   * the radius — so the core stays a core rather than smearing into a haze.
+   * The stops are front-loaded — most of the alpha is spent in the first half
+   * of the radius — so the core stays a core rather than smearing into a haze.
+   * `--nd-bloom-core` is placed TWICE in the gradient, at 0% and at 9%, so the
+   * core is a disc with area rather than a single point the blur can average
+   * away; see the note on `.nd-field-light.is-bloom` for what that cost before.
    *
    * The counter-light is a dim oxblood pool with no drift at all. It exists so
    * the field is not one perfect circle on a rectangle, and it costs nothing
@@ -360,12 +363,22 @@
    * the 3:1 non-text floor.
    *
    * The resolution shipped is the thematically stronger one and it is also the
-   * cheaper one: gold appears EXACTLY ONCE, on the NIM currency mark, which
-   * sits in the amount's dark well where it is 7.22:1 and reads as foil on
-   * lacquer. That is the red-packet-and-gold-leaf pairing this product is named
-   * after. Every other job gold used to do — the action, the focus ring, the
-   * share marks — goes to near-white, which is louder on this field than gold
-   * ever was.
+   * cheaper one: gold stops being a UI colour and becomes a material. It does
+   * not carry the action, the focus ring or the share marks any more — those go
+   * to near-white, which is louder on this field than gold ever was — and what
+   * it keeps is the NIM currency mark, which sits in the amount's dark well at
+   * 7.22:1 and reads as foil on lacquer. That is the red-packet-and-gold-leaf
+   * pairing this product is named after.
+   *
+   * "Gold appears exactly once" is the sentence that used to be here and it was
+   * not true of the render. `DropView` also paints gold on the message keyline,
+   * the opening pulse and the outcome mark — all on the dark card at 5.47:1 —
+   * and on the custody shield, which is the only one on the field, at 6.12:1 on
+   * its own plate inside the bottom scrim band. Every one of them clears the
+   * 3:1 non-text floor and `surface.contrast.test.ts` now pins all four, so
+   * this is a question of restraint rather than of legality. The recommendation
+   * stands at three of them going near-white and gold staying on the mark and
+   * the shield, but that edit belongs to `DropView.tsx`, not to this file.
    *
    * `[data-nd-accent='bright']` is the alternative the owner asked to see
    * built: keep one accent doing every job, and push it to `#ffce45` so it
@@ -534,27 +547,54 @@ body {
  * BEHIND the content rather than a vignette around it, and so the field
  * darkens up and to the left, which is where the masthead lives.
  *
- * `blur(56px)` on top of a six-stop gradient looks redundant and is not: the
- * stops give the fall-off its shape, the blur kills the concentric stepping
- * that an 8-bit panel finds in any smooth radial. The grain layer above
- * finishes the job.
+ * The three numbers below — the vertical anchor, the core's WIDTH, and the
+ * blur radius — were set by measuring the render, not by reading the gradient.
+ * The first version of this declaration was arithmetically correct and painted
+ * almost nothing: a core stop at `0%` has no area, `blur(56px)` averages a
+ * zero-area stop straight out of existence, and an anchor at `88%` put what
+ * survived below the fold on a 390x844 phone. Measured on the owner's Chrome,
+ * the brightest pixel the field actually reached was `rgb(81 33 18)` — a dark
+ * maroon smudge, against a specified core of `#ff4d14`. The palette was legal
+ * and invisible.
+ *
+ * So the core is given a real radius to hold, the blur comes down to the point
+ * where it still kills the stepping an 8-bit panel finds in a smooth radial,
+ * and the anchor comes up until the source is on screen. Measured again after:
+ * `rgb(161 55 22)`, and it now reads as a light rather than a stain.
+ *
+ * 70% and not lower is a second, separate measurement. The bottom scrim band
+ * has to hold full strength across the custody block, which starts at 81.7% of
+ * the field on the tightest screen — so the band's plateau begins at 80%, and
+ * an anchor much below that would put the core inside the darkest part of the
+ * scrim and hand back everything the reshape bought. At 70% the source sits
+ * clear of the band: the bloom got BRIGHTER (137 to 161 in red) and the custody
+ * block simultaneously got darker and safer (5.75:1 to 6.42:1). Those two are
+ * usually a trade and here they were not, which is the only reason the number
+ * is 70 rather than a compromise.
+ *
+ * None of this touches a contrast floor, and that is the point of doing it this
+ * way round. Every floor is computed against `--nd-field-max`, which is the
+ * core's colour at full strength — the bound the render was always allowed to
+ * approach and never did. Making the light real spends headroom the tests had
+ * already certified; it does not ask for any.
  */
 .nd-field-light.is-bloom {
-  top: 88%;
+  top: 70%;
   left: 58%;
   width: 100vmax;
   height: 100vmax;
   margin-top: -50vmax;
   margin-left: -50vmax;
-  filter: blur(56px);
+  filter: blur(40px);
   opacity: var(--nd-bloom-o);
   background: radial-gradient(
     closest-side,
     var(--nd-bloom-core) 0%,
-    var(--nd-bloom-hot) 14%,
-    var(--nd-bloom-mid) 29%,
-    var(--nd-bloom-deep) 45%,
-    var(--nd-bloom-edge) 66%,
+    var(--nd-bloom-core) 9%,
+    var(--nd-bloom-hot) 20%,
+    var(--nd-bloom-mid) 34%,
+    var(--nd-bloom-deep) 48%,
+    var(--nd-bloom-edge) 68%,
     var(--nd-bloom-fade) 100%
   );
   /* The one promoted element on the page, and the only one that drifts. */
@@ -654,10 +694,18 @@ body {
  * NEEDS them, which is why both bands hold their declared strength to a fixed
  * depth instead of peaking at the very edge and immediately fading. The
  * masthead is the field's first element and the custody line is its last, and
- * both sit a few percent in from the edge, so a scrim that is already half
- * gone by then protects nothing. `surface.contrast.test.ts` computes those two
- * floors against these alphas and `surface.test.ts` checks the held bands are
- * still declared.
+ * a scrim that is already half gone by the time it reaches them protects
+ * nothing. `surface.contrast.test.ts` computes those two floors against these
+ * alphas, so where each plateau STARTS is arithmetic and not composition.
+ *
+ * Both plateau boundaries are measured rather than chosen. Across 320x720,
+ * 390x844 and 1280x800 the masthead occupies 2.1%–5.4% of the field and the
+ * custody block occupies 81.7%–97.2%. The top plateau therefore holds to 10%
+ * and the bottom one from 80%, each with a few points of slack for a longer
+ * strapline or a third line of custody copy. `surface.test.ts` asserts both
+ * boundaries so the model cannot quietly stop being true — the earlier value
+ * here was 90%, which left the top third of the custody block on a half-faded
+ * scrim at 4.37:1, under its floor.
  */
 .nd-field-scrim {
   position: absolute;
@@ -670,7 +718,7 @@ body {
     var(--nd-scrim-top) 10%,
     var(--nd-scrim-clear) 34%,
     var(--nd-scrim-clear) 62%,
-    var(--nd-scrim-bottom) 90%,
+    var(--nd-scrim-bottom) 80%,
     var(--nd-scrim-bottom) 100%
   );
 }
