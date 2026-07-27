@@ -49,11 +49,13 @@ const css = readFileSync(resolve(process.cwd(), 'src/index.css'), 'utf8')
 const shipped = css.replace(/\/\*[\s\S]*?\*\//g, '')
 
 /**
- * The part of the stylesheet this direction owns. Everything past the LEGACY
- * marker belongs to the create flow and is deleted with it; holding it to rules
- * written after it was frozen would only produce noise.
+ * The stylesheet this direction owns, which is now all of it. There used to be
+ * a quarantined block past a LEGACY marker — the create flow's paper, its
+ * envelope and its wax — held to older rules because the screen that used it
+ * could not be edited. That screen is on the field now and the block went with
+ * it, so the rules below apply to the whole file.
  */
-const owned = shipped.slice(0, shipped.indexOf('.nd-page {'))
+const owned = shipped
 
 /** The body of one top-level rule, by selector. */
 function block(selector: string): string {
@@ -372,11 +374,6 @@ describe('nothing in the choreography can make the page scroll sideways', () => 
     expect(block('.nd-field')).toMatch(/overflow:\s*clip/)
   })
 
-  /** The create flow's paper keeps the same guarantee it always had. */
-  it('still clips the legacy paper on the inline axis', () => {
-    expect(block('.nd-face')).toMatch(/overflow-x:\s*clip/)
-  })
-
   /** Unmounting early would cut a particle off mid-flight. */
   it('keeps the burst mounted for the whole of its longest particle', () => {
     const declared = block('.nd-bit').match(/animation:\s*nd-fly\s+var\((--[\w-]+)\)/)
@@ -606,7 +603,19 @@ describe('the warm-neutral default is gone', () => {
     expect(shipped.toLowerCase()).not.toContain('f0ebdd')
   })
 
-  it('resolves the deprecated paper token to the plate rather than a warm value', () => {
-    expect(css).toMatch(/--color-paper:\s*var\(--color-plate\)/)
+  /**
+   * The bridge is gone with the screen that needed it. `--color-paper` existed
+   * for exactly one reason — `Create.tsx` still wrote `text-paper` while the
+   * palette moved underneath it — and the stylesheet said to delete it with
+   * that flow's redesign. This is that deletion, asserted so the name cannot
+   * come back with the value behind it.
+   */
+  it('has no paper token, and no light paper surface for one to dress', () => {
+    expect(css).not.toMatch(/--color-paper\s*:/)
+    for (const gone of ['.nd-page', '.nd-envelope', '.nd-face', '.nd-wax', '.nd-flap']) {
+      expect(shipped, `${gone} should be gone with the create flow's paper`).not.toContain(
+        `${gone} {`,
+      )
+    }
   })
 })

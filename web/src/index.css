@@ -119,23 +119,10 @@
 
 @theme {
   /**
-   * `--color-ink` is Nimiq's own, read from `nimiq-style/src/theme.css`. It
-   * dresses the create flow's paper and nothing on the claim surface.
-   */
-  --color-ink: #1f2348;
-  /**
    * Nimiq gold. It is the CURRENCY MARK's colour and, by default, nothing
    * else's — see the note on `--nd-accent` for why one hue had to give way.
    */
   --color-gold: #e9b213;
-  /**
-   * Deep gold, for gold-coloured text and focus rings on a LIGHT surface. The
-   * only light surface left is the create flow's paper, which is the one place
-   * this is still used: `#7c5b04` is 5.67:1 there, where `#e9b213` is 2.43:1
-   * and fails both the 4.5:1 text floor and the 3:1 non-text floor.
-   */
-  --color-gold-deep: #7c5b04;
-
   /**
    * The near-white. Warm, and deliberately so: it is the paper colour of a red
    * packet, it is the amount's colour, and on a vermilion field a cool white
@@ -153,22 +140,16 @@
   /** Text on chalk: the action label, the settled pill. 16.64:1. */
   --color-chalk-ink: #17100e;
 
-  /** The create flow's paper. Legacy; goes when that flow is redesigned. */
+  /**
+   * The near-white the claim surface's own modal sheet writes its strong text
+   * in. It was the create flow's paper; that flow is on the field now, and
+   * what is left of this token is a text colour rather than a surface.
+   */
   --color-plate: #f4f3f7;
   /** The field's darkest base, before the radial and the bloom. */
   --color-field: #0e0a09;
   /** What the glass card becomes when it cannot be glass. */
   --color-sheet: #19110f;
-
-  /**
-   * DEPRECATED, and load-bearing until the create flow is redesigned.
-   *
-   * `Create.tsx` still writes `text-paper` and may not be edited from this
-   * task, so removing the utility outright would leave that screen with
-   * invisible text. The VALUE `#fbf9f4` is gone; this name now resolves to the
-   * chroma-0 plate. Delete this line together with the create flow's redesign.
-   */
-  --color-paper: var(--color-plate);
 
   /**
    * One family, in weights. `system-ui` is deliberately NOT in this list: it is
@@ -522,14 +503,6 @@
   --nd-z-scrim: 40;
   --nd-z-dialog: 41;
   --nd-z-toast: 60;
-
-  /* ---- legacy: the create flow's envelope --------------------------------
-   * Quarantined below. See the LEGACY section at the foot of this file.
-   */
-  --nd-flap-h: clamp(6.5rem, 30vw, 8.125rem);
-  --nd-headroom: calc(var(--nd-flap-h) * 0.68);
-  --nd-open-angle: -132deg;
-  --nd-wax-size: 3.5rem;
 }
 
 /**
@@ -1522,13 +1495,6 @@ body {
   outline-offset: 2px;
 }
 
-/* The create flow's paper is the one light surface left, and a near-white ring
-   is invisible on it. Deep gold is 5.7:1 there and is the ring. The amount's
-   well is a dark surface now and keeps the default. */
-:where(.nd-face) :where(button, a, input, [tabindex]):focus-visible {
-  outline-color: var(--color-gold-deep);
-}
-
 /* ===========================================================================
  * Small parts
  * ======================================================================== */
@@ -1864,21 +1830,26 @@ body {
 }
 
 /**
- * A solid fill over the sheet's barrier, at the same 10% the trivia answer
- * uses, so there is one input surface in the product rather than two.
+ * A well, not a raised tile, and that is arithmetic rather than metaphor. The
+ * trivia answer's 10% near-white LIFT puts a placeholder at 4.01:1 on the glass
+ * card — under the body floor a placeholder is held to — where the same recess
+ * the explanation panel uses clears it. Every nested surface on this palette
+ * has to pick a direction, and over a field this bright the only direction with
+ * headroom in it is down. The stepper's buttons keep the lift, which is what
+ * makes them read as controls beside the well rather than as more of it.
  *
- * 16px of type is not a preference. Under it, iOS zooms the viewport on focus,
- * and a page that zooms while a sponsor is typing an amount moves the number
- * they are checking out from under their thumb.
+ * 16px of type is not a preference either. Under it, iOS zooms the viewport on
+ * focus, and a page that zooms while a sponsor is typing an amount moves the
+ * number they are checking out from under their thumb.
  */
 .nd-input {
   display: block;
   width: 100%;
   min-height: 3rem;
   padding: 0.75rem 0.9375rem;
-  border: 1px solid var(--nd-rule-strong);
+  border: 1px solid var(--nd-rule);
   border-radius: 0.875rem;
-  background-color: rgb(245 240 238 / 0.1);
+  background-color: rgb(12 7 6 / 0.32);
   color: var(--nd-on-surface);
   font: inherit;
   font-size: 1rem;
@@ -1916,9 +1887,9 @@ body {
   gap: 0.5rem;
   min-height: 3.5rem;
   padding: 0.625rem 0.9375rem;
-  border: 1px solid var(--nd-rule-strong);
+  border: 1px solid var(--nd-rule);
   border-radius: 1rem;
-  background-color: rgb(245 240 238 / 0.1);
+  background-color: rgb(12 7 6 / 0.32);
 }
 
 .nd-amountbox input {
@@ -3597,240 +3568,4 @@ body {
   .nd-revealed[data-theatre='true'] .nd-money {
     animation: none;
   }
-}
-
-/* ===========================================================================
- * LEGACY — the create flow's envelope
- * ===========================================================================
- *
- * `Create.tsx` still renders `ui/Envelope.tsx` and the `.nd-face` paper. The
- * claim surface no longer does: `DropView` is a field and a sheet, and the
- * envelope's own test file has been replaced by tests against the new surface.
- *
- * This block exists only so the sponsor's flow keeps working while the create
- * flow is redesigned as its own task, and it goes when that lands. It has been
- * retinted off `#fbf9f4` onto the chroma-0 plate, because that value must not
- * survive anywhere in shipped CSS; the retint is the only change to it.
- */
-
-.nd-page {
-  display: flex;
-  justify-content: center;
-  min-height: 100dvh;
-  background-color: var(--color-ink);
-  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)
-    env(safe-area-inset-left);
-}
-
-.nd-page-column {
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-  min-width: 0;
-  max-width: 26.875rem;
-}
-
-.nd-envelope {
-  position: relative;
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  margin-top: var(--nd-headroom);
-  perspective: 900px;
-}
-
-.nd-face {
-  position: relative;
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  min-width: 0;
-  padding-right: var(--nd-gutter);
-  padding-left: var(--nd-gutter);
-  border-radius: 0.75rem 0.75rem 0 0;
-  /* `clip` rather than `hidden`: this must not become a scroll container. */
-  overflow-x: clip;
-  background-color: var(--color-plate);
-  color: var(--color-ink);
-  box-shadow: 0 1.125rem 2.75rem -1.25rem rgb(0 0 0 / 0.6);
-  transition: transform 620ms cubic-bezier(0.22, 1.15, 0.36, 1) 90ms;
-}
-
-.nd-face--sealed {
-  padding-top: calc(var(--nd-flap-h) + 1.5rem);
-}
-
-.nd-envelope[data-envelope-open='true'] .nd-face {
-  transform: translateY(-6px);
-}
-
-.nd-liner {
-  position: absolute;
-  top: 0;
-  right: 0;
-  left: 0;
-  z-index: 1;
-  height: calc(var(--nd-flap-h) + 0.25rem);
-  border-radius: 0.75rem 0.75rem 0 0;
-  /* Cool, matching the plate it is a shadow on. */
-  background-image: linear-gradient(
-    180deg,
-    rgb(40 34 66 / 0.16) 0%,
-    rgb(40 34 66 / 0.06) 44%,
-    rgb(40 34 66 / 0) 100%
-  );
-  opacity: 0;
-  transition: opacity 520ms ease-out 220ms;
-  pointer-events: none;
-}
-
-.nd-envelope[data-envelope-open='true'] .nd-liner {
-  opacity: 1;
-}
-
-.nd-flap {
-  position: absolute;
-  top: 0;
-  right: 0;
-  left: 0;
-  z-index: 2;
-  height: var(--nd-flap-h);
-  transform-origin: top center;
-  transform: rotateX(0deg);
-  transition: transform 640ms cubic-bezier(0.22, 1.15, 0.36, 1) 90ms;
-  pointer-events: none;
-}
-
-.nd-envelope[data-envelope-open='true'] .nd-flap {
-  transform: rotateX(var(--nd-open-angle));
-}
-
-.nd-flap-face {
-  height: 100%;
-  border-radius: 0.75rem 0.75rem 0 0;
-  clip-path: polygon(0 0, 100% 0, 50% 100%);
-  background-image: linear-gradient(176deg, #fafafc 0%, #f0eff5 62%, #e6e5ee 100%);
-  filter: drop-shadow(0 2px 3px rgb(31 35 72 / 0.13));
-}
-
-.nd-envelope[data-envelope-open='true'] .nd-flap-face {
-  filter: drop-shadow(0 6px 12px rgb(10 12 30 / 0.4)) brightness(0.9);
-}
-
-.nd-seal {
-  position: absolute;
-  top: calc(var(--nd-flap-h) - var(--nd-wax-size) / 2);
-  left: 50%;
-  z-index: 3;
-  transform: translateX(-50%);
-  transition: transform 420ms cubic-bezier(0.4, 0, 0.2, 1);
-  pointer-events: none;
-}
-
-.nd-envelope[data-envelope-open='true'] .nd-seal {
-  transform: translateX(-50%) scale(0.86);
-}
-
-.nd-wax {
-  position: relative;
-  display: inline-block;
-  flex-shrink: 0;
-  width: var(--nd-wax-size);
-  height: var(--nd-wax-size);
-  transform: rotate(-7deg);
-}
-
-.nd-wax-half {
-  position: absolute;
-  inset: 0;
-  border-radius: 47% 53% 52% 48% / 51% 49% 51% 49%;
-  background-image:
-    radial-gradient(ellipse 70% 60% at 38% 30%, rgb(255 249 219 / 0.5) 0%, rgb(255 249 219 / 0) 62%),
-    radial-gradient(circle at 50% 44%, #e8b422 0%, #d9a412 58%, #ab7f08 100%);
-  box-shadow:
-    inset 0 1px 1px rgb(255 244 205 / 0.5),
-    inset 0 -2px 4px rgb(96 62 2 / 0.45),
-    0 1px 2px rgb(31 35 72 / 0.3),
-    0 5px 10px -5px rgb(31 35 72 / 0.5);
-  transition:
-    transform 480ms cubic-bezier(0.3, 1.1, 0.4, 1),
-    opacity 380ms ease-out;
-}
-
-.nd-wax-half::after {
-  content: '';
-  position: absolute;
-  inset: 13%;
-  border-radius: inherit;
-  box-shadow:
-    inset 0 0 0 1.5px rgb(112 74 4 / 0.26),
-    inset 0 1px 0 rgb(255 244 205 / 0.3);
-}
-
-.nd-wax-half.is-left {
-  clip-path: inset(0 49.6% 0 0);
-}
-.nd-wax-half.is-right {
-  clip-path: inset(0 0 0 49.6%);
-}
-
-.nd-envelope[data-envelope-open='true'] .nd-wax-half.is-left {
-  transform: translateX(-0.6rem) rotate(-13deg);
-  opacity: 0;
-}
-.nd-envelope[data-envelope-open='true'] .nd-wax-half.is-right {
-  transform: translateX(0.6rem) rotate(13deg);
-  opacity: 0;
-}
-
-.nd-wax-mark {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  font-size: calc(var(--nd-wax-size) * 0.36);
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  color: color-mix(in srgb, var(--color-ink) 72%, transparent);
-  text-shadow: 0 1px 0 rgb(255 244 205 / 0.4);
-  transition: opacity 240ms ease-out;
-}
-
-.nd-envelope[data-envelope-open='true'] .nd-wax-mark {
-  opacity: 0;
-}
-
-.nd-envelope[data-envelope-tone='quiet'] .nd-wax-half {
-  background-image:
-    radial-gradient(ellipse 70% 60% at 38% 30%, rgb(255 255 255 / 0.4) 0%, rgb(255 255 255 / 0) 62%),
-    radial-gradient(circle at 50% 44%, #cdc8bb 0%, #b6b1a2 58%, #8e8977 100%);
-}
-
-/* The create flow's own buttons, on paper. */
-.nd-primary {
-  border-radius: 1rem;
-  background-color: var(--color-ink);
-  color: var(--color-plate);
-  font-size: 1rem;
-  font-weight: 600;
-  padding: 0.9rem 1.25rem;
-  min-height: 3.25rem;
-  transition: opacity var(--nd-t-press) ease-out;
-}
-.nd-primary:disabled {
-  opacity: 0.35;
-}
-.nd-primary:not(:disabled):active {
-  opacity: 0.85;
-}
-
-.nd-secondary {
-  border-radius: 1rem;
-  border: 1px solid color-mix(in srgb, var(--color-ink) 14%, transparent);
-  background-color: transparent;
-  color: var(--color-ink);
-  font-size: 1rem;
-  font-weight: 600;
-  padding: 0.9rem 1.25rem;
-  min-height: 3.25rem;
 }

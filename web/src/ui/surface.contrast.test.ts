@@ -210,6 +210,7 @@ interface Card {
   pillQuiet: Rgb
   panel: Rgb
   panelWarn: Rgb
+  round: Rgb
 }
 
 const HOT = parse(token('--nd-hot')).rgb
@@ -227,6 +228,12 @@ function card(path: string, sheet: Rgb): Card {
     panel: literal('rgb(12 7 6)', 0.32, sheet),
     /** The warn wash is a background image ON the panel, so it composites over it. */
     panelWarn: over(HOT, 0.11, literal('rgb(12 7 6)', 0.32, sheet)),
+    /**
+     * The 44px circle, on the sheet rather than on the field. The create flow's
+     * people stepper is the only place it carries TEXT — a minus sign and a
+     * plus sign — so unlike the claim screen's icon rail it is held to 4.5:1.
+     */
+    round: literal('rgb(245 240 238)', 0.06, sheet),
   }
 }
 
@@ -328,6 +335,22 @@ function cardPairs(c: Card, o: Option): Pair[] {
 
     // --- the small parts ---
     { what: 'a trivia answer, unpicked', fg: on(INK, c.option), bg: c.option, floor: 4.5 },
+
+    // --- the create form, whose fields are wells rather than tiles ---
+    { what: "a form field's own value", fg: on(INK, c.panel), bg: c.panel, floor: 4.5 },
+    {
+      // Held to the BODY floor, not to a muted-grey default. A placeholder
+      // nobody can read is a label nobody has. On the trivia answer's 10% lift
+      // this lands at 4.01:1, which is why the fields are recessed instead.
+      what: "a form field's placeholder",
+      fg: on(MUTED, c.panel),
+      bg: c.panel,
+      floor: 4.5,
+    },
+    { what: "the amount field's NIM suffix", fg: on(INK, c.panel), bg: c.panel, floor: 4.5 },
+    { what: "the stepper's minus and plus glyphs", fg: on(INK, c.round), bg: c.round, floor: 4.5 },
+    { what: "a stepper button's hairline (non-text)", fg: on(RULE_STRONG, c.sheet), bg: c.sheet, floor: 1.4 },
+    { what: "the custody control's headline, on its recess", fg: on(INK, c.panel), bg: c.panel, floor: 4.5 },
     { what: 'a trivia answer, picked', fg: on(INK, c.optionPicked), bg: c.optionPicked, floor: 4.5 },
     { what: 'a live status pill', fg: on(INK, c.pillLive), bg: c.pillLive, floor: 4.5 },
     { what: 'a quiet status pill', fg: on(MUTED, c.pillQuiet), bg: c.pillQuiet, floor: 4.5 },
@@ -403,6 +426,26 @@ function fieldPairs(o: Option): Pair[] {
     { what: 'a rail icon (non-text), on its 6% lift', fg: on(INK, FIELD_ROUND), bg: FIELD_ROUND, floor: 3 },
     { what: "a rail button's hairline (non-text)", fg: on(RULE_STRONG, FIELD_MAX), bg: FIELD_MAX, floor: 1.4 },
 
+    // --- the create flow's field furniture ---
+    {
+      what: "THE CREATE TOTAL and the limits ledger's figures, on the field's recess",
+      fg: on(INK, FIELD_RECESS),
+      bg: FIELD_RECESS,
+      floor: 4.5,
+    },
+    {
+      what: "a closed-funding alert's hot edge (non-text), on the field's recess",
+      fg: HOT,
+      bg: FIELD_RECESS,
+      floor: 3,
+    },
+    {
+      what: "the waiting beacon and an outcome mark (non-text), on the bare field",
+      fg: o.mark,
+      bg: FIELD_MAX,
+      floor: 3,
+    },
+
     // --- worst case, bare ---
     { what: 'the focus ring, on the bare field', fg: o.focus, bg: FIELD_MAX, floor: 3 },
 
@@ -451,19 +494,21 @@ function envelopePairs(): Pair[] {
   ]
 }
 
-/** The one surface that is not on the field at all. */
-const LEGACY: Pair[] = [
+/**
+ * The one surface in the product that is near-white rather than near-black: the
+ * chalk fill of a primary action, of a settled pill, and of the current step on
+ * the create flow's funding rail.
+ *
+ * The pair that used to sit beside it — deep gold on the create flow's paper —
+ * went with the paper. There is no light surface left for a gold ring to be
+ * legible on, and no gold ring.
+ */
+const ON_CHALK: Pair[] = [
   {
-    what: "the settled pill, and the action label on near-white",
+    what: 'the settled pill, the action label, and the current funding step',
     fg: parse(token('--color-chalk-ink')).rgb,
     bg: parse(token('--color-chalk')).rgb,
     floor: 4.5,
-  },
-  {
-    what: "the focus ring, on the create flow's paper",
-    fg: parse(token('--color-gold-deep')).rgb,
-    bg: parse(token('--color-plate')).rgb,
-    floor: 3,
   },
 ]
 
@@ -617,7 +662,7 @@ describe('the sealed envelope', () => {
 })
 
 describe('the surfaces that are not on the field', () => {
-  it.each(LEGACY)('$what clears $floor:1', ({ fg, bg, floor }) => {
+  it.each(ON_CHALK)('$what clears $floor:1', ({ fg, bg, floor }) => {
     expect(round(ratio(fg, bg))).toBeGreaterThanOrEqual(floor)
   })
 })
@@ -666,8 +711,9 @@ describe('the gold-versus-vermilion collision', () => {
      * and say why.
      */
     const shipped = css.replace(/\/\*[\s\S]*?\*\//g, '')
-    const owned = shipped.slice(0, shipped.indexOf('.nd-page {'))
-    const uses = [...owned.matchAll(/(?:color|background(?:-color)?|stroke|fill):\s*var\(--nd-accent\)/g)]
+    const uses = [...shipped.matchAll(/(?:color|background(?:-color)?|stroke|fill):\s*var\(--nd-accent\)/g)]
+    // One declaration, on a grouped selector: the claimant's custody line and
+    // the sponsor's custody control are the same mark on the same surface.
     expect(uses).toHaveLength(1)
   })
 
@@ -719,7 +765,7 @@ describe('the table', () => {
       out.push('--- the field ---', ...fieldPairs(o).map(line))
     }
     out.push('--- the sealed envelope ---', ...envelopePairs().map(line))
-    out.push('--- elsewhere ---', ...LEGACY.map(line), '')
+    out.push('--- elsewhere ---', ...ON_CHALK.map(line), '')
     console.log(out.join('\n'))
 
     expect(out.length).toBeGreaterThan(0)

@@ -1,45 +1,37 @@
 import { useEffect, useId, useRef, type ReactNode } from 'react'
-import { Wax } from './Envelope'
 
 /**
- * A bottom sheet: the review surface of the create flow.
+ * A bottom sheet: the modal both sides of the link read a disclosure in.
  *
  * It is a real modal dialog — labelled, escapable, focus moved into it on open,
  * page scroll locked while it is up. The slide-in is CSS only and is disabled
  * by `prefers-reduced-motion` in `index.css` (design §4.4), so the sheet is
  * fully usable with animation off.
  *
- * `sealMark` puts the same wax on it that a claimant will break. This is the
- * moment the sponsor seals the envelope, so it should look like the same
- * object from the other side.
+ * It is a SOLID panel rather than a second pane of glass: nothing translucent
+ * stacks on the sheet, and a modal that blurred what is behind it would be the
+ * second blurred region on the screen, which is the thing the WebView budget
+ * cannot afford.
+ *
+ * It used to press a disc of gold wax with the sponsor's initial above the
+ * title of the review sheet, on the argument that this was the moment the
+ * sponsor sealed an envelope the claimant would open. The claim surface's
+ * packet carries the Nimiq signet and never an initial, so the two seals were
+ * never the same object; the wax went with the create flow's redesign.
  */
 export interface SheetProps {
   open: boolean
   title: string
   onClose: () => void
-  /** The sponsor's initial, pressed into the wax above the title. */
-  sealMark?: string
   /**
-   * Which surface the sheet is opening over.
-   *
-   * `plate` is the create flow's paper. `field` is the claim surface's dark
-   * field, and it is a SOLID panel rather than a second pane of glass: nothing
-   * translucent stacks on the sheet, and a modal that blurs what is behind it
-   * would be the second blurred region on the screen, which is the thing the
-   * WebView budget cannot afford.
+   * Kept as a named surface rather than assumed, because a sheet opening over
+   * something other than the field would need its own contrast pass.
    */
-  surface?: 'plate' | 'field'
+  surface?: 'field'
   children: ReactNode
 }
 
-export default function Sheet({
-  open,
-  title,
-  onClose,
-  sealMark,
-  surface = 'plate',
-  children,
-}: SheetProps) {
+export default function Sheet({ open, title, onClose, surface = 'field', children }: SheetProps) {
   const titleId = useId()
   const panel = useRef<HTMLDivElement>(null)
 
@@ -87,16 +79,10 @@ export default function Sheet({
          */
         className={`nd-sheet nd-sheet--${surface} relative max-h-[86svh] w-full max-w-[430px] overflow-y-auto overscroll-contain rounded-t-3xl px-6 pt-5 pb-8 shadow-2xl outline-none`}
       >
-        <div
-          aria-hidden="true"
-          className={`mx-auto mb-4 h-1 w-10 rounded-full ${surface === 'field' ? 'bg-plate/25' : 'bg-ink/15'}`}
-        />
-        <div className="flex items-center gap-3">
-          {sealMark !== undefined ? <Wax mark={sealMark} size="2.25rem" /> : null}
-          <h2 id={titleId} className="text-lg font-semibold tracking-tight">
-            {title}
-          </h2>
-        </div>
+        <div aria-hidden="true" className="mx-auto mb-4 h-1 w-10 rounded-full bg-plate/25" />
+        <h2 id={titleId} className="text-lg font-semibold tracking-tight">
+          {title}
+        </h2>
         <div className="mt-4">{children}</div>
       </div>
     </div>
