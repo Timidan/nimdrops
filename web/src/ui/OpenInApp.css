@@ -139,17 +139,12 @@
 }
 
 /* ---- get the app --------------------------------------------------------- */
-
 .nd-getapp {
   margin-top: 1rem;
-  padding: 0.875rem;
-  border: 1px solid var(--nd-rule);
-  border-radius: var(--nd-radius-plate);
-  background-color: var(--nd-recess-field);
 }
 
 .nd-getapp-head {
-  margin: 0 0 0.625rem;
+  margin: 0 0 0.5rem;
   font-size: 0.875rem;
   font-weight: 700;
   letter-spacing: -0.01em;
@@ -157,134 +152,46 @@
 }
 
 .nd-getapp-list {
-  display: grid;
-  gap: 0.5rem;
+  --nd-badge: 2.5rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
   margin: 0;
   padding: 0;
   list-style: none;
 }
 
-/**
- * One store, as a row.
- *
- * A row and not a button, because there are two of them and neither is the
- * primary action on this screen — the deep link above is. The likely store is
- * marked with a brighter edge and comes first; the other is identical in size,
- * reach and reading order weight, because the guess behind that mark is a user
- * agent string and it is routinely wrong.
- */
 .nd-store {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 0 0.75rem;
-  min-height: 3.25rem;
-  padding: 0.625rem 0.75rem 0.625rem 0.875rem;
-  border: 1px solid var(--nd-rule-strong);
-  border-radius: 0.875rem;
-  color: var(--nd-on-surface);
+  display: block;
   text-decoration: none;
-  transition:
-    border-color var(--nd-t-state) var(--nd-ease),
-    background-color var(--nd-t-state) var(--nd-ease);
 }
 
-.nd-store[data-likely='true'] {
-  border-color: rgb(245 240 238 / 0.46);
-  background-color: rgb(245 240 238 / 0.07);
+.nd-store img {
+  display: block;
+  width: auto;
 }
 
-.nd-store:hover {
-  border-color: rgb(245 240 238 / 0.52);
-  background-color: rgb(245 240 238 / 0.1);
+.nd-store[data-store='ios'] {
+  padding: calc(var(--nd-badge) / 4);
 }
 
-.nd-store:active {
-  background-color: rgb(245 240 238 / 0.14);
+.nd-store[data-store='ios'] img {
+  height: var(--nd-badge);
 }
 
-.nd-store-name {
-  grid-column: 1;
-  font-size: 1rem;
-  font-weight: 650;
-  letter-spacing: -0.01em;
-  overflow-wrap: anywhere;
-}
-
-.nd-store-devices {
-  grid-column: 1;
-  font-size: 0.75rem;
-  color: var(--nd-on-surface-muted);
-}
-
-.nd-store svg {
-  grid-column: 2;
-  grid-row: 1 / span 2;
-  flex: 0 0 auto;
-  color: var(--nd-on-surface-muted);
+.nd-store[data-store='android'] img {
+  height: calc(var(--nd-badge) * 250 / 168);
 }
 
 .nd-getapp-note {
-  margin-top: 0.75rem;
+  margin-top: 0.5rem;
+  color: var(--nd-on-surface);
+  font-weight: 500;
 }
 
-/* ---- hung under the claim screen's sealed gate --------------------------- */
-
-/**
- * The sealed gate (`ui/SealedEnvelope.tsx`) already offers the deep link and the
- * QR. It never offered a way to GET the wallet, and that block is added here as
- * a sibling rather than by editing the gate, which is owned elsewhere.
- *
- * Appending to a bottom-weighted, `flex: 1` column would push this whole block
- * past the fold on a phone — the exact "visible immediately" property it exists
- * to have. So the gate is asked to centre its content in whatever space is left
- * over instead of hugging the bottom edge, and to grow but never SHRINK: on a
- * short viewport the pair scrolls rather than being clipped by the field's
- * `overflow: clip`. The rule is scoped by `:has()`, so it applies on exactly the
- * one screen this block appears on and nowhere else; a renderer without `:has()`
- * support simply gets the taller, scrolling version.
- */
-.nd-field-inner:has(> .nd-gate-getapp) > .nd-gate {
-  flex: 1 0 auto;
-  justify-content: center;
-  min-height: auto;
-}
+/* ---- inside the claim screen's sealed gate ------------------------------- */
 
 .nd-gate-getapp {
-  display: flex;
-  justify-content: center;
-  padding: 0 var(--nd-gutter) 1.5rem;
-}
-
-.nd-gate-getapp > .nd-getapp {
   width: 100%;
-  max-width: 25.5rem;
-  margin-top: 0;
-}
-
-/**
- * Side by side here, stacked everywhere else.
- *
- * The sealed gate is already a full screen on a phone before this block is
- * added, so every row of it is a row further down. Two columns halve the height
- * and both targets stay well past 44px; the device sub-label is what goes,
- * because "App Store" and "Google Play" already name their platforms to anyone
- * who owns one.
- */
-.nd-gate-getapp .nd-getapp-list {
-  grid-template-columns: 1fr 1fr;
-}
-
-.nd-gate-getapp .nd-store {
-  grid-template-columns: minmax(0, 1fr) auto;
-  min-height: 3rem;
-  padding-inline: 0.75rem 0.5rem;
-}
-
-.nd-gate-getapp .nd-store-devices {
-  display: none;
-}
-
-.nd-gate-getapp .nd-store svg {
-  grid-row: 1;
 }

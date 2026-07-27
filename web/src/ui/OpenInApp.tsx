@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react'
-import { ChevronRightIcon, QrCodeIcon } from './icons'
+import { QrCodeIcon } from './icons'
 import './OpenInApp.css'
 
 /**
@@ -57,22 +57,28 @@ export type Platform = 'ios' | 'android' | 'other'
 interface Store {
   id: Platform
   name: string
-  devices: string
   url: string
+  badge: string
+  width: number
+  height: number
 }
 
 const APPLE: Store = {
   id: 'ios',
-  name: 'App Store',
-  devices: 'iPhone and iPad',
+  name: 'Download on the App Store',
   url: NIMIQ_PAY_APP_STORE_URL,
+  badge: '/badges/download-on-the-app-store.svg',
+  width: 120,
+  height: 40,
 }
 
 const GOOGLE: Store = {
   id: 'android',
-  name: 'Google Play',
-  devices: 'Android',
+  name: 'Get it on Google Play',
   url: NIMIQ_PAY_GOOGLE_PLAY_URL,
+  badge: '/badges/get-it-on-google-play.png',
+  width: 646,
+  height: 250,
 }
 
 /**
@@ -125,10 +131,9 @@ export function GetNimiqPay({ platform, className }: GetNimiqPayProps) {
               target="_blank"
               rel="noopener noreferrer"
               data-likely={store.id === guess ? 'true' : 'false'}
+              data-store={store.id}
             >
-              <span className="nd-store-name">{store.name}</span>
-              <span className="nd-store-devices">{store.devices}</span>
-              <ChevronRightIcon size={18} />
+              <img src={store.badge} alt={store.name} width={store.width} height={store.height} />
             </a>
           </li>
         ))}

@@ -356,16 +356,19 @@
    *
    * Nimiq gold `#e9b213` and vermilion `#ff4d14` are 30 degrees apart. On a
    * field of the second, the first stops being gold and becomes a lighter
-   * patch of the background: 2.80:1 on the field's brightest pixel, under even
+   * patch of the background: 2.74:1 on the field's brightest pixel, under even
    * the 3:1 non-text floor.
    *
    * The resolution shipped is the thematically stronger one and it is also the
    * cheaper one: gold stops being a UI colour and becomes a material. It does
    * not carry the action, the focus ring or the share marks any more — those go
-   * to near-white, which is louder on this field than gold ever was — and what
-   * it keeps is the NIM currency mark, which sits in the amount's dark well at
-   * 7.22:1 and reads as foil on lacquer. That is the red-packet-and-gold-leaf
-   * pairing this product is named after.
+   * to near-white, which is louder on this field than gold ever was. It kept
+   * the NIM currency mark for exactly as long as the amount sat in the card's
+   * dark well; the s4 layout moved the money onto the open field, the mark went
+   * near-white with it (`tone="ink"`, `pages/DropView.tsx`), and what gold has
+   * left is the custody shield on the card and the wax on the envelope. Foil on
+   * lacquer in both places, which is the red-packet-and-gold-leaf pairing this
+   * product is named after.
    *
    * "Gold appears exactly once" is the sentence that used to be here, it was
    * not true of the render — `DropView` painted four golds — and as of the s4
@@ -376,7 +379,7 @@
    * floor, so every mark that moved onto the field had to go near-white with
    * it: the currency mark in the lockup, the outcome mark, the paid keyline and
    * the share marks are all `--nd-mark` now. What is left on the card is the
-   * CUSTODY SHIELD, at 5.47:1, and that is the whole of the gold on the claim
+   * CUSTODY SHIELD, at 5.43:1, and that is the whole of the gold on the claim
    * screen. `surface.contrast.test.ts` pins both halves — the shield where it
    * sits, and gold failing the field it may not sit on.
    *
@@ -1297,7 +1300,7 @@ body {
  * The keyline is near-white and 2px, where it used to be 1px of Nimiq gold.
  * That is the palette review's recommendation carried out: gold stopped being a
  * UI colour, and on this card near-white at 9.30:1 is louder than gold at
- * 5.47:1 ever was. It is a quote bar rather than a decoration, so it is held to
+ * 5.43:1 ever was. It is a quote bar rather than a decoration, so it is held to
  * the 3:1 non-text floor.
  */
 .nd-message {
@@ -1332,7 +1335,7 @@ body {
  * product outside the wax on the envelope.
  *
  * It is on the card and not on the field, and that is arithmetic: Nimiq gold is
- * 5.47:1 here and 2.74:1 on the field's brightest pixel, which is under even
+ * 5.43:1 here and 2.74:1 on the field's brightest pixel, which is under even
  * the 3:1 a non-text mark is held to.
  */
 .nd-custody {
@@ -1999,8 +2002,7 @@ body {
   gap: 0.625rem;
 }
 
-.nd-chip {
-  /* 44px, the same floor every other target on this screen is held to. */
+.nd-chips .nd-chip {
   min-height: 2.75rem;
   padding: 0 0.875rem;
   flex: 1 1 28%;
@@ -2019,12 +2021,12 @@ body {
     color var(--nd-t-press) ease-out;
 }
 
-.nd-chip:hover {
+.nd-chips .nd-chip:hover {
   border-color: rgb(245 240 238 / 0.4);
   color: var(--nd-on-surface);
 }
 
-.nd-chip[aria-checked='true'] {
+.nd-chips .nd-chip[aria-checked='true'] {
   border-color: rgb(245 240 238 / 0.55);
   background-color: rgb(245 240 238 / 0.13);
   color: var(--nd-on-surface);
@@ -2397,6 +2399,48 @@ body {
   -webkit-user-select: text;
 }
 
+@container nd-field (max-width: 53.9375rem) {
+  .nd-gate[data-phase='sealed-only'] {
+    flex: 1 0 auto;
+    justify-content: center;
+    min-height: auto;
+    gap: 1rem;
+    padding-block: 1rem;
+  }
+
+  .nd-gate[data-phase='sealed-only'] .nd-env {
+    zoom: 0.72;
+  }
+
+  .nd-gate[data-phase='sealed-only'] .nd-gate-from {
+    padding: 0.75rem;
+  }
+
+  .nd-gate[data-phase='sealed-only'] .nd-gate-hint {
+    max-width: 40ch;
+  }
+
+  .nd-gate[data-phase='sealed-only'] .nd-gate-qr {
+    display: flex;
+    align-items: center;
+    gap: 0.875rem;
+    margin-top: 1rem;
+    padding: 0.75rem;
+    text-align: start;
+  }
+
+  .nd-gate[data-phase='sealed-only'] .nd-gate-qr img {
+    flex: 0 0 auto;
+    width: 7.5rem;
+    margin: 0;
+  }
+
+  .nd-gate[data-phase='sealed-only'] .nd-gate-qr > p {
+    justify-content: flex-start;
+    margin: 0;
+  }
+}
+
 @container nd-field (min-width: 54rem) {
   .nd-gate {
     display: grid;
@@ -2418,7 +2462,7 @@ body {
   .nd-gate-hint,
   .nd-gate-out {
     grid-column: 2;
-    text-align: left;
+    text-align: start;
   }
 }
 

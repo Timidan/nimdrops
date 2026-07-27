@@ -12,6 +12,7 @@ import {
 } from 'react'
 import { QrCodeIcon } from './icons'
 import { NimMark } from './Nim'
+import { GetNimiqPay } from './OpenInApp'
 import {
   BURST_MS,
   buzzPlan,
@@ -106,7 +107,7 @@ export interface SealedEnvelopeProps {
   sponsor?: string
   /** Their own words. Also not the amount. */
   message?: string | null
-  /** For the sealed-only path: the QR the phone scans, and the deep link. */
+  /** For the sealed-only path: the QR and deep link. */
   publicId?: string
   deepLink?: string
   /**
@@ -318,6 +319,7 @@ export default function SealedEnvelope({
               )}
             </div>
           ) : null}
+          <GetNimiqPay className="nd-gate-getapp" />
         </div>
       </div>
     )

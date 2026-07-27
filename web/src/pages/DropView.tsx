@@ -251,23 +251,6 @@ export default function DropView({
           ) : null}
         </GlassSheet>
       </SealedEnvelope>
-      {/*
-        The third way out, for the visitor who has neither the wallet open nor a
-        phone that has it. The sealed gate offers the deep link and the QR and
-        stops there; a `nimiqpay://` scheme with no handler does NOTHING — no
-        error, no navigation, nothing to catch — so without this block the
-        stranger who has never installed Nimiq Pay presses a button, sees the
-        page not move, and is finished with the product.
-
-        A sibling rather than a slot: `SealedEnvelope` takes no children on this
-        path and is owned elsewhere. It is rendered on exactly the state that
-        needs it, and `ability` is the adapter's answer, never a viewport width.
-      */}
-      {ability === 'sealed-only' ? (
-        <div className="nd-gate-getapp">
-          <GetNimiqPay />
-        </div>
-      ) : null}
     </Field>
   )
 }
@@ -307,7 +290,7 @@ function Upper({
         </div>
       ) : booting ? (
         <div className="nd-headline">
-          <div className="nd-pulse" aria-hidden="true" />
+          <div className="nd-beacon nd-pulse" aria-hidden="true" />
           <h1>Opening this NimDrop…</h1>
         </div>
       ) : (
@@ -354,7 +337,7 @@ function Upper({
 
       {/* One diameter, one hairline, every secondary affordance on the field.
           The custody control is deliberately NOT here: it belongs on the card,
-          where its gold shield is 5.47:1 rather than 2.74:1. */}
+          where its gold shield is 5.43:1 rather than 2.74:1. */}
       <nav className="nd-rail" aria-label="Drop actions">
         <ShareButton />
         <CopyLinkButton />
@@ -613,7 +596,7 @@ function Face({ publicId, state, drop, serverState, txHash, amount, sponsor, onC
  *
  * It sits at the foot of the sheet rather than on the field, and that is a
  * contrast decision as much as a compositional one: its shield is the last gold
- * on the claim screen, and gold is 5.47:1 on the card against 2.74:1 on the
+ * on the claim screen, and gold is 5.43:1 on the card against 2.74:1 on the
  * field's brightest pixel.
  *
  * The facts are not softened here and are not meant to be. Most of this text

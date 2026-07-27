@@ -129,12 +129,34 @@ describe('which store goes first', () => {
   it('orders the stores by the guess and marks one, hiding neither', () => {
     render(<GetNimiqPay platform="android" />)
     const links = within(screen.getByTestId('get-nimiq-pay')).getAllByRole('link')
-    expect(links.map((a) => a.textContent)).toEqual([
-      expect.stringContaining('Google Play'),
-      expect.stringContaining('App Store'),
+    expect(links.map((a) => a.querySelector('img')?.getAttribute('alt'))).toEqual([
+      'Get it on Google Play',
+      'Download on the App Store',
     ])
     expect(links[0]!.getAttribute('data-likely')).toBe('true')
     expect(links[1]!.getAttribute('data-likely')).toBe('false')
+  })
+
+  it('names each badge once, on the image', () => {
+    render(<GetNimiqPay platform="other" />)
+    for (const link of within(screen.getByTestId('get-nimiq-pay')).getAllByRole('link')) {
+      const badge = link.querySelector('img')
+      expect(badge?.getAttribute('alt')).toBeTruthy()
+      expect(link.getAttribute('aria-label')).toBeNull()
+      expect(link.textContent).toBe('')
+    }
+  })
+
+  it('serves both badges from this origin', () => {
+    render(<GetNimiqPay platform="other" />)
+    const sources = within(screen.getByTestId('get-nimiq-pay'))
+      .getAllByRole('img')
+      .map((img) => img.getAttribute('src'))
+    expect(sources).toEqual([
+      '/badges/download-on-the-app-store.svg',
+      '/badges/get-it-on-google-play.png',
+    ])
+    for (const src of sources) expect(src).not.toMatch(/^https?:/)
   })
 
   /**
