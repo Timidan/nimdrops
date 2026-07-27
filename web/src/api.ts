@@ -192,6 +192,23 @@ export interface SignedClaim {
   signature: string
 }
 
+/** `POST /api/drops/:publicId/close` — 202: the drop is closed, the refund is queued. */
+export interface CloseAccepted {
+  /** Shares that were already reserved. These are still paid, in full. */
+  claimedShares: number
+  /** Shares nobody took. Their value is what comes back. */
+  unclaimedShares: number
+  /** Decimal NIM heading back to the funding wallet, e.g. `"7.5"`. */
+  refund: string
+  refundLuna: string
+}
+
+export interface SignedClose {
+  challengeId: string
+  publicKey: string
+  signature: string
+}
+
 /**
  * `GET /api/stats` — the public aggregates the landing page reads.
  *
@@ -576,6 +593,31 @@ export async function submitClaim(
       publicKey: signed.publicKey,
       signature: signed.signature,
     }),
+  })
+}
+
+/**
+ * The exact bytes the funding wallet must sign to authorize ONE close of ONE
+ * drop. A separate endpoint from the claim challenge, because it authorizes a
+ * different action and the server refuses to let either stand in for the other.
+ */
+export async function requestCloseChallenge(publicId: string): Promise<Challenge> {
+  return request<Challenge>(`/drops/${encodeURIComponent(publicId)}/close/challenge`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({}),
+  })
+}
+
+/**
+ * End a drop early. The 202 means the refund is QUEUED — the same promise a
+ * claim's 202 makes about a share, and no more.
+ */
+export async function closeDrop(publicId: string, signed: SignedClose): Promise<CloseAccepted> {
+  return request<CloseAccepted>(`/drops/${encodeURIComponent(publicId)}/close`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(signed),
   })
 }
 

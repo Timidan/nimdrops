@@ -1,9 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { ApiError, getDrop, type DropPublic } from '../api'
+import {
+  ApiError,
+  closeDrop,
+  getDrop,
+  requestCloseChallenge,
+  type CloseAccepted,
+  type DropPublic,
+} from '../api'
 import { formatNim, lunaFromNim } from '../money'
 import { nimiqPayDeeplink, resolveBridge, type BridgeResult } from '../sdk/adapter'
-import { closeDrop, closeFailureNotice, requestCloseChallenge, type CloseAccepted } from '../state/close'
+import { closeFailureNotice } from '../state/close'
 import Field from '../ui/Field'
 import GlassSheet from '../ui/GlassSheet'
 import { WarningIcon } from '../ui/icons'
