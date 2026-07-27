@@ -48,6 +48,14 @@ import { selectQuestionIds } from './select'
 export const SESSION_TTL_MINUTES = 10
 
 /**
+ * How long a session start will wait for this wallet's advisory lock.
+ *
+ * Generous for the honest case — the work under the lock is a handful of indexed
+ * statements — and finite for the dishonest one. See `startOrResume`.
+ */
+export const SESSION_LOCK_TIMEOUT_MS = 5_000
+
+/**
  * Minimum gap between two sessions on one drop for one wallet, measured from the
  * previous session's `started_at`.
  *
@@ -135,6 +143,18 @@ export interface AnswerOutcome {
    * reveal safe, and it is a property of the QUESTION rather than of the player.
    */
   review?: ReviewedQuestion[]
+  /**
+   * How many of the questions were answered correctly. Present whenever
+   * {@link review} is.
+   *
+   * This is what a player is told about a bank that has not published its
+   * answers, and it is why withholding `wasCorrect` per question is not the same
+   * as telling them nothing. It survives the harvesting argument because it is a
+   * SUM: five unknowns, one equation, over a question set the caller cannot
+   * choose — nothing in it isolates an option the way a per-question verdict on
+   * the option they picked does.
+   */
+  correctCount?: number
 }
 
 export interface ReviewedQuestion {
@@ -146,15 +166,26 @@ export interface ReviewedQuestion {
   /**
    * The right option, or `null` when this question's answer is not already
    * public — see {@link Question.disclosable}.
-   *
-   * Null is the safe half of the pair, not a degraded one: `wasCorrect` still
-   * says whether the player got it, which is the whole of what a player asked
-   * for. What null withholds is the part that would let somebody who never
-   * intends to claim harvest an answer key five questions at a time, under
-   * throwaway addresses that cost nothing to invent.
    */
   correctIndex: number | null
-  wasCorrect: boolean
+  /**
+   * Whether the player got this one, or `null` for the same reason.
+   *
+   * Withheld TOGETHER with `correctIndex`, and the first version of this got
+   * that wrong. Dropping only `correctIndex` looked like withholding the answer
+   * and was not: `wasCorrect` is a verdict on the option the player CHOSE, so
+   * `true` names that option as the answer outright, and `false` eliminates it
+   * and takes the next guess from one-in-four to one-in-three. A disposable
+   * wallet probing one option per encounter learns a question in about 2.5
+   * encounters — slower than being handed it, nowhere near being refused it.
+   * Nothing stops the probing: there is no identity boundary, and the per-IP
+   * limit is bypassable from several IPs.
+   *
+   * A player is not left with nothing when this is null. `correctCount` still
+   * says how many of the five they got, which is one equation in five unknowns
+   * over a set the caller cannot choose — feedback rather than a probe.
+   */
+  wasCorrect: boolean | null
   /**
    * The answer arrived after its deadline, so it was scored wrong whatever it said.
    *
@@ -447,6 +478,20 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
       // unseen pool, and could pick the same question. Both sessions then served
       // it while only one `trivia_seen` row survived the INSERT below. The lock
       // has to cover the same scope as the table it protects.
+      //
+      // Bounded, because widening the key widened who can queue behind it.
+      // Sessions take no signature, so anyone can start one for a wallet they do
+      // not hold — and with a wallet-wide key those starts now contend across
+      // EVERY drop rather than one. `pg_advisory_xact_lock` waits forever, and
+      // each waiter is holding a pool client while it does, so an unbounded wait
+      // turns a stranger's spam into pool exhaustion for everybody.
+      //
+      // `lock_timeout` is LOCAL, so it is scoped to this transaction and reset by
+      // COMMIT or ROLLBACK; it never leaks onto the next borrower of this client.
+      // Timing out raises `lock_not_available`, which surfaces as a 5xx — honest,
+      // because the request genuinely could not be served, and recoverable,
+      // because nothing was written.
+      await client.query(`SET LOCAL lock_timeout = '${SESSION_LOCK_TIMEOUT_MS}ms'`)
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
         `trivia:${walletAddress}`,
       ])
@@ -698,11 +743,30 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
         prompt: question.prompt,
         options: [...question.options],
         answerIndex: row.answer_index,
+        // Both, or neither. `wasCorrect` alone is a verdict on the option the
+        // player chose, which names it or eliminates it — see
+        // {@link ReviewedQuestion.wasCorrect}.
         correctIndex: question.disclosable ? question.answerIndex : null,
-        wasCorrect: row.is_correct === true,
+        wasCorrect: question.disclosable ? row.is_correct === true : null,
         wasLate: row.was_late,
       }
     })
+  }
+
+  /**
+   * How many of a finished session's answers were right.
+   *
+   * Read from `trivia_answers`, not counted from the review, so it is the same
+   * number the pass/fail decision was made from and stays truthful for a bank
+   * whose per-question verdicts are withheld.
+   */
+  async function countCorrect(db: PoolClient, sessionId: string): Promise<number> {
+    const { rows } = await db.query<{ right: string }>(
+      `SELECT count(*)::text AS right FROM trivia_answers
+       WHERE session_id = $1 AND is_correct IS TRUE`,
+      [sessionId],
+    )
+    return Number(rows[0].right)
   }
 
   async function submitAnswer(
@@ -843,6 +907,8 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
       // Built INSIDE the transaction that finished the session, from the rows
       // just written, so it cannot disagree with what was scored.
       const review = state === 'in_progress' ? undefined : await buildReview(client, sessionId)
+      const correctCount =
+        state === 'in_progress' ? undefined : await countCorrect(client, sessionId)
 
       await client.query('COMMIT')
       committed = true
@@ -864,7 +930,13 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
       if (row.late && state === 'in_progress') {
         throw new GateRejectedError('deadline_missed', 'that answer arrived after the deadline')
       }
-      return { state, answered, questionCount: config.questionCount, ...(review ? { review } : {}) }
+      return {
+        state,
+        answered,
+        questionCount: config.questionCount,
+        ...(review ? { review } : {}),
+        ...(correctCount === undefined ? {} : { correctCount }),
+      }
     } catch (err) {
       if (!committed) await client.query('ROLLBACK').catch(() => {})
       throw err

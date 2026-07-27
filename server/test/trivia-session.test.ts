@@ -597,7 +597,9 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
       expect(item).toMatchObject({
         questionIndex: i,
         prompt: question.prompt,
-        wasCorrect: false,
+        // Null, not false: this bank does not publish its answers, so the
+        // verdict is withheld with the answer. `correctCount` carries the score.
+        wasCorrect: null,
       })
       expect(item.options).toHaveLength(4)
       // The player's own choice comes back, so a reader can see what they picked
@@ -606,16 +608,50 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
     }
   })
 
-  it('withholds the right option for a bank that has not published its answers', async () => {
-    // The default fixture, i.e. questions an operator wrote. Every wrong answer
-    // is still reported as wrong — that is the whole of what a player asked for
-    // — and `correctIndex` is null, so nothing here is an answer key.
+  it('withholds BOTH the right option and the verdict for an unpublished bank', async () => {
+    // The default fixture: questions an operator wrote. An earlier version of
+    // this dropped only `correctIndex` and kept `wasCorrect`, which withheld
+    // nothing worth withholding — `wasCorrect` is a verdict on the option the
+    // player CHOSE, so true names that option as the answer and false eliminates
+    // it. A disposable wallet probing one option per encounter still learns the
+    // question in about 2.5 encounters.
     const svc = service()
     const s = await svc.startOrResume(await gateFor(), PLAYER)
     const outcome = await answerAll(svc, s.sessionId, false)
 
     expect(outcome.review?.map((r) => r.correctIndex)).toEqual([null, null, null, null, null])
-    expect(outcome.review?.every((r) => r.wasCorrect === false)).toBe(true)
+    expect(outcome.review?.map((r) => r.wasCorrect)).toEqual([null, null, null, null, null])
+    // The player still learns what they picked and how they did overall.
+    expect(outcome.review?.every((r) => typeof r.answerIndex === 'number')).toBe(true)
+    expect(outcome.correctCount).toBe(0)
+    expect(outcome.state).toBe('failed')
+  })
+
+  it('counts the right answers even when it will not say which they were', async () => {
+    // The aggregate is what replaces per-question feedback, so it has to be true
+    // rather than merely present. Answering everything correctly is the case
+    // where a wrong count would be least visible: state would say `passed` and
+    // hide it.
+    const svc = service()
+    const s = await svc.startOrResume(await gateFor(), PLAYER)
+    const outcome = await answerAll(svc, s.sessionId, true)
+
+    expect(outcome.state).toBe('passed')
+    expect(outcome.correctCount).toBe(5)
+    expect(outcome.review?.map((r) => r.wasCorrect)).toEqual([null, null, null, null, null])
+  })
+
+  it('sends no review and no count while a question is still in play', async () => {
+    const svc = service()
+    const s = await svc.startOrResume(await gateFor(), PLAYER)
+    const q = await svc.currentQuestion(s.sessionId)
+    const outcome = await svc.submitAnswer(s.sessionId, q.questionIndex, 0)
+
+    expect(outcome.state).toBe('in_progress')
+    expect(outcome.review).toBeUndefined()
+    // Mid-session this WOULD be per-question correctness: it is the count so far,
+    // over answers the player has just given one at a time.
+    expect(outcome.correctCount).toBeUndefined()
   })
 
   it('names the right option only for questions whose answers are already public', async () => {
@@ -632,6 +668,9 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
     expect(outcome.review?.map((r) => r.correctIndex)).toEqual(
       ids.map((id) => bank.questions.find((x) => x.id === id)!.answerIndex),
     )
+    // And the verdicts come back with them, because that is the pair.
+    expect(outcome.review?.map((r) => r.wasCorrect)).toEqual([false, false, false, false, false])
+    expect(outcome.correctCount).toBe(0)
   })
 
   it('issues exactly one grant when a session passes', async () => {
@@ -748,7 +787,10 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
     // The lateness is carried here rather than by a rejection, which is where the
     // rest of the session's lateness already lived.
     expect(last.review?.map((r) => r.wasLate)).toEqual([false, false, false, false, true])
-    expect(last.review?.[4].wasCorrect).toBe(false)
+    // Four right and the fifth right-but-late, so the count is four and the
+    // session still fails. Lateness is not correctness, and it is not withheld
+    // either — it says nothing about which option was right.
+    expect(last.correctCount).toBe(4)
     // ...while the index the player picked IS the right one, which is exactly why
     // `wasLate` has to be reported: without it a screen shows somebody their own
     // correct answer labelled "not correct".

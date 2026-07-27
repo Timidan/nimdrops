@@ -245,12 +245,19 @@ export interface ReviewedQuestion {
    * The right option, or `null` when the server withheld it.
    *
    * Withheld is the NORMAL case for a question the operator wrote themselves:
-   * the server names the right option only for questions whose answers are
-   * already published elsewhere. A screen must render both cases — "not correct"
-   * without naming an answer is a complete outcome, not a missing field.
+   * the server names the right option only where the answer is already published
+   * elsewhere.
    */
   correctIndex: number | null
-  wasCorrect: boolean
+  /**
+   * Whether the player got this one, or `null` when the server withheld it.
+   *
+   * Always null together with `correctIndex`, never on its own — a verdict on
+   * the option the player chose IS the answer for that question. When both are
+   * null the screen shows what they picked and nothing more, and
+   * `TriviaOutcome.correctCount` carries the score.
+   */
+  wasCorrect: boolean | null
   /**
    * The answer arrived after its deadline, so it was scored wrong whatever it
    * said. Distinct from `answerIndex === null`, which means nothing was
@@ -273,6 +280,13 @@ export interface TriviaOutcome {
   questionCount: number
   /** Present ONLY when `state` is `passed` or `failed`. */
   review?: ReviewedQuestion[]
+  /**
+   * How many were right, out of `questionCount`. Present whenever `review` is.
+   *
+   * The only feedback there is when the bank withholds per-question verdicts, so
+   * a screen must not treat it as a nice-to-have beside `review`.
+   */
+  correctCount?: number
 }
 
 export interface CreateDropInput {

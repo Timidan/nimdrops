@@ -1,10 +1,19 @@
 import pg from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { migrate } from '../src/db/migrate'
+import { testAddress } from './fixtures/address'
 import '../src/db/pool'
 
 const hasDb = Boolean(process.env.DATABASE_URL)
 const SCHEMA = 'gates_migration_test'
+
+// Real addresses, in the canonical spelling. `gate_grants` carries a CHECK
+// (migration 017) that refuses anything else, so the readable placeholders these
+// cases used to inline would now fail on the constraint under test rather than
+// on the one the case is about.
+const PLAYER = testAddress('PLAYER')
+const BOTH = testAddress('BOTH')
+const SNEAK = testAddress('SNEAK')
 
 describe.skipIf(!hasDb)('015_gates', () => {
   let pool: pg.Pool
@@ -80,8 +89,8 @@ describe.skipIf(!hasDb)('015_gates', () => {
     const grant = () =>
       pool.query(
         `INSERT INTO gate_grants (drop_id, wallet_address, kind)
-         VALUES ($1, 'NQ07 PLAYER', 'trivia')`,
-        [dropId],
+         VALUES ($1, $2, 'trivia')`,
+        [dropId, PLAYER],
       )
     await grant()
     await expect(grant()).rejects.toThrow(/gate_grants_drop_id_wallet_address_key/)
@@ -93,12 +102,13 @@ describe.skipIf(!hasDb)('015_gates', () => {
     for (const dropId of [a, b]) {
       await pool.query(
         `INSERT INTO gate_grants (drop_id, wallet_address, kind)
-         VALUES ($1, 'NQ07 BOTH', 'trivia')`,
-        [dropId],
+         VALUES ($1, $2, 'trivia')`,
+        [dropId, BOTH],
       )
     }
     const { rows } = await pool.query<{ count: string }>(
-      `SELECT count(*) FROM gate_grants WHERE wallet_address = 'NQ07 BOTH'`,
+      'SELECT count(*) FROM gate_grants WHERE wallet_address = $1',
+      [BOTH],
     )
     expect(rows[0].count).toBe('2')
   })
@@ -265,8 +275,8 @@ describe.skipIf(!hasDb)('015_gates', () => {
     await expect(
       pool.query(
         `INSERT INTO gate_grants (drop_id, wallet_address, kind)
-         VALUES ($1, 'NQ07 SNEAK', 'trivia')`,
-        [rows[0].id],
+         VALUES ($1, $2, 'trivia')`,
+        [rows[0].id, SNEAK],
       ),
     ).rejects.toThrow(/gate_grants_drop_id_fkey/)
   })

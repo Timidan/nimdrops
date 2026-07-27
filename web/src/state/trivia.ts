@@ -48,6 +48,13 @@ export interface TriviaSession {
    * answers and none of them were anything".
    */
   review: ReviewedQuestion[] | null
+  /**
+   * How many were right, or `null` when no outcome has arrived.
+   *
+   * Carried separately from `review` because it is the ONLY score when the bank
+   * withholds per-question verdicts — see `ReviewedQuestion.wasCorrect`.
+   */
+  correctCount: number | null
   error: string | null
   start(): Promise<void>
   submit(answerIndex: number): Promise<void>
@@ -64,6 +71,7 @@ export function useTriviaSession(publicId: string, walletAddress: string): Trivi
   const [answered, setAnswered] = useState(0)
   const [questionCount, setQuestionCount] = useState(0)
   const [review, setReview] = useState<ReviewedQuestion[] | null>(null)
+  const [correctCount, setCorrectCount] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
   const sessionId = useRef<string | null>(null)
 
@@ -79,6 +87,7 @@ export function useTriviaSession(publicId: string, walletAddress: string): Trivi
   const start = useCallback(async () => {
     setError(null)
     setReview(null)
+    setCorrectCount(null)
     try {
       const started = await startTriviaSession(publicId, walletAddress)
       sessionId.current = started.sessionId
@@ -117,6 +126,9 @@ export function useTriviaSession(publicId: string, walletAddress: string): Trivi
         // non-empty array is treated as "the server sent none", because a
         // review section is worth showing only when there is something in it.
         setReview(Array.isArray(outcome.review) && outcome.review.length > 0 ? outcome.review : null)
+        // Shape-checked like `review`, and for the same reason: it is optional
+        // in the contract, and a non-number would render as a score nobody got.
+        setCorrectCount(typeof outcome.correctCount === 'number' ? outcome.correctCount : null)
         setPhase(outcome.state)
       } catch (err) {
         // A refused submission is terminal for this session: the one submission
@@ -136,6 +148,7 @@ export function useTriviaSession(publicId: string, walletAddress: string): Trivi
     answered,
     questionCount,
     review,
+    correctCount,
     error,
     start,
     submit,

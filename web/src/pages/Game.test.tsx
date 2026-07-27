@@ -541,37 +541,62 @@ describe('Game — the review of a finished round', () => {
     expect(row.textContent).toMatch(/the right answer is third/i)
   })
 
-  it('says which answers were right without naming one the server withheld', async () => {
-    // `correctIndex: null` is the normal case for a bank whose questions the
-    // operator wrote: the server names the right option only where the answer was
-    // already published. A verdict on every question is the whole of what a player
-    // asked for, and it must survive on its own.
+  it('gives a score and no per-question verdict when the bank withholds them', async () => {
+    // The normal case for a bank whose questions the operator wrote. BOTH fields
+    // are null together: a verdict on the option the player chose names it when
+    // true and eliminates it when false, so `wasCorrect` alone is the answer at
+    // 2.5x the cost. The score is what the player gets instead.
+    const withheld = (index: number, over: Record<string, unknown> = {}) =>
+      reviewed(index, { correctIndex: null, wasCorrect: null, ...over })
+
     await play({
       status: 200,
       body: {
         state: 'failed',
         answered: 5,
         questionCount: 5,
+        correctCount: 3,
         review: [
-          reviewed(0, { correctIndex: null }),
-          reviewed(1, { answerIndex: 1, correctIndex: null, wasCorrect: false }),
-          reviewed(2, { correctIndex: null }),
-          reviewed(3, { correctIndex: null }),
-          reviewed(4, { correctIndex: null }),
+          withheld(0),
+          withheld(1, { answerIndex: 1 }),
+          withheld(2),
+          withheld(3),
+          withheld(4),
         ],
       },
     })
 
-    await screen.findByTestId('trivia-review')
-    expect(screen.getByTestId('review-0-outcome').textContent).toMatch(/Correct$/)
+    const section = await screen.findByTestId('trivia-review')
+    expect(screen.getByTestId('trivia-score').textContent).toMatch(/3 of 5 right/i)
 
-    const wrong = screen.getByTestId('review-1')
-    expect(wrong.textContent).toMatch(/not correct/i)
-    expect(wrong.textContent).toMatch(/you chose second/i)
-    // Nothing anywhere in the review names an answer. Indexing the options array
-    // with `null` would have quietly produced `options[0]` and named the FIRST
-    // option as the right one, which is worse than saying nothing at all.
-    expect(screen.getByTestId('trivia-review').textContent).not.toMatch(/the right answer/i)
+    // Every row says they answered and stops there.
+    expect(screen.getByTestId('review-0-outcome').textContent).toMatch(/Answered$/)
+    expect(screen.getByTestId('review-1').textContent).toMatch(/you chose second/i)
+
+    // Nothing anywhere names an answer or grades a question. `null` is falsy, so
+    // a screen that read wasCorrect directly would print "Not correct" on all
+    // five — telling somebody they got everything wrong on no evidence.
+    expect(section.textContent).not.toMatch(/the right answer/i)
+    expect(section.textContent).not.toMatch(/not correct/i)
+    expect(section.textContent).not.toMatch(/\bCorrect\b/)
+  })
+
+  it('shows no score line when the verdicts are present, so the rows are the only word', async () => {
+    // A tally beside per-question verdicts reads as a grade, which PRODUCT.md
+    // rules out on a screen about a payout. The rows already say it.
+    await play({
+      status: 200,
+      body: {
+        state: 'failed',
+        answered: 5,
+        questionCount: 5,
+        correctCount: 4,
+        review: reviewWithOneWrong(),
+      },
+    })
+
+    await screen.findByTestId('trivia-review')
+    expect(screen.queryByTestId('trivia-score')).toBe(null)
   })
 
   it('reads a late answer as beaten by the clock, not as a wrong choice', async () => {

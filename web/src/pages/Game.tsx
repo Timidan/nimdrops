@@ -96,6 +96,7 @@ export default function Game({ walletAddress }: GameProps) {
    * with nothing to look back at, so this stays null and nothing renders.
    */
   const [review, setReview] = useState<ReviewedQuestion[] | null>(null)
+  const [correctCount, setCorrectCount] = useState<number | null>(null)
 
   const rememberWallet = useCallback((address: string) => {
     writeStoredWallet(address)
@@ -107,12 +108,13 @@ export default function Game({ walletAddress }: GameProps) {
     setWallet(null)
   }, [])
 
-  const onMet = useCallback((reviewed?: ReviewedQuestion[] | null) => {
+  const onMet = useCallback((reviewed?: ReviewedQuestion[] | null, count?: number | null) => {
     setMetJustNow(true)
     // Never cleared by a caller that has none: `Passphrase` and `Attested` pass
     // nothing, and a trivia pass can arrive in two renders if the phase lands
     // before the review does.
     if (reviewed && reviewed.length > 0) setReview(reviewed)
+    if (typeof count === 'number') setCorrectCount(count)
   }, [])
 
   const amount = gate.amountEachLuna === null ? null : formatNim(BigInt(gate.amountEachLuna))
@@ -131,7 +133,12 @@ export default function Game({ walletAddress }: GameProps) {
             onRetry={gate.refresh}
           />
         ) : met ? (
-          <Pass publicId={publicId} amount={amount ?? ''} review={review} />
+          <Pass
+            publicId={publicId}
+            amount={amount ?? ''}
+            review={review}
+            correctCount={correctCount}
+          />
         ) : (
           <>
             <Offer
@@ -239,10 +246,12 @@ function Pass({
   publicId,
   amount,
   review,
+  correctCount,
 }: {
   publicId: string
   amount: string
   review: ReviewedQuestion[] | null
+  correctCount: number | null
 }) {
   return (
     <div data-testid="gate-passed" className="mt-9">
@@ -259,7 +268,7 @@ function Pass({
         One share per wallet. It has to be the wallet you named here.
       </p>
 
-      <Review questions={review} />
+      <Review questions={review} correctCount={correctCount ?? undefined} />
     </div>
   )
 }
@@ -291,8 +300,23 @@ function Pass({
  * suppress and nobody gets a version of this screen with information missing
  * from it.
  */
-function Review({ questions }: { questions: ReviewedQuestion[] | null }) {
+function Review({
+  questions,
+  correctCount,
+}: {
+  questions: ReviewedQuestion[] | null
+  correctCount?: number
+}) {
   if (!questions || questions.length === 0) return null
+
+  /**
+   * Shown only when the per-question verdicts are withheld, and then it is the
+   * ONLY score on the screen. With verdicts present the rows already say it
+   * question by question, and repeating it as a tally would read as a grade —
+   * which `PRODUCT.md` rules out on a screen that is about a payout.
+   */
+  const withheld = questions.every((q) => q.wasCorrect === null)
+  const score = withheld && correctCount !== undefined ? correctCount : null
 
   return (
     <section
@@ -303,6 +327,12 @@ function Review({ questions }: { questions: ReviewedQuestion[] | null }) {
       <h2 id="trivia-review-heading" className="text-sm font-semibold tracking-tight text-ink/75">
         Question by question
       </h2>
+      {score === null ? null : (
+        <p data-testid="trivia-score" className="mt-2 text-sm leading-relaxed text-ink/65">
+          You got <span className="font-medium text-ink">{score}</span> of {questions.length} right.
+          This set does not publish its answers, so we cannot say which.
+        </p>
+      )}
       <ol className="mt-5 flex flex-col gap-6">
         {questions.map((question) => (
           <ReviewRow key={question.questionIndex} question={question} />
@@ -334,6 +364,16 @@ function ReviewRow({ question }: { question: ReviewedQuestion }) {
   const late = !outOfTime && question.wasLate
 
   /**
+   * The server withheld its verdict on this question, because naming the option
+   * the player chose as right or wrong is the same as naming the answer. Routine
+   * for a bank the operator wrote themselves; the score comes from `correctCount`
+   * instead. Note this is checked BEFORE `wasCorrect` is read anywhere, since
+   * `null` is falsy and reading it as "not correct" would tell somebody they got
+   * a question wrong on no evidence at all.
+   */
+  const noVerdict = question.wasCorrect === null
+
+  /**
    * The server's verdict, never a comparison of the two indices. A late answer
    * arrives with the index the player picked and is scored wrong, so the indices
    * can agree while `wasCorrect` is false — and the scoring is what decided the
@@ -343,10 +383,12 @@ function ReviewRow({ question }: { question: ReviewedQuestion }) {
     ? 'Ran out of time'
     : late
       ? 'Too late'
-      : question.wasCorrect
-        ? 'Correct'
-        : 'Not correct'
-  const mark = outOfTime || late ? '–' : question.wasCorrect ? '✓' : '✕'
+      : noVerdict
+        ? 'Answered'
+        : question.wasCorrect
+          ? 'Correct'
+          : 'Not correct'
+  const mark = outOfTime || late ? '–' : noVerdict ? '·' : question.wasCorrect ? '✓' : '✕'
 
   return (
     <li data-testid={`review-${question.questionIndex}`}>
@@ -498,7 +540,7 @@ function Trivia({
   publicId: string
   walletAddress: string
   tier: string | null
-  onPass: (review: ReviewedQuestion[] | null) => void
+  onPass: (review: ReviewedQuestion[] | null, correctCount: number | null) => void
 }) {
   const session = useTriviaSession(publicId, walletAddress)
   const [submitting, setSubmitting] = useState(false)
@@ -509,9 +551,12 @@ function Trivia({
   // review belongs to the screen that replaces it.
   const passed = session.phase === 'passed'
   const passedReview = passed ? session.review : null
+  // Travels with the review, because it IS the review when the bank withholds
+  // its per-question verdicts — see `ReviewedQuestion.wasCorrect`.
+  const passedCount = passed ? session.correctCount : null
   useEffect(() => {
-    if (passed) onPass(passedReview)
-  }, [onPass, passed, passedReview])
+    if (passed) onPass(passedReview, passedCount)
+  }, [onPass, passed, passedReview, passedCount])
   if (passed) return null
 
   if (session.phase === 'failed') {
@@ -539,7 +584,7 @@ function Trivia({
           See the other drops
         </Link>
 
-        <Review questions={session.review} />
+        <Review questions={session.review} correctCount={session.correctCount ?? undefined} />
       </div>
     )
   }

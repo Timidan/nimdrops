@@ -49,6 +49,11 @@ function testBank(): Bank {
         options: ['a', 'b', 'c', 'd'],
         answerIndex: n,
         source: 'https://example.org',
+        // This suite is about the WIRE SHAPE, so its bank publishes its answers
+        // and the review comes back fully populated. The withholding path — both
+        // `correctIndex` and `wasCorrect` null — is proven against the service in
+        // `trivia-session.test.ts` and against the screen in `Game.test.tsx`.
+        disclosable: true,
       })),
     ),
   })
@@ -572,6 +577,9 @@ describe.skipIf(!hasDb)('gate HTTP surface', () => {
       'wasLate',
     ])
     expect(review.every((r) => r.wasCorrect === true && r.wasLate === false)).toBe(true)
+    // The score rides alongside, and is the only feedback a bank that withholds
+    // its verdicts sends — so it must be on the wire, not merely in the service.
+    expect(last.correctCount).toBe(5)
   })
 
   it('marks a late-but-right answer late rather than wrong', async () => {

@@ -8,6 +8,7 @@
  */
 import type { Pool } from 'pg'
 import { type GateKind, type GateRow, GateRejectedError } from '../gates/types'
+import { normaliseNimiqAddress } from '../nimiq-address'
 
 // Re-exported for the HTTP layer, which needs the same liveness check before it
 // dispatches to a kind. The definition lives in `gates/types.ts` so that a kind
@@ -138,7 +139,16 @@ export async function loadGameView(pool: Pool, publicId: string): Promise<GameVi
   }
 }
 
-/** Whether a wallet has already satisfied this drop's condition. */
+/**
+ * Whether a wallet has already satisfied this drop's condition.
+ *
+ * Canonicalises the address itself. Its one production caller already does, so
+ * this is defence in depth rather than a fix — but the column holds exactly one
+ * spelling (`issueGrant`, and migration 017's CHECK), and a comparison against
+ * it that does not normalise answers "no" for a wallet that HAS met the
+ * condition. An exported function whose correctness depends on what its current
+ * caller happens to do is a trap set for the next caller.
+ */
 export async function hasGrant(
   pool: Pool,
   dropId: string,
@@ -147,7 +157,7 @@ export async function hasGrant(
   const { rows } = await pool.query<{ exists: boolean }>(
     `SELECT true AS exists FROM gate_grants
      WHERE drop_id = $1 AND wallet_address = $2`,
-    [dropId, walletAddress],
+    [dropId, normaliseNimiqAddress(walletAddress) ?? walletAddress],
   )
   return rows.length > 0
 }
