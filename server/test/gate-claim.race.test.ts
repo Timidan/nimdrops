@@ -351,11 +351,30 @@ describe.skipIf(!hasDb)('gated claim reservation (real Postgres)', () => {
     expect(await counts(publicId)).toEqual({ claims: '1', transfers: '1' })
   })
 
+  /**
+   * SCOPE, stated because this test is weaker than it looks.
+   *
+   * Eight concurrent claims for ONE wallet cannot prove the gate's own `FOR
+   * UPDATE` does anything, because `UNIQUE (drop_id, recipient_address)` on
+   * `claims` already permits one claim per wallet per drop and would stop a
+   * second slot on its own. The gate lock is defence in depth here, and a grant
+   * is per wallet, so there is no way to have two DIFFERENT claimants race one
+   * grant. What this does prove is that the gate does not BREAK the existing
+   * guarantee under concurrency — no duplicate slot, no duplicate payout, and
+   * the grant ends up spent exactly once.
+   *
+   * The pool is warmed first. `pg` creates clients lazily, so without it the
+   * first caller completes its whole round trip while the others are still doing
+   * TCP and auth, which silently serialises the "race" and makes any assertion
+   * here vacuous.
+   */
   it('lets exactly one of many concurrent claims spend one grant', async () => {
     const { publicId, dropId } = await liveDrop()
     await attachGate(dropId)
     const wallet = newWallet()
     const grantId = await grantTo(dropId, wallet.address)
+
+    await Promise.all(Array.from({ length: 8 }, () => pool.query('SELECT 1')))
 
     const settled = await Promise.allSettled(
       Array.from({ length: 8 }, (_, i) => claim(publicId, wallet, `race-${i}`)),
