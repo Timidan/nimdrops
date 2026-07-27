@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useState, type CSSProperties } from 'react'
 import { Link } from 'react-router-dom'
 import { getStats, type PublicStats, type StatKey } from '../api'
 import {
   ClaimIcon,
+  ClockExpiryIcon,
   CustodyShieldIcon,
   EnvelopeSealedIcon,
   QuestionMarkIcon,
@@ -16,88 +17,19 @@ import NimDropsPhotograph from '../ui/NimDropsPhotograph'
 import { GetNimiqPay } from '../ui/OpenInApp'
 import './Landing.css'
 
-/**
- * The landing page, and the only genuinely responsive surface in the product.
- *
- * Everything else — claim, create, trivia — lives inside the Nimiq Pay WebView
- * on a phone, and answers a browser with an open-in-app gate rather than a
- * degraded wide layout. This page is the exception: it is what someone who has
- * never heard of NimDrops reads, on whatever they happen to be holding, and it
- * has to look deliberate at 320px and at 1440px.
- *
- * ## What it is for
- *
- * One job: explain the product to a stranger. One sponsor funds a drop, N people
- * each claim one fixed, equal share of NIM through a shared link, and whatever
- * nobody claims goes back to the sponsor when the claim window closes. The
- * sponsor sets that window, from an hour to two weeks, and 24 hours is the
- * default; the page names the default rather than asserting it is the only one.
- * The positioning is
- * `docs/submission/description.md` and `PRODUCT.md`; the words below are theirs,
- * tightened, not reinvented.
- *
- * ## The figures, and the rule that governs all of them
- *
- * **No number on this page is ever invented, padded, rounded to look better, or
- * substituted with a placeholder.** Every one is a query result from
- * `GET /api/stats`, and the mainnet pilot is capped, so they are currently tiny.
- * That is the truth and it ships as the truth: for a custodial product, "2 NIM
- * paid to 1 wallet, every transaction on chain" is worth more than a round
- * number nobody can check. The section is designed for small numbers — a ledger
- * with a timestamp, not a wall of metrics — so honesty reads as deliberate.
- *
- * Four states, and they are four different sentences rather than four skins of
- * one:
- *
- *  - **populated / tiny** — the figure, in tabular digits.
- *  - **unavailable** — the statistic exists but this deployment cannot measure
- *    it, and the server says so by NAMING it in `unavailable` and omitting it
- *    from `stats`. Rendered "Not measured yet", NEVER as `0`. `questionsAnswered`
- *    is in exactly this state until the trivia migration lands.
- *  - **absent** — a key the server did not send and did not name. Treated the
- *    same as unavailable, because the alternative is to make a number up.
- *  - **the endpoint is down** — the whole section says so in one line and offers
- *    a retry. No stale cache, no zeros, no empty rows pretending to be data.
- *
- * ## The composition
- *
- * The same field the product is built on: warm near-black, one vermilion bloom
- * as a light source, dark recesses, near-white text, Mulish. Two differences,
- * both deliberate. The bloom does not drift — the drift on a claim screen means
- * "this drop is live and other people are taking shares out of it", and a
- * landing page is not live, so animating it would be decoration. And the light
- * is bounded to the first screen: it rises behind the photographed packet, and
- * the page settles into flat near-black underneath, so five folds of reading do
- * not happen on top of a gradient.
- *
- * Section rhythm changes on purpose. The hero is copy left / object right; the
- * sequence is a rail with beats; the figures are a ledger; the custody section
- * is a heading beside its own prose. Nothing here is four identical cards.
- */
-
-// ---- the figures ------------------------------------------------------------------
-
 interface Row {
   key: StatKey
   icon: IconComponent
   label: string
-  /** What this figure counts, for a reader who has not used the product. */
   note: string
 }
 
-/**
- * The four counted figures, in the order they are read.
- *
- * `totalPaidOut` is not here: it is the lead entry above them and is drawn with
- * the Nimiq signet rather than an icon from the set, because it is the money and
- * the mark IS its unit.
- */
 const ROWS: Row[] = [
   {
     key: 'uniqueWalletsPaid',
     icon: WalletIcon,
     label: 'Wallets paid',
-    note: 'Different wallets that have received a payout.',
+    note: 'Wallets that have received a payout.',
   },
   {
     key: 'sharesClaimed',
@@ -109,26 +41,19 @@ const ROWS: Row[] = [
     key: 'dropsFunded',
     icon: EnvelopeSealedIcon,
     label: 'Drops funded',
-    note: 'Drops whose funding was confirmed on the blockchain.',
+    note: 'Funding confirmed on chain.',
   },
   {
     key: 'questionsAnswered',
     icon: QuestionMarkIcon,
     label: 'Questions answered',
-    note: 'Trivia answers submitted at a gated drop.',
+    note: 'Answers submitted at a gated drop.',
   },
 ]
 
 type Load = { phase: 'loading' } | { phase: 'ready'; data: PublicStats } | { phase: 'failed' }
 
-/**
- * The value for one row, or the reason there is not one.
- *
- * The distinction this function exists to keep: a figure that is ABSENT from the
- * response is not zero. It is a measurement this deployment cannot take, and the
- * page says that in words. Coercing it to `0` would publish a number the server
- * deliberately refused to publish.
- */
+/** Null means the server did not measure this. Never coerce it to 0. */
 function readFigure(data: PublicStats, key: StatKey): string | null {
   const value = data.stats[key]
   if (typeof value === 'number') return value.toLocaleString('en-GB')
@@ -136,7 +61,6 @@ function readFigure(data: PublicStats, key: StatKey): string | null {
   return null
 }
 
-/** UTC, spelled out. A landing page's numbers must carry their own age. */
 function stamp(iso: string): string {
   const at = new Date(iso)
   if (Number.isNaN(at.getTime())) return ''
@@ -151,7 +75,7 @@ function stamp(iso: string): string {
   }).format(at)
 }
 
-function Ledger() {
+function useStats(): { load: Load; retry: () => void } {
   const [load, setLoad] = useState<Load>({ phase: 'loading' })
   const [attempt, setAttempt] = useState(0)
 
@@ -175,23 +99,26 @@ function Ledger() {
     }
   }, [attempt])
 
+  return { load, retry }
+}
+
+function Ledger({ load, retry }: { load: Load; retry: () => void }) {
   return (
     <section className="nd-land-sec nd-land-figures" aria-labelledby="figures">
       <div className="nd-land-wrap nd-land-figures-in">
-        <div className="nd-land-figures-head">
+        <div className="nd-land-figures-head nd-rise">
           <h2 id="figures">What has actually happened</h2>
           <p>
-            NimDrops is running a capped pilot on Nimiq mainnet, so these are small numbers. Each
-            one is a query against the ledger rather than an estimate, and every payment inside them
-            is an ordinary Nimiq transaction that anyone can look up.
+            A capped pilot on Nimiq mainnet, so these are small. Each is a query against the ledger,
+            not an estimate.
           </p>
         </div>
 
         {load.phase === 'failed' ? (
           <div className="nd-panel nd-land-figures-down" data-testid="stats-down">
             <p className="nd-note">
-              The live figures are not loading right now. Nothing else on this page depends on them,
-              and no number here is filled in when they are missing.
+              The live figures are not loading right now. No number here is filled in when they are
+              missing.
             </p>
             <button type="button" className="nd-textlink" onClick={retry}>
               Try again
@@ -216,11 +143,8 @@ function Ledger() {
                     <Money nim={readFigure(load.data, 'totalPaidOut')} />
                   )}
                 </dd>
-                {/* A second `dd` rather than a `p`: only `dt` and `dd` are
-                    allowed inside a `dl`'s grouping element. */}
-                <dd className="nd-ledger-note">
-                  Confirmed on the Nimiq blockchain, not merely sent.
-                </dd>
+                {/* A `dd`, not a `p`: a `dl` group admits only `dt` and `dd`. */}
+                <dd className="nd-ledger-note">Confirmed on chain, not merely sent.</dd>
               </div>
 
               {ROWS.map(({ key, icon: Icon, label, note }) => (
@@ -255,56 +179,98 @@ function Ledger() {
   )
 }
 
-/** A figure that is on its way. Not a zero, and not a dash that reads as one. */
 function Waiting() {
   return <span className="nd-ledger-wait" aria-hidden="true" />
 }
 
 function Figure({ value }: { value: string | null }) {
-  if (value === null) return <span className="nd-ledger-none">Not measured yet</span>
-  return <b className="nd-num">{value}</b>
+  if (value === null) return <span className="nd-ledger-none nd-settle">Not measured yet</span>
+  return <b className="nd-num nd-settle">{value}</b>
 }
 
-/** The money keeps its unit. Exact decimal NIM, never abbreviated or rounded. */
 function Money({ nim }: { nim: string | null }) {
-  if (nim === null) return <span className="nd-ledger-none">Not measured yet</span>
+  if (nim === null) return <span className="nd-ledger-none nd-settle">Not measured yet</span>
   return (
-    <b className="nd-num">
+    <b className="nd-num nd-settle">
       {nim}
       <span className="nd-ledger-unit"> NIM</span>
     </b>
   )
 }
 
-// ---- the page ----------------------------------------------------------------------
+/**
+ * Trivia is not built. `questionsAnswered` is absent until the `trivia_answers`
+ * table exists, so gating on it is what stops this section describing a feature
+ * that is not running. Gate on presence, not on a positive count.
+ */
+function TriviaBeat({ load }: { load: Load }) {
+  if (load.phase !== 'ready') return null
+  if (readFigure(load.data, 'questionsAnswered') === null) return null
+
+  return (
+    <section className="nd-land-sec nd-land-gate" aria-labelledby="gate">
+      <div className="nd-land-wrap nd-land-gate-in">
+        <div className="nd-land-gate-head nd-rise">
+          <h2 id="gate">Some drops ask first</h2>
+          <p>
+            A sponsor can put five questions in front of the share. Answer all five and you claim
+            the same fixed amount as everyone else.
+          </p>
+        </div>
+
+        <dl className="nd-land-gate-facts">
+          <div className="nd-rise">
+            <dt>
+              <QuestionMarkIcon size={18} />
+              Five questions, four options
+            </dt>
+            <dd>One at a time. The next one arrives only after the last is committed.</dd>
+          </div>
+          <div className="nd-rise">
+            <dt>
+              <ClockExpiryIcon size={18} />
+              Fifteen seconds each
+            </dt>
+            <dd>The deadline is stamped and timed by the server, not by your device.</dd>
+          </div>
+          <div className="nd-rise">
+            <dt>
+              <CustodyShieldIcon size={18} />
+              No answers given back
+            </dt>
+            <dd>
+              You are told that a run failed, never which answer was wrong. You can try again.
+            </dd>
+          </div>
+        </dl>
+      </div>
+    </section>
+  )
+}
 
 const STEPS: { icon: IconComponent; title: string; body: string }[] = [
   {
     icon: WalletIcon,
     title: 'Fund it once',
-    body: 'Pick the amount each person gets and how many people. One transaction from your own wallet covers all of them.',
+    body: 'Pick the amount each person gets, and how many people. One transaction covers all of them.',
   },
   {
     icon: ShareIcon,
     title: 'Send one link',
-    body: 'You get a link and a QR code. Put it in the group chat, or on a screen at the event.',
+    body: 'You get a link and a QR code. Put it in the group chat, or on a screen.',
   },
   {
     icon: ClaimIcon,
     title: 'Everyone gets the same',
-    body: 'Each person opens the link in Nimiq Pay and approves one signature. The NIM arrives at the wallet that signed. Nobody types an address and nobody pays a fee.',
+    body: 'They open it in Nimiq Pay and approve. The NIM lands in the wallet that signed. No address to type, no fee.',
   },
 ]
 
 export default function Landing() {
+  const { load, retry } = useStats()
+
   return (
     <main className="nd-land">
-      {/*
-        The light, bounded to the first screen. It does not drift: on a claim
-        screen the drift means the drop is still moving while you read it, and
-        there is nothing moving here. Below this band the page is flat near-black,
-        so four folds of reading do not sit on a gradient.
-      */}
       <div className="nd-land-sky" aria-hidden="true">
         <span className="nd-land-bloom" />
         <span className="nd-land-counter" />
@@ -313,8 +279,14 @@ export default function Landing() {
 
       <header className="nd-land-top">
         <div className="nd-land-wrap nd-land-top-in">
-          <p className="nd-land-brand">NimDrops</p>
-          <Link to="/create" className="nd-land-topcta">
+          <p className="nd-land-brand nd-arrive" style={{ '--nd-in': '0ms' } as CSSProperties}>
+            NimDrops
+          </p>
+          <Link
+            to="/create"
+            className="nd-land-topcta nd-arrive"
+            style={{ '--nd-in': '40ms' } as CSSProperties}
+          >
             Create a drop
           </Link>
         </div>
@@ -324,57 +296,62 @@ export default function Landing() {
         <div className="nd-land-wrap nd-land-hero-in">
           <div className="nd-land-hero-copy">
             <h1 className="nd-land-h1">
-              <span className="nd-land-h1-a">One link.</span>
-              <span className="nd-land-h1-b">A fixed share of NIM for everyone who opens it.</span>
+              <span
+                className="nd-land-h1-a nd-arrive"
+                style={{ '--nd-in': '80ms' } as CSSProperties}
+              >
+                One link.
+              </span>
+              <span
+                className="nd-land-h1-b nd-arrive"
+                style={{ '--nd-in': '160ms' } as CSSProperties}
+              >
+                A fixed share of NIM for everyone who opens it.
+              </span>
             </h1>
-            <p className="nd-land-lede">
-              A sponsor funds a drop once in Nimiq Pay and gets a single link. Everyone who opens it
-              signs once and receives the same amount — one share per wallet, first come, first
-              served. Whatever nobody claims goes back to the sponsor when the claim window closes.
-              The sponsor picks that window when they fund, and it is 24 hours unless they change
-              it.
+            <p className="nd-land-lede nd-arrive" style={{ '--nd-in': '240ms' } as CSSProperties}>
+              A sponsor funds once in Nimiq Pay and gets one link. Everyone who opens it signs and
+              gets the same amount: one share per wallet, first come, first served.
             </p>
-            <div className="nd-land-cta">
+            <div className="nd-land-cta nd-arrive" style={{ '--nd-in': '320ms' } as CSSProperties}>
               <Link to="/create" className="nd-action">
                 Create a drop
               </Link>
-              <p className="nd-land-ctanote">
-                Funding is signed in Nimiq Pay, so this step needs the wallet. There is nothing to
-                sign up for.
-              </p>
+              <p className="nd-land-ctanote">Signed in Nimiq Pay. Nothing to sign up for.</p>
             </div>
           </div>
 
-          {/*
-            Decorative, and empty alt so a missing file collapses to nothing
-            rather than to a broken-image glyph on the first screen a stranger
-            sees. The page reads correctly with or without it.
-          */}
           <div className="nd-land-hero-art" aria-hidden="true">
-            <NimDropsPhotograph
-              variant="packet-cutout"
-              alt=""
-              priority
-              sizes="(max-width: 60rem) 62vw, 26rem"
-            />
+            {/* Two spans: the outer arrives, the inner floats. One element
+                cannot hold both transforms. */}
+            <span
+              className="nd-land-packet nd-arrive"
+              style={{ '--nd-in': '120ms' } as CSSProperties}
+            >
+              <span className="nd-land-packet-float">
+                <NimDropsPhotograph
+                  variant="packet-cutout"
+                  alt=""
+                  priority
+                  sizes="(max-width: 60rem) 62vw, 26rem"
+                />
+              </span>
+            </span>
           </div>
         </div>
       </section>
 
       <section className="nd-land-sec nd-land-how" aria-labelledby="how">
         <div className="nd-land-wrap nd-land-how-in">
-          <div className="nd-land-how-head">
+          <div className="nd-land-how-head nd-rise">
             <h2 id="how">How a drop works</h2>
-            <p>
-              Three things the sponsor does, and one that happens on its own. One approval becomes
-              many outgoing payments, inside a wallet people already have.
-            </p>
+            <p>Three things the sponsor does, and one the clock does.</p>
           </div>
 
           <div className="nd-land-how-body">
             <ol className="nd-flow">
               {STEPS.map(({ icon: Icon, title, body }) => (
-                <li key={title}>
+                <li key={title} className="nd-rise">
                   <span className="nd-flow-mark" aria-hidden="true">
                     <Icon size={20} />
                   </span>
@@ -384,27 +361,28 @@ export default function Landing() {
               ))}
             </ol>
 
-            {/* Not a step: nobody performs it. It is what the clock does. */}
-            <div className="nd-flow-after">
+            <div className="nd-flow-after nd-rise">
               <span className="nd-flow-mark" aria-hidden="true">
                 <RefundReturnIcon size={20} />
               </span>
               <h3>Then, when the window closes</h3>
               <p>
-                The drop stops accepting claims and every unclaimed share is refunded to the wallet
-                that funded it. The sponsor picks how long that takes, from an hour to two weeks,
-                and does not have to come back for the refund.
+                Whatever nobody claims goes back to the sponsor when the claim window closes. The
+                sponsor sets that window when funding, from an hour to two weeks. It is 24 hours
+                unless they change it.
               </p>
             </div>
           </div>
         </div>
       </section>
 
-      <Ledger />
+      <TriviaBeat load={load} />
+
+      <Ledger load={load} retry={retry} />
 
       <section className="nd-land-sec nd-land-plain" aria-labelledby="custody">
         <div className="nd-land-wrap">
-          <div className="nd-land-plain-in">
+          <div className="nd-land-plain-in nd-rise">
             <div className="nd-land-plain-head">
               <span className="nd-land-plain-mark" aria-hidden="true">
                 <CustodyShieldIcon size={22} />
@@ -412,21 +390,31 @@ export default function Landing() {
               <h2 id="custody">Said before you have to ask</h2>
             </div>
             <div className="nd-land-plain-body">
-              <p>
+              <p className="nd-land-plain-lead">
                 NimDrops holds the NIM between funding and payout. That is custody: not a smart
-                contract, and not your wallet. When someone claims, it is sent to the wallet that
-                signed and to no other address.
+                contract, and not your wallet.
               </p>
-              <p>
-                A signature proves control of one wallet, not one person, so anyone holding several
-                wallets can take several shares. Shares are fixed and equal, which is why there is
-                nothing to win by trying.
-              </p>
-              <p>
-                Funding, payouts and refunds are ordinary Nimiq transactions: public, permanent and
-                readable by anyone. Payouts wait for the network to confirm them, and nothing here
-                says &ldquo;paid&rdquo; before a transaction is final.
-              </p>
+              {/* Shortening moved these behind a summary. Removing any of them
+                  deletes a custody fact. */}
+              <details className="nd-land-plain-more">
+                <summary>What that means in practice</summary>
+                <div className="nd-land-plain-detail">
+                  <p>
+                    When someone claims, the NIM is sent to the wallet that signed and to no other
+                    address.
+                  </p>
+                  <p>
+                    A signature proves control of one wallet, not one person, so anyone holding
+                    several wallets can take several shares. Shares are fixed and equal, which is
+                    why there is nothing to win by trying.
+                  </p>
+                  <p>
+                    Funding, payouts and refunds are ordinary Nimiq transactions: public, permanent
+                    and readable by anyone. Nothing here says &ldquo;paid&rdquo; before the network
+                    has confirmed it.
+                  </p>
+                </div>
+              </details>
             </div>
           </div>
         </div>
@@ -435,10 +423,7 @@ export default function Landing() {
       <footer className="nd-land-foot">
         <div className="nd-land-wrap nd-land-foot-in">
           <div className="nd-land-foot-copy">
-            <p className="nd-land-foot-line">
-              NimDrops runs inside Nimiq Pay as a mini app. Open it there to fund a drop or to claim
-              one.
-            </p>
+            <p className="nd-land-foot-line">NimDrops runs inside Nimiq Pay as a mini app.</p>
             <Link to="/create" className="nd-quiet nd-land-foot-cta">
               Create a drop
             </Link>

@@ -1,20 +1,24 @@
-/**
- * The landing page, and the rule that decides most of these tests: **no number
- * on this page may be invented.**
- *
- * `GET /api/stats` distinguishes "this measured zero" from "this cannot be
- * measured", and it does that by NAMING the unmeasurable statistic in
- * `unavailable` and leaving it out of `stats`. A client that substituted `0`
- * would erase the distinction the endpoint was built to keep, and would publish
- * a figure nobody computed. Four states are asserted below — populated, tiny,
- * unavailable, and the endpoint being down — because they are four different
- * sentences rather than four skins of one.
- */
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { MemoryRouter } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { PublicStats } from '../api'
 import Landing from './Landing'
+const css = readFileSync(resolve(process.cwd(), 'src/pages/Landing.css'), 'utf8')
+function block(selector: string): string {
+  const escaped = selector.replace(/[.[\]*+?^${}()|\\]/g, '\\$&')
+  const found = css.match(new RegExp(`\\n${escaped}\\s*\\{([^{}]*)\\}`))?.[1]
+  expect(found, `${selector} should exist as a top-level rule`).toBeTruthy()
+  return found!
+}
+function keyframes(name: string): string {
+  const found = css.match(
+    new RegExp(`@keyframes\\s+${name}\\s*\\{((?:[^{}]|\\{[^{}]*\\})*)\\}`),
+  )?.[1]
+  expect(found, `@keyframes ${name} should exist`).toBeTruthy()
+  return found!
+}
 
 afterEach(() => {
   cleanup()
@@ -56,19 +60,9 @@ function mount() {
     </MemoryRouter>,
   )
 }
-
-/** The row for one statistic, by the key the API uses. */
 function row(key: string) {
   return document.querySelector(`[data-stat="${key}"]`) as HTMLElement
 }
-
-/**
- * The money, read off the lead entry.
- *
- * `getByText` cannot see it: the figure and its unit are two elements so the
- * unit can be set at its own size, which is what keeps `1284.5` from having a
- * `NIM` the same height as the digits. The rendered text is still one string.
- */
 async function money(): Promise<string> {
   const lead = await waitFor(() => {
     const el = row('totalPaidOut')
@@ -86,12 +80,8 @@ describe('what a stranger is told', () => {
     const text = document.body.textContent ?? ''
     expect(text).toMatch(/fixed share of NIM for everyone who opens it/i)
     expect(text).toMatch(/one share per wallet, first come, first served/i)
-    // The refund is stated as a window the sponsor sets, with the default
-    // named. Asserting "24 hours" as the rule would be asserting something the
-    // product stopped doing when the window became a choice.
     expect(text).toMatch(/goes back to the sponsor when the claim window closes/i)
     expect(text).toMatch(/24 hours unless they change it/i)
-    // The uncomfortable fact is on the page, not one tap behind it.
     expect(text).toMatch(/custody: not a smart contract, and not your wallet/i)
     await waitFor(() => expect(screen.getByTestId('stats')).toBeTruthy())
   })
@@ -103,9 +93,6 @@ describe('what a stranger is told', () => {
     expect(h1s).toHaveLength(1)
     expect(h1s[0]!.textContent).toMatch(/one link/i)
   })
-
-  /** The landing is the one page a browser is allowed to read, so it carries
-      the way into the app for someone who does not have the wallet. */
   it('carries the app-store block for a reader with no Nimiq Pay', () => {
     installStats({ body: TINY })
     mount()
@@ -148,29 +135,25 @@ describe('the figures', () => {
     expect(within(row('questionsAnswered')).getByText('1,097')).toBeTruthy()
     expect(document.body.textContent).not.toMatch(/not measured yet/i)
   })
-
-  /**
-   * THE rule. `questionsAnswered` has no backing table until the trivia
-   * migration lands, so the server names it and omits it. Rendering `0` there
-   * would state that nobody has answered a question, which is a measurement
-   * nobody took.
-   */
   it('says "not measured yet" for an unavailable statistic, never zero', async () => {
     installStats({ body: TINY })
     mount()
 
-    const cell = await waitFor(() => within(row('questionsAnswered')).getByText(/not measured yet/i))
+    const cell = await waitFor(() =>
+      within(row('questionsAnswered')).getByText(/not measured yet/i),
+    )
     expect(cell).toBeTruthy()
     expect(within(row('questionsAnswered')).queryByText('0')).toBeNull()
   })
-
-  /** A key the server sent neither in `stats` nor in `unavailable`. Same answer:
-      we did not measure it, so we do not print a number for it. */
   it('treats a silently absent statistic as unmeasured rather than zero', async () => {
     installStats({
       body: {
         generatedAt: '2026-07-27T14:31:00.000Z',
-        stats: { totalPaidOut: '2', totalPaidOutLuna: '200000', uniqueWalletsPaid: 1 },
+        stats: {
+          totalPaidOut: '2',
+          totalPaidOutLuna: '200000',
+          uniqueWalletsPaid: 1,
+        },
         unavailable: [],
       },
     })
@@ -182,9 +165,6 @@ describe('the figures', () => {
       expect(within(row(key)).queryByText('0')).toBeNull()
     }
   })
-
-  /** A genuine zero is a measurement and prints as one. This is the other half
-      of the rule above: absent and zero must not collapse into each other. */
   it('prints a measured zero as zero', async () => {
     installStats({
       body: {
@@ -216,18 +196,23 @@ describe('the figures', () => {
 
 describe('when the endpoint is down', () => {
   it('says so and offers a retry, instead of zeros or an empty table', async () => {
-    installStats({ status: 503, body: { error: { code: 'stats_unavailable', message: 'no' } } })
+    installStats({
+      status: 503,
+      body: { error: { code: 'stats_unavailable', message: 'no' } },
+    })
     mount()
 
     const panel = await screen.findByTestId('stats-down')
     expect(panel.textContent).toMatch(/not loading right now/i)
     expect(screen.queryByTestId('stats')).toBeNull()
-    // The rest of the page is unaffected: a missing figure is not an outage.
     expect(document.body.textContent).toMatch(/how a drop works/i)
   })
 
   it('recovers when the retry succeeds', async () => {
-    installStats({ status: 503, body: { error: { code: 'stats_unavailable', message: 'no' } } })
+    installStats({
+      status: 503,
+      body: { error: { code: 'stats_unavailable', message: 'no' } },
+    })
     mount()
     await screen.findByTestId('stats-down')
 
@@ -239,7 +224,9 @@ describe('when the endpoint is down', () => {
   })
 
   it('treats an unreadable body the same as an outage', async () => {
-    installStats({ body: { generatedAt: 'not a date', stats: {}, unavailable: [] } })
+    installStats({
+      body: { generatedAt: 'not a date', stats: {}, unavailable: [] },
+    })
     mount()
     expect(await screen.findByTestId('stats-down')).toBeTruthy()
   })
@@ -248,5 +235,207 @@ describe('when the endpoint is down', () => {
     installStats('network-error')
     mount()
     expect(await screen.findByTestId('stats-down')).toBeTruthy()
+  })
+})
+describe('nothing on this page is revealed by an animation', () => {
+  it('never gives an animated element a hidden resting state', () => {
+    for (const selector of ['.nd-arrive', '.nd-settle', '.nd-land-packet']) {
+      const rule = block(selector)
+      expect(rule, selector).not.toMatch(/(^|[;\s])opacity:\s*0(\.0*)?\s*(;|$)/)
+      expect(rule, selector).not.toMatch(/visibility:\s*hidden/)
+      expect(rule, selector).not.toMatch(/display:\s*none/)
+    }
+  })
+
+  it('gives the scroll reveal no resting rule at all to hide it with', () => {
+    expect(css).not.toMatch(/\n\.nd-rise\s*\{/)
+  })
+  it('lands every reveal on the visible state', () => {
+    for (const name of ['nd-land-arrive', 'nd-land-rise', 'nd-land-settle', 'nd-land-packet-in']) {
+      const body = keyframes(name)
+      expect(body, name).toMatch(/to\s*\{[^}]*transform:\s*none/)
+      // A reveal that never touches opacity cannot hide anything, which is
+      // stronger than ending at 1. Only fades have to prove where they land.
+      if (/opacity/.test(body)) expect(body, name).toMatch(/to\s*\{[^}]*opacity:\s*1/)
+    }
+  })
+  it('applies the scroll reveal only where the timeline is supported', () => {
+    const guarded = css.match(/@supports \(animation-timeline: view\(\)\)\s*\{[\s\S]*?\n\}/)?.[0]
+    expect(guarded, 'the view() timeline must sit behind @supports').toBeTruthy()
+    expect(guarded).toMatch(/\.nd-rise\s*\{/)
+    const unguarded = css.replace(guarded!, '')
+    expect(unguarded).not.toMatch(/animation-timeline:\s*view\(\)/)
+  })
+  it('animates nothing but transform and opacity', () => {
+    for (const [, body] of css.matchAll(/@keyframes\s+[\w-]+\s*\{((?:[^{}]|\{[^{}]*\})*)\}/g)) {
+      const props = [...body.matchAll(/([a-z-]+)\s*:/g)].map((m) => m[1])
+      for (const prop of props) {
+        expect(['opacity', 'transform'], `@keyframes property ${prop}`).toContain(prop)
+      }
+    }
+  })
+  it('gives reduced motion a fade, with the stagger removed', () => {
+    const reduced = css.match(/@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*?\n\}/)?.[0]
+    expect(reduced).toBeTruthy()
+    expect(reduced).toMatch(/animation:\s*nd-land-fade\s+\d+ms[^;]*!important/)
+    expect(reduced).toMatch(/animation-delay:\s*0ms\s*!important/)
+    expect(reduced).toMatch(/animation:\s*none\s*!important/)
+    expect(keyframes('nd-land-fade')).not.toMatch(/transform/)
+  })
+  it('breathes the bloom without moving it', () => {
+    const body = keyframes('nd-land-breathe')
+    expect(body).toMatch(/transform:\s*scale\(/)
+    expect(body).not.toMatch(/translate/)
+  })
+})
+
+describe('the custody disclosure', () => {
+  it('states the claim itself outside the disclosure', () => {
+    installStats({ body: TINY })
+    mount()
+    const details = document.querySelector('.nd-land-plain-more')!
+    const lead = document.querySelector('.nd-land-plain-lead')!
+    expect(lead.textContent).toMatch(/custody: not a smart contract, and not your wallet/i)
+    expect(details.contains(lead)).toBe(false)
+  })
+  it('keeps every custody fact reachable', () => {
+    installStats({ body: TINY })
+    mount()
+    const text = document.querySelector('.nd-land-plain-more')!.textContent ?? ''
+    expect(text).toMatch(/sent to the wallet that signed and to no other address/i)
+    expect(text).toMatch(/anyone holding several wallets can take several shares/i)
+    expect(text).toMatch(/public, permanent and readable by anyone/i)
+    expect(text).toMatch(/before the network has confirmed it/i)
+  })
+  it('uses markup a reader can open with no script at all', () => {
+    installStats({ body: TINY })
+    mount()
+    const details = document.querySelector('.nd-land-plain-more')
+    expect(details?.tagName).toBe('DETAILS')
+    expect(details?.querySelector('summary')?.textContent).toMatch(/what that means in practice/i)
+  })
+})
+describe('the trivia section gates itself on the server', () => {
+  const gate = () => document.querySelector('[aria-labelledby="gate"]')
+
+  it('says nothing about trivia while the tables do not exist', async () => {
+    installStats({ body: TINY })
+    mount()
+    await waitFor(() => expect(screen.getByTestId('stats')).toBeTruthy())
+
+    expect(gate()).toBeNull()
+    const text = document.body.textContent ?? ''
+    expect(text).not.toMatch(/five questions/i)
+    expect(text).not.toMatch(/four options/i)
+    expect(within(row('questionsAnswered')).getByText(/not measured yet/i)).toBeTruthy()
+  })
+
+  it('describes trivia once the server can measure it', async () => {
+    installStats({
+      body: {
+        generatedAt: '2026-07-27T14:31:00.000Z',
+        stats: {
+          totalPaidOut: '2',
+          totalPaidOutLuna: '200000',
+          uniqueWalletsPaid: 1,
+          dropsFunded: 1,
+          sharesClaimed: 1,
+          questionsAnswered: 1097,
+        },
+        unavailable: [],
+      } satisfies PublicStats,
+    })
+    mount()
+
+    const section = await waitFor(() => {
+      const el = gate()
+      if (!el) throw new Error('no gate section yet')
+      return el
+    })
+    const text = section.textContent ?? ''
+    expect(text).toMatch(/five questions, four options/i)
+    expect(text).toMatch(/one at a time/i)
+    expect(text).toMatch(/stamped and timed by the server/i)
+    expect(text).toMatch(/never which answer was wrong/i)
+  })
+  it('describes trivia at a genuine zero, because the table exists', async () => {
+    installStats({
+      body: {
+        generatedAt: '2026-07-27T14:31:00.000Z',
+        stats: {
+          totalPaidOut: '0',
+          totalPaidOutLuna: '0',
+          uniqueWalletsPaid: 0,
+          dropsFunded: 0,
+          sharesClaimed: 0,
+          questionsAnswered: 0,
+        },
+        unavailable: [],
+      } satisfies PublicStats,
+    })
+    mount()
+    await waitFor(() => expect(gate()).toBeTruthy())
+    expect(within(row('questionsAnswered')).getByText('0')).toBeTruthy()
+  })
+
+  it('stays silent while the figures are still in flight', () => {
+    installStats({ body: TINY })
+    mount()
+    expect(gate()).toBeNull()
+  })
+
+  it('stays silent when the endpoint is down', async () => {
+    installStats({
+      status: 503,
+      body: { error: { code: 'stats_unavailable', message: 'no' } },
+    })
+    mount()
+    await screen.findByTestId('stats-down')
+    expect(gate()).toBeNull()
+  })
+  it('makes no claim the design says must not be made', async () => {
+    installStats({
+      body: {
+        generatedAt: '2026-07-27T14:31:00.000Z',
+        stats: {
+          totalPaidOut: '2',
+          totalPaidOutLuna: '200000',
+          uniqueWalletsPaid: 1,
+          dropsFunded: 1,
+          sharesClaimed: 1,
+          questionsAnswered: 12,
+        },
+        unavailable: [],
+      } satisfies PublicStats,
+    })
+    mount()
+    await waitFor(() => expect(gate()).toBeTruthy())
+
+    // Scoped to the gate: "nothing to win by trying" is the custody
+    // disclosure disclaiming a prize, which is the opposite failure.
+    const text = (gate()!.textContent ?? '').toLowerCase()
+    for (const banned of ['lucky', 'jackpot', 'prize', 'win', 'reward', 'bonus', 'streak']) {
+      expect(text, `must not say "${banned}"`).not.toContain(banned)
+    }
+    expect(text).not.toMatch(/cheat|anti-?bot|proctor|fraud-proof|sybil|guarantee/)
+  })
+})
+
+describe('the page is short', () => {
+  it('keeps the first read under 340 words', () => {
+    installStats({ body: TINY })
+    mount()
+
+    const main = document.querySelector('main')!
+    const detail = main.querySelector('.nd-land-plain-detail')
+    detail?.remove()
+
+    const words = (main.textContent ?? '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .split(' ')
+      .filter((w) => /[a-z0-9]/i.test(w))
+
+    expect(words.length).toBeLessThan(340)
   })
 })

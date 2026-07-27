@@ -1,36 +1,6 @@
-/* ===========================================================================
- * The landing page
- * ===========================================================================
- *
- * The one surface in NimDrops that is genuinely responsive, and the one written
- * in the brand register rather than the product one. Everything else answers a
- * browser with an open-in-app gate; this page has to be deliberate on a 320px
- * phone and on a 1440px monitor, because it is where a stranger finds out what
- * the product is.
- *
- * It reuses the product's material rather than inventing a second one: the same
- * warm near-black field, the same vermilion bloom, the same recesses, the same
- * `.nd-action` / `.nd-quiet` button language, the same Mulish. Three departures,
- * each with a reason:
- *
- *  1. **The bloom does not move.** On a claim screen the drift says the drop is
- *     live and other people are taking shares out of it while you read. Nothing
- *     on a landing page is live, so the same animation would be decoration — and
- *     it would run for the whole length of a long scrolling page.
- *  2. **The light is bounded to the first screen.** `.nd-land-sky` clips it. A
- *     bloom anchored to the height of a five-fold page would put its core
- *     somewhere in the middle of the custody copy, and leave the hero unlit.
- *  3. **Media queries, not container queries.** The product's components are
- *     sized against the field's own width so they render correctly inside
- *     `/preview`'s 390px frame. This page is never framed: the viewport IS its
- *     context, and it is the only place in the codebase where that is true.
- *
- * Contrast discipline is unchanged and is the reason so little text here is
- * muted. Secondary ink never sits unprotected on a lit field; copy on the open
- * page is full-strength near-white doing its de-emphasis with weight and size,
- * and muted ink appears only inside a recess. Nothing on the page is blurred —
- * `GlassSheet` remains the only `backdrop-filter` surface in the product.
- */
+/* Animated elements rest in their FINAL, visible state; keyframes move them
+   away and back. With CSS animation off, the base cascade is the whole page.
+   Nothing here may be revealed by a class, a listener or an observer. */
 
 .nd-land {
   --pad: clamp(1.25rem, 5vw, 3.5rem);
@@ -52,13 +22,6 @@
   padding-inline: var(--pad);
 }
 
-/* ---- the light ----------------------------------------------------------- */
-
-/**
- * A bounded sky. It clips its own bloom, and fades to the page's flat base at
- * its foot, so the light belongs to the hero and the reading below it happens on
- * even ground.
- */
 .nd-land-sky {
   position: absolute;
   inset: 0 0 auto 0;
@@ -66,20 +29,14 @@
   overflow: clip;
   pointer-events: none;
   z-index: var(--nd-z-light);
-  /* Fades the whole band out at the bottom, so there is no visible edge where
-     the light stops. */
   mask-image: linear-gradient(180deg, #000 0%, #000 62%, transparent 100%);
 }
 
-/**
- * The bloom, behind and above the photographed packet, which is the light
- * source's excuse for being where it is: the object is lit from behind.
- *
- * Dimmer than the claim field's 0.66. That field carries one number and two
- * tiles; this page carries five folds of prose, and every line of it is held to
- * the same contrast floors.
- */
 .nd-land-bloom {
+  /* A property, not a literal, so the keyframes below scale whichever
+     value the narrow-viewport override left in place. */
+  --bloom-o: 0.52;
+
   position: absolute;
   top: 4%;
   left: 68%;
@@ -89,7 +46,7 @@
   margin-left: -45vmax;
   border-radius: 50%;
   filter: blur(40px);
-  opacity: 0.52;
+  opacity: var(--bloom-o);
   background: radial-gradient(
     closest-side,
     var(--nd-bloom-core) 0%,
@@ -102,7 +59,6 @@
   );
 }
 
-/** Static counter-light, so the bloom is not a circle on a rectangle. */
 .nd-land-counter {
   position: absolute;
   top: 42%;
@@ -115,13 +71,12 @@
   background: radial-gradient(closest-side, var(--nd-counter-fill), var(--nd-counter-fade) 72%);
 }
 
-/* At phone widths the light sits behind the headline rather than beside a
-   packet that has moved below it, so it comes down and in. */
 @media (max-width: 60rem) {
   .nd-land-bloom {
+    --bloom-o: 0.46;
+
     top: 34%;
     left: 78%;
-    opacity: 0.46;
   }
 }
 
@@ -129,7 +84,6 @@
   z-index: var(--nd-z-texture);
 }
 
-/* Everything with content sits above the light. */
 .nd-land-top,
 .nd-land-hero,
 .nd-land-sec,
@@ -137,8 +91,6 @@
   position: relative;
   z-index: var(--nd-z-content);
 }
-
-/* ---- the masthead -------------------------------------------------------- */
 
 .nd-land-top-in {
   display: flex;
@@ -178,8 +130,6 @@
   background-color: rgb(245 240 238 / 0.08);
 }
 
-/* ---- the hero ------------------------------------------------------------ */
-
 .nd-land-hero-in {
   display: grid;
   gap: clamp(2rem, 6vw, 3rem);
@@ -187,13 +137,6 @@
   padding-bottom: clamp(3rem, 9vw, 6rem);
 }
 
-/**
- * Two type roles, 2.4x apart, and the second one carries the whole claim.
- *
- * A modest ratio here would read as uncommitted, and running the sentence at one
- * size would put a full marketing paragraph at display scale. "One link." is the
- * shape of the product; the line under it is what the product does.
- */
 .nd-land-h1 {
   display: flex;
   flex-direction: column;
@@ -219,8 +162,6 @@
   color: var(--nd-on-surface);
 }
 
-/* Full strength, weight-de-emphasised. This paragraph sits on the lit field and
-   secondary alpha cannot clear 4.5:1 there. */
 .nd-land-lede {
   max-width: 46ch;
   margin: 1.5rem 0 0;
@@ -245,21 +186,26 @@
   text-wrap: pretty;
 }
 
-/**
- * The photographed packet: a real object, lit from behind by the bloom, and the
- * only image on the page. It is decorative — the page says everything it needs
- * to in words — so it carries an empty alt and a missing file costs nothing.
- */
 .nd-land-hero-art {
   display: flex;
   justify-content: center;
+}
+
+.nd-land-packet,
+.nd-land-packet-float {
+  display: block;
+  width: 100%;
+  max-width: min(20rem, 62vw);
+}
+
+.nd-land-packet-float {
+  max-width: none;
 }
 
 .nd-land-hero-art .nd-photograph,
 .nd-land-hero-art img {
   display: block;
   width: 100%;
-  max-width: min(20rem, 62vw);
   height: auto;
 }
 
@@ -271,13 +217,10 @@
   .nd-land-hero-art {
     justify-content: flex-end;
   }
-  .nd-land-hero-art .nd-photograph,
-  .nd-land-hero-art img {
+  .nd-land-packet {
     max-width: 26rem;
   }
 }
-
-/* ---- shared section furniture -------------------------------------------- */
 
 .nd-land-sec {
   padding-block: clamp(2.75rem, 7vw, 5rem);
@@ -301,13 +244,9 @@
   color: var(--nd-on-surface);
 }
 
-/* Every section below the hero is on flat near-black, so its supporting copy
-   can be muted without a recess under it. */
 .nd-land-sec p {
   text-wrap: pretty;
 }
-
-/* ---- how a drop works ---------------------------------------------------- */
 
 .nd-land-how {
   border-top: 1px solid var(--nd-rule);
@@ -326,11 +265,6 @@
   color: var(--nd-on-surface-muted);
 }
 
-/**
- * A sequence, so a rail with beats on it — not four equal cards. The rail is a
- * pseudo-element on each item rather than a border on a container, which is what
- * lets the last beat stop the line instead of trailing it into empty space.
- */
 .nd-flow {
   display: grid;
   gap: 0;
@@ -387,11 +321,6 @@
   color: var(--nd-on-surface-muted);
 }
 
-/**
- * The fourth beat is not a step: nobody performs it. It sits after the rail
- * ends, set apart by a rule and a quieter mark, which is a truer picture of the
- * refund than a fourth identical row would be.
- */
 .nd-flow-after {
   margin-top: 0.25rem;
   padding-top: 1.625rem;
@@ -416,8 +345,6 @@
   }
 }
 
-/* ---- the figures --------------------------------------------------------- */
-
 .nd-land-figures {
   border-top: 1px solid var(--nd-rule);
   background-color: rgb(12 7 6 / 0.4);
@@ -436,15 +363,6 @@
   color: var(--nd-on-surface-muted);
 }
 
-/**
- * A ledger, not a metric wall.
- *
- * The pilot is capped and the honest figures are tiny. A row of enormous
- * counters would make that look like a shortfall; a book entry with a timestamp
- * on it makes the same number look like a record — which is what it is. The
- * values are right-aligned tabular figures for the same reason a statement's
- * are: so two of them can be compared down a column.
- */
 .nd-ledger {
   margin: 0;
   border-top: 1px solid var(--nd-rule);
@@ -490,8 +408,8 @@
   overflow-wrap: anywhere;
 }
 
-/* Typed selector, because the note is itself a `dd` and the rule above it sets
-   both `grid-column` and `text-align` on every `dd` in the list. */
+/* Typed: the note is itself a `dd`, and the rule above sets grid-column
+   and text-align on every `dd`. */
 .nd-ledger dd.nd-ledger-note {
   grid-column: 1 / -1;
   grid-row: 2;
@@ -501,7 +419,6 @@
   text-align: left;
 }
 
-/** The lead entry: the money, one step up, with the signet as its mark. */
 .nd-ledger-lead dt svg {
   color: var(--nd-accent);
 }
@@ -518,22 +435,12 @@
   letter-spacing: 0.06em;
 }
 
-/**
- * "Not measured yet" — the rendering of a statistic named in the response's
- * `unavailable` array, or simply absent from it.
- *
- * Deliberately not a number, not a dash and not a zero. A dash reads as nil and
- * a zero is a claim nobody computed; the words are the only honest option, and
- * they are set in the same muted ink as a caption so they cannot be mistaken for
- * a value.
- */
 .nd-ledger-none {
   font-size: 0.875rem;
   font-weight: 500;
   color: var(--nd-on-surface-muted);
 }
 
-/** A figure on its way. A bar rather than a placeholder digit or a dash. */
 .nd-ledger-wait {
   display: inline-block;
   width: 3.25rem;
@@ -550,8 +457,6 @@
   color: var(--nd-on-surface-muted);
 }
 
-/* A hairline, because `.nd-panel`'s recess is invisible against this section's
-   own recess band and an outage should still read as an object on the page. */
 .nd-land-figures-down {
   display: grid;
   justify-items: start;
@@ -577,8 +482,8 @@
   .nd-land-stamp {
     grid-column: 2;
   }
-  /* With room to spare the note moves onto the term's own line, which turns the
-     block into a proper two-column statement instead of a stack of pairs. */
+  /* Typed: the note is itself a `dd`, and the rule above sets grid-column
+   and text-align on every `dd`. */
   .nd-ledger dd.nd-ledger-note {
     grid-column: 1;
     grid-row: 2;
@@ -586,20 +491,10 @@
   }
 }
 
-/* ---- the uncomfortable part ---------------------------------------------- */
-
 .nd-land-plain {
   border-top: 1px solid var(--nd-rule);
 }
 
-/**
- * The disclosure is the one section that is an OBJECT rather than open page.
- *
- * Every other section here is copy on the field. Putting this one on a recess
- * makes it a single thing a reader can point at — which is what a disclosure is
- * — and it stops the page's last three folds sharing one rhythm. It is a recess
- * and not a card: light subtracted, one hairline, nothing blurred.
- */
 .nd-land-plain-in {
   display: grid;
   gap: clamp(1.25rem, 3vw, 3rem);
@@ -609,8 +504,6 @@
   background-color: var(--nd-recess-field);
 }
 
-/* Mark above heading at every width. Beside it, a five-word heading wraps to
-   two lines against a circle and the indent reads like a mistake. */
 .nd-land-plain-head {
   display: flex;
   flex-direction: column;
@@ -630,7 +523,69 @@
   color: var(--nd-accent);
 }
 
-.nd-land-plain-body > p {
+.nd-land-plain-lead {
+  max-width: 52ch;
+  margin: 0;
+  font-size: clamp(1rem, 1.6vw, 1.125rem);
+  font-weight: 500;
+  line-height: 1.55;
+  color: var(--nd-on-surface);
+}
+
+.nd-land-plain-more {
+  margin-top: 1.125rem;
+}
+
+.nd-land-plain-more > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 2.75rem;
+  padding-right: 0.25rem;
+  color: var(--nd-on-surface);
+  font-size: 0.9375rem;
+  font-weight: 650;
+  cursor: pointer;
+  list-style: none;
+  text-underline-offset: 0.25em;
+  text-decoration: underline;
+  text-decoration-color: rgb(245 240 238 / 0.3);
+  transition: text-decoration-color var(--nd-t-state) var(--nd-ease);
+}
+
+.nd-land-plain-more > summary::-webkit-details-marker {
+  display: none;
+}
+
+.nd-land-plain-more > summary::before {
+  content: '';
+  width: 0.5rem;
+  height: 0.5rem;
+  border-right: 1.5px solid var(--nd-accent);
+  border-bottom: 1.5px solid var(--nd-accent);
+  transform: rotate(45deg) translate(-0.0625rem, -0.0625rem);
+  transition: transform var(--nd-t-state) var(--nd-ease);
+}
+
+.nd-land-plain-more[open] > summary::before {
+  transform: rotate(-135deg) translate(-0.125rem, -0.125rem);
+}
+
+.nd-land-plain-more > summary:hover {
+  text-decoration-color: var(--nd-on-surface);
+}
+
+.nd-land-plain-more > summary:focus-visible {
+  outline: 2px solid var(--nd-accent);
+  outline-offset: 3px;
+  border-radius: 0.25rem;
+}
+
+.nd-land-plain-detail {
+  padding-top: 0.5rem;
+}
+
+.nd-land-plain-detail > p {
   max-width: 62ch;
   margin: 0;
   font-size: 0.9375rem;
@@ -638,7 +593,7 @@
   color: var(--nd-on-surface-muted);
 }
 
-.nd-land-plain-body > p + p {
+.nd-land-plain-detail > p + p {
   margin-top: 0.875rem;
 }
 
@@ -648,8 +603,6 @@
     align-items: start;
   }
 }
-
-/* ---- the foot ------------------------------------------------------------ */
 
 .nd-land-foot {
   border-top: 1px solid var(--nd-rule);
@@ -684,5 +637,208 @@
   .nd-land-foot-in {
     grid-template-columns: minmax(0, 1fr) minmax(0, 24rem);
     gap: clamp(2rem, 5vw, 4rem);
+  }
+}
+
+.nd-land-gate {
+  border-top: 1px solid var(--nd-rule);
+}
+
+.nd-land-gate-head > p {
+  max-width: 52ch;
+  margin: 0.875rem 0 0;
+  font-size: 0.9375rem;
+  line-height: 1.6;
+  color: var(--nd-on-surface-muted);
+}
+
+.nd-land-gate-facts {
+  display: grid;
+  gap: 0;
+  margin: clamp(1.5rem, 4vw, 2.25rem) 0 0;
+}
+
+.nd-land-gate-facts > div {
+  padding-block: 1.125rem;
+  border-top: 1px solid var(--nd-rule);
+}
+
+.nd-land-gate-facts > div:last-child {
+  padding-bottom: 0;
+}
+
+.nd-land-gate-facts dt {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.9375rem;
+  font-weight: 650;
+  color: var(--nd-on-surface);
+}
+
+.nd-land-gate-facts dt svg {
+  flex: 0 0 auto;
+  color: var(--nd-accent);
+}
+
+.nd-land-gate-facts dd {
+  max-width: 44ch;
+  margin: 0.4375rem 0 0;
+  font-size: 0.875rem;
+  line-height: 1.6;
+  color: var(--nd-on-surface-muted);
+}
+
+@media (min-width: 48rem) {
+  .nd-land-gate-facts {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: clamp(1.5rem, 4vw, 2.5rem);
+  }
+  .nd-land-gate-facts > div {
+    padding-bottom: 0;
+  }
+}
+
+@keyframes nd-land-arrive {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 12px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes nd-land-packet-in {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 26px, 0) scale(0.965);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Transform only, and deliberately no fade. A scroll-driven reveal is the one
+   animation here that can be caught mid-flight by a renderer that paints the
+   whole document without running the timeline — a full-page capture does
+   exactly that — so its unfinished state has to be legible. Offset copy is;
+   transparent copy is a blank page. */
+@keyframes nd-land-rise {
+  from {
+    transform: translate3d(0, 18px, 0);
+  }
+  to {
+    transform: none;
+  }
+}
+
+@keyframes nd-land-settle {
+  from {
+    opacity: 0;
+    transform: translate3d(0, 6px, 0);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes nd-land-breathe {
+  0%,
+  100% {
+    opacity: var(--bloom-o);
+    transform: scale(1);
+  }
+  50% {
+    opacity: calc(var(--bloom-o) * 1.17);
+    transform: scale(1.045);
+  }
+}
+
+@keyframes nd-land-float {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0);
+  }
+  50% {
+    transform: translate3d(0, -7px, 0);
+  }
+}
+
+@keyframes nd-land-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.nd-arrive {
+  animation: nd-land-arrive 620ms var(--nd-ease) both;
+  animation-delay: var(--nd-in, 0ms);
+}
+
+.nd-land-packet {
+  animation-name: nd-land-packet-in;
+  animation-duration: 900ms;
+  will-change: transform, opacity;
+}
+
+.nd-land-packet-float {
+  animation: nd-land-float 9s ease-in-out 1.1s infinite;
+  will-change: transform;
+}
+
+.nd-land-bloom {
+  animation: nd-land-breathe 19s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
+.nd-settle {
+  /* transform does nothing to an inline box, and the value is a `<b>`. */
+  display: inline-block;
+  animation: nd-land-settle 420ms var(--nd-ease) both;
+}
+
+/* Guarded: without a view() timeline there is no animation, so the visible
+   base rule is what renders. */
+@supports (animation-timeline: view()) {
+  @media (prefers-reduced-motion: no-preference) {
+    .nd-rise {
+      animation: nd-land-rise linear both;
+      animation-timeline: view();
+      animation-range: entry 0% entry 55%;
+    }
+  }
+}
+
+/* Out-specifies the global `*` reset in index.css, which would otherwise
+   collapse these to 0.01ms. */
+@media (prefers-reduced-motion: reduce) {
+  .nd-arrive,
+  .nd-land-packet,
+  .nd-rise,
+  .nd-settle {
+    animation: nd-land-fade 240ms ease-out both !important;
+    animation-delay: 0ms !important;
+    animation-timeline: auto !important;
+  }
+
+  .nd-land-packet-float,
+  .nd-land-bloom {
+    animation: none !important;
+  }
+
+  .nd-land-bloom {
+    opacity: var(--bloom-o);
+  }
+
+  .nd-land-packet,
+  .nd-land-packet-float {
+    will-change: auto;
   }
 }
