@@ -1,9 +1,18 @@
 import { useId } from 'react'
 
 /**
- * NIM entry. `inputMode="decimal"` so phones open the numeric keypad, and the
- * value stays a STRING all the way to `lunaFromNim` — parsing it to a `number`
- * would be the one float that quietly loses a user's money.
+ * NIM entry, and the largest control on the create sheet.
+ *
+ * `inputMode="decimal"` so phones open the numeric keypad, and the value stays a
+ * STRING all the way to `lunaFromNim` — parsing it to a `number` would be the
+ * one float that quietly loses a user's money.
+ *
+ * The type is 28px, which is over the 16px floor by a wide margin, and that
+ * floor is the reason it is stated at all: under 16px iOS zooms the viewport on
+ * focus, and a page that zooms while a sponsor is entering an amount moves the
+ * number they are checking out from under their thumb. The focus ring belongs to
+ * the box rather than to the input, because the input has no visible edge of its
+ * own; see `.nd-amountbox` in `index.css`.
  */
 export interface AmountInputProps {
   label: string
@@ -17,10 +26,10 @@ export default function AmountInput({ label, value, onChange, hint }: AmountInpu
   const hintId = `${id}-hint`
   return (
     <div>
-      <label htmlFor={id} className="block text-sm font-medium text-ink/70">
+      <label htmlFor={id} className="nd-lab">
         {label}
       </label>
-      <div className="mt-2 flex items-baseline gap-2 rounded-2xl border border-ink/12 bg-white px-4 py-3 focus-within:border-gold">
+      <div className="nd-amountbox">
         <input
           id={id}
           value={value}
@@ -33,14 +42,13 @@ export default function AmountInput({ label, value, onChange, hint }: AmountInpu
           autoComplete="off"
           placeholder="0"
           aria-describedby={hint ? hintId : undefined}
-          className="min-w-0 flex-1 bg-transparent text-3xl font-semibold tabular-nums tracking-tight text-ink outline-none placeholder:text-ink/25"
         />
-        <span aria-hidden="true" className="text-sm font-semibold text-ink/40">
-          NIM
-        </span>
+        {/* The unit, not the mark: the signet is reserved for the amount lockup
+            in the field above, where it is the money rather than a suffix. */}
+        <span aria-hidden="true">NIM</span>
       </div>
       {hint ? (
-        <p id={hintId} className="mt-2 text-xs text-ink/50">
+        <p id={hintId} className="nd-hint">
           {hint}
         </p>
       ) : null}

@@ -17,10 +17,17 @@ import { capProblem, formatNim, lunaFromNim, MAX_CLAIMS, MIN_CLAIMS } from '../m
 import { nimiqPayDeeplink, resolveBridge, type BridgeResult } from '../sdk/adapter'
 import { clearFunding, readFunding, writeFunding } from '../state/funding'
 import AmountInput from '../ui/AmountInput'
-import Envelope from '../ui/Envelope'
 import Field from '../ui/Field'
+import GlassSheet from '../ui/GlassSheet'
+import {
+  ChevronRightIcon,
+  ClockExpiryIcon,
+  CustodyShieldIcon,
+  InfoIcon,
+  WarningIcon,
+} from '../ui/icons'
+import { Amount } from '../ui/Nim'
 import OpenInApp from '../ui/OpenInApp'
-import NdScreen from '../ui/Screen'
 import Sheet from '../ui/Sheet'
 
 /**
@@ -54,6 +61,32 @@ import Sheet from '../ui/Sheet'
  * the order it returns them, above the fund button. Not paraphrased: the server
  * enforces the caps and holds the key, so any wording invented on this side
  * could drift away from what is actually true.
+ *
+ * ## The composition, since the redesign
+ *
+ * The same two zones the claim surface uses (`DropView`, the s4 "Stack"
+ * system): an open upper field carrying the money, and one sheet of glass over
+ * it carrying the transaction. Before this, the sponsor's first impression was
+ * white cards on near-white while the claimant got a warm near-black field lit
+ * by a single vermilion bloom, and the two ends of one link looked like two
+ * products.
+ *
+ * Three rules govern how the states map onto those zones:
+ *
+ *  - **The money is the `h1`, on every screen that has one.** The claimant's
+ *    field prints the share they are being offered; the sponsor's prints the
+ *    total they are about to send, derived while they type. It is the same
+ *    `Amount` lockup, in the same near-white, for the same reason: Nimiq gold
+ *    is 2.74:1 on the field's brightest pixel.
+ *  - **A screen with no money to print puts its heading in the field instead**,
+ *    which is the rule the claim surface's dead ends already follow. That is
+ *    every refusal, plus the frame where a remembered drop is being looked up.
+ *  - **The sheet is the only thing a new state changes.** The upper field is
+ *    the total from the first keystroke to the live link.
+ *
+ * The resting total is `0` rather than a dash. A form whose money slot is empty
+ * has to say something in it, and `0 NIM` is both true and the thing a wallet
+ * says; the dash it replaces was also the last em dash on the screen.
  */
 
 /** Design §4.2 step 5: poll the public state, do not guess. */
@@ -252,7 +285,13 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
   const amountLuna = lunaFromNim(amountEach)
   const problem = capProblem(amountLuna, claimCount)
   const totalLuna = amountLuna === null ? null : amountLuna * BigInt(claimCount)
-  const totalText = totalLuna === null || problem === 'amount' ? '—' : `${formatNim(totalLuna)} NIM`
+  /**
+   * The figure the field prints, with no unit on it: `Amount` sets the mark and
+   * the word. `0` while there is nothing to multiply, because the money slot on
+   * a form is never empty and a wallet's own resting state is a zero.
+   */
+  const totalFigure = totalLuna === null || problem === 'amount' ? '0' : formatNim(totalLuna)
+  const totalText = `${totalFigure} NIM`
   /**
    * The deployment's own ceiling, which on the mainnet pilot is two orders of
    * magnitude under the 100 NIM launch cap in `money.ts`. Checked here so a
@@ -528,17 +567,7 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
   }, [])
 
   if (phase === 'live' && draft) {
-    // After a reload the form fields are empty, but the server still knows who
-    // sent it, so the wax keeps its initial.
-    const sealFrom = (drop?.sponsorLabel || sponsorLabel).trim()
-    return (
-      <Live
-        draft={draft}
-        drop={drop}
-        sealMark={sealFrom.slice(0, 1).toUpperCase()}
-        onStartAnother={startAnother}
-      />
-    )
+    return <Live draft={draft} drop={drop} onStartAnother={startAnother} />
   }
 
   if (phase === 'no-wallet') return <NoWallet />
@@ -581,6 +610,7 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
     return (
       <Recover
         testId="drop-too-large"
+        mark="info"
         title="That total is over the cap"
         body={
           custody
@@ -598,6 +628,7 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
     return (
       <Recover
         testId="no-capacity"
+        mark="info"
         title="No room for another drop right now"
         body={noCapacityBody({ custody, totalText, retryAfter })}
         action="Try again"
@@ -627,6 +658,7 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
   if (phase === 'unconfirmed' && draft) {
     return (
       <Recover
+        mark="clock"
         title="Waiting for wallet confirmation"
         body="Your wallet has the transaction, but it has not given us a receipt we can verify yet. We keep checking — the moment the network shows it, this drop goes live and your share link appears here."
         action="Check again"
@@ -655,191 +687,316 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
     phase === 'confirming'
   ) {
     return (
-      <Progress phase={phase} draft={draft} note={phase === 'approving' ? reservationNote : null} />
+      <Progress
+        phase={phase}
+        /**
+         * The money stays put while the transaction moves through the sheet.
+         * Before a draft exists it is the form's own derived total; after one
+         * exists it is the server's `expectedFundingLuna` in decimal NIM, which
+         * is the authoritative figure and the one the wallet was asked for.
+         *
+         * `resuming` has neither — the form is empty and the draft is still
+         * being read back — so it prints a heading in the field instead.
+         */
+        nim={draft ? draft.expectedFunding : phase === 'resuming' ? null : totalFigure}
+        funding={draft !== null}
+        peopleCaption={`total for ${claimCount} people`}
+        note={phase === 'approving' ? reservationNote : null}
+      />
     )
   }
 
   return (
-    <Screen>
-      <header>
-        <h1 className="text-2xl font-semibold tracking-tight text-ink">Send a NimDrop</h1>
-        <p className="mt-2 text-sm leading-relaxed text-ink/60">
-          One transaction from you. A fixed, equal share for everyone who opens the link.
-        </p>
-      </header>
+    <Shell
+      sheets={
+        <>
+          {/* The disclosure on its own, reachable while the sponsor is still
+              deciding how much to send. Same points, same order, no fund
+              button — reading it is not a step in paying. */}
+          <Sheet
+            open={sheet === 'custody'}
+            surface="field"
+            title="What you are trusting"
+            onClose={() => setSheet('none')}
+          >
+            <CustodyBody
+              custody={custody}
+              custodyState={custodyState}
+              onRetry={refreshCustody}
+              heading={false}
+            />
+            <ShareRules />
+            <button
+              type="button"
+              data-testid="custody-sheet-close"
+              onClick={() => setSheet('none')}
+              className="nd-quiet mt-6"
+            >
+              Close
+            </button>
+          </Sheet>
 
-      {/* The ceiling, before a number is typed against it — or, when the
-          operator has closed funding, the one fact that matters more. */}
-      {paused ? (
-        <div
-          data-testid="funding-closed"
-          role="status"
-          className="mt-6 rounded-2xl border border-gold/50 bg-gold/15 p-4"
-        >
-          <p className="text-sm font-semibold text-ink">Funding is closed</p>
-          <p className="mt-1 text-xs leading-relaxed text-ink/70">
-            {pausedPoint(custody) ??
-              'The operator has to open funding before a new drop can start.'}
+          <Sheet
+            open={sheet === 'review'}
+            surface="field"
+            title="Before you fund"
+            onClose={() => setSheet('none')}
+          >
+            <dl className="nd-rows">
+              <Row label="Each person gets">{`${amountEach || '0'} NIM`}</Row>
+              <Row label="People">{String(claimCount)}</Row>
+              <Row label="You send">{totalText}</Row>
+              <Row label="Expires">24 hours after it goes live</Row>
+            </dl>
+
+            {/* Every point, in the server's order, above the button that opens
+                the wallet. The sheet scrolls, so reaching the button means
+                scrolling past them. */}
+            <CustodyBody custody={custody} custodyState={custodyState} onRetry={refreshCustody} />
+            <ShareRules />
+
+            {custody ? (
+              <p data-testid="custody-summary" className="nd-lede mt-6">
+                {custody.summary}
+              </p>
+            ) : null}
+            <button type="button" onClick={() => void fund()} className="nd-action mt-4">
+              Fund drop
+            </button>
+            <p className="nd-note mt-3 text-center">
+              Nimiq Pay opens next — tap and approve one transaction.
+            </p>
+          </Sheet>
+        </>
+      }
+    >
+      <div className="nd-upper">
+        {/* The money the sponsor is about to send, derived as they type. */}
+        <Money nim={totalFigure} caption={`total for ${claimCount} people`} testId="derived-total" />
+
+        {overCap && custody ? (
+          <Alert testId="over-cap">
+            A drop can hold up to {custody.limits.perDropMax} NIM right now. Lower the amount or the
+            number of people.
+          </Alert>
+        ) : problem === 'total' ? (
+          <Alert>A drop can hold up to 100 NIM while NimDrops is new.</Alert>
+        ) : null}
+
+        {/* The ceiling, before a number is typed against it — or, when the
+            operator has closed funding, the one fact that matters more. */}
+        {paused ? (
+          <Alert testId="funding-closed" role="status" title="Funding is closed">
+            {pausedPoint(custody) ?? 'The operator has to open funding before a new drop can start.'}
+          </Alert>
+        ) : custody ? (
+          <LiveLimits limits={custody.limits} />
+        ) : null}
+      </div>
+
+      <GlassSheet
+        header={<h2 className="nd-sheeth">Send a NimDrop</h2>}
+        caption={
+          <p className="nd-note">
+            One transaction from you. A fixed, equal share for everyone who opens the link.
           </p>
+        }
+      >
+        <div className="nd-form">
+          <AmountInput
+            label="NIM per person"
+            value={amountEach}
+            onChange={setAmountEach}
+            hint="Everyone gets exactly this. No splitting, no chance."
+          />
+
+          <PeopleStepper value={claimCount} onChange={setClaimCount} />
+
+          <TextField
+            label="From"
+            value={sponsorLabel}
+            onChange={setSponsorLabel}
+            maxLength={40}
+            placeholder="Your name or group"
+          />
+          <TextField
+            label="Message (optional)"
+            value={message}
+            onChange={setMessage}
+            maxLength={200}
+            placeholder="Thanks for a good week"
+          />
         </div>
-      ) : custody ? (
-        <LiveLimits limits={custody.limits} />
-      ) : null}
 
-      <div className="mt-8 space-y-6">
-        <AmountInput
-          label="NIM per person"
-          value={amountEach}
-          onChange={setAmountEach}
-          hint="Everyone gets exactly this. No splitting, no chance."
-        />
-
-        <PeopleStepper value={claimCount} onChange={setClaimCount} />
-
-        <TextField label="From" value={sponsorLabel} onChange={setSponsorLabel} maxLength={40} placeholder="Your name or group" />
-        <TextField
-          label="Message (optional)"
-          value={message}
-          onChange={setMessage}
-          maxLength={200}
-          placeholder="Thanks for a good week"
-        />
-      </div>
-
-      <div className="mt-8 flex items-baseline justify-between border-t border-ink/10 pt-5">
-        <span className="text-sm text-ink/60">Total</span>
-        <p data-testid="derived-total" className="text-xl font-semibold tabular-nums text-ink">
-          {totalText}
-        </p>
-      </div>
-      {overCap && custody ? (
-        <p data-testid="over-cap" className="mt-2 text-right text-xs text-ink/60">
-          A drop can hold up to {custody.limits.perDropMax} NIM right now. Lower the amount or the
-          number of people.
-        </p>
-      ) : problem === 'total' ? (
-        <p className="mt-2 text-right text-xs text-ink/60">
-          A drop can hold up to 100 NIM while NimDrops is new.
-        </p>
-      ) : null}
-
-      {/* The study's Ugly Cash move: the least reassuring fact about the
-          product is the headline of a card, not a footnote under a button.
-          The same words the claimant's card uses on the other side of the
-          link, aimed at the person who is about to pay for it. */}
-      <button
-        type="button"
-        data-testid="custody-card"
-        aria-haspopup="dialog"
-        aria-expanded={sheet === 'custody'}
-        onClick={() => setSheet('custody')}
-        className="mt-8 block w-full rounded-2xl border border-ink/10 bg-ink/4 p-4 text-left"
-      >
-        <span className="block text-sm font-semibold text-ink/80">
-          NimDrops holds your NIM, and no contract holds it for you
-        </span>
-        <span className="mt-1 block text-xs leading-relaxed text-ink/55">
-          Who can move it, the limits right now, and what happens if nobody claims.
-        </span>
-      </button>
-
-      <button
-        type="button"
-        disabled={!ready}
-        onClick={() => setSheet('review')}
-        className="nd-primary mt-5 w-full"
-      >
-        Review drop
-      </button>
-      <p className="mt-3 text-center text-xs text-ink/50">
-        Nothing is sent until you approve it in Nimiq Pay.
-      </p>
-
-      {/* The disclosure on its own, reachable while the sponsor is still
-          deciding how much to send. Same points, same order, no fund button —
-          reading it is not a step in paying. */}
-      <Sheet
-        open={sheet === 'custody'}
-        title="What you are trusting"
-        onClose={() => setSheet('none')}
-      >
-        <CustodyBody
-          custody={custody}
-          custodyState={custodyState}
-          onRetry={refreshCustody}
-          heading={false}
-        />
-        <ShareRules />
+        {/* The study's Ugly Cash move: the least reassuring fact about the
+            product is the headline of a control, not a footnote under a button.
+            The same words the claimant's own custody control uses on the other
+            side of the link, aimed at the person who is about to pay for it. */}
         <button
           type="button"
-          data-testid="custody-sheet-close"
-          onClick={() => setSheet('none')}
-          className="nd-secondary mt-6 w-full"
+          data-testid="custody-card"
+          aria-haspopup="dialog"
+          aria-expanded={sheet === 'custody'}
+          onClick={() => setSheet('custody')}
+          className="nd-disclose mt-5"
         >
-          Close
+          <CustodyShieldIcon size={20} />
+          <span>
+            <b>NimDrops holds your NIM, and no contract holds it for you</b>
+            <em>Who can move it, the limits right now, and what happens if nobody claims.</em>
+          </span>
+          <ChevronRightIcon size={18} />
         </button>
-      </Sheet>
 
-      <Sheet
-        open={sheet === 'review'}
-        title="Before you fund"
-        sealMark={sponsorLabel.trim().slice(0, 1).toUpperCase()}
-        onClose={() => setSheet('none')}
-      >
-        <dl className="divide-y divide-ink/10 text-sm">
-          <Row label="Each person gets">{`${amountEach || '0'} NIM`}</Row>
-          <Row label="People">{String(claimCount)}</Row>
-          <Row label="You send">
-            <span className="font-semibold">{totalText}</span>
-          </Row>
-          <Row label="Expires">24 hours after it goes live</Row>
-        </dl>
-
-        {/* Every point, in the server's order, above the button that opens the
-            wallet. The sheet scrolls, so reaching the button means scrolling
-            past them. */}
-        <CustodyBody custody={custody} custodyState={custodyState} onRetry={refreshCustody} />
-        <ShareRules />
-
-        {custody ? (
-          <p
-            data-testid="custody-summary"
-            className="mt-6 text-sm leading-relaxed font-medium text-ink"
-          >
-            {custody.summary}
-          </p>
-        ) : null}
-        <button type="button" onClick={() => void fund()} className="nd-primary mt-4 w-full">
-          Fund drop
+        <button
+          type="button"
+          disabled={!ready}
+          onClick={() => setSheet('review')}
+          className="nd-action mt-3"
+        >
+          Review drop
         </button>
-        <p className="mt-3 text-center text-xs text-ink/50">
-          Nimiq Pay opens next — tap and approve one transaction.
+        <p className="nd-note mt-2.5 text-center">
+          Nothing is sent until you approve it in Nimiq Pay.
         </p>
-      </Sheet>
-    </Screen>
+      </GlassSheet>
+    </Shell>
   )
 }
 
 // ---- pieces ---------------------------------------------------------------------
 
 /**
- * The create flow is the envelope before it has a flap: a blank sheet the
- * sponsor fills in. The wax appears at the two moments it means something —
- * the review sheet (sealing it) and the share screen (sealed).
+ * The field, and the column the two zones stack in.
+ *
+ * `.nd-stack` is a container of its own, which is what keeps the poster layout
+ * from firing on a screen that has no poster composition; the reasoning is on
+ * the class in `index.css`. Modal sheets are rendered as SIBLINGS of it rather
+ * than inside it, because a container establishes a containing block for fixed
+ * positioning and a modal has to be fixed to the viewport.
+ *
+ * `tone` is the field's own light. `warm` is the state the claim surface uses
+ * for a claim that landed, and the sponsor's equivalent is a drop that went
+ * live: the bloom comes up and stays up, so the screen remembers. `quiet` is
+ * every refusal, where nothing is going to happen until the sponsor does
+ * something.
  */
-function Screen({ children }: { children: ReactNode }) {
+function Shell({
+  children,
+  sheets,
+  tone = 'live',
+  testId,
+}: {
+  children: ReactNode
+  /** Modal sheets, rendered outside the container. */
+  sheets?: ReactNode
+  tone?: 'live' | 'warm' | 'quiet'
+  testId?: string
+}) {
   return (
-    <NdScreen>
-      <main className="nd-face flex-1 pt-7 pb-14 text-ink">{children}</main>
-    </NdScreen>
+    <Field tone={tone}>
+      <div className="nd-stack" {...(testId ? { 'data-testid': testId } : {})}>
+        {children}
+      </div>
+      {sheets}
+    </Field>
+  )
+}
+
+/**
+ * The money, bare in the open field, in the same lockup the claimant meets.
+ *
+ * `tone="ink"` and not gold, for the arithmetic in `index.css`: Nimiq gold is
+ * 2.74:1 on the field's brightest pixel, under even the 3:1 a non-text mark is
+ * held to. The size steps down by character count rather than by media query,
+ * because what overflows a 320px phone is `10000.00000`, not a narrow screen.
+ */
+function Money({ nim, caption, testId }: { nim: string; caption: string; testId?: string }) {
+  return (
+    <div className="nd-money" {...(testId ? { 'data-testid': testId } : {})}>
+      <Amount
+        value={nim}
+        markScale={0.46}
+        tone="ink"
+        className="nd-amount"
+        data-size={nim.length <= 6 ? 'lg' : nim.length <= 9 ? 'md' : 'sm'}
+      />
+      <p className="nd-moneycap">{caption}</p>
+    </div>
+  )
+}
+
+/**
+ * A heading in the field, for a screen with no money to print.
+ *
+ * The same move the claim surface makes on its dead ends: a heading in the open
+ * field is a stronger statement of "this did not happen" than the same words in
+ * a sheet. The mark above it is a word's worth of the same statement — a shape,
+ * never a hue on its own — and it is near-white rather than gold because gold
+ * on the field is 2.74:1, under even the 3:1 a non-text mark is held to.
+ *
+ * `waiting` is the one that is not an icon: something is in flight, nothing has
+ * gone wrong, and a pulsing keyline says that where a warning triangle would
+ * say the opposite.
+ */
+type Mark = 'waiting' | 'warn' | 'info' | 'clock'
+
+function Headline({ title, mark }: { title: string; mark: Mark }) {
+  return (
+    <div className="nd-headline">
+      {mark === 'waiting' ? (
+        <span className="nd-beacon nd-pulse" aria-hidden="true" data-testid="headline-mark" />
+      ) : mark === 'info' ? (
+        <InfoIcon size={24} data-testid="headline-mark" />
+      ) : mark === 'clock' ? (
+        <ClockExpiryIcon size={24} data-testid="headline-mark" />
+      ) : (
+        <WarningIcon size={24} data-testid="headline-mark" />
+      )}
+      <h1>{title}</h1>
+    </div>
+  )
+}
+
+/**
+ * Something that outranks the ledger below it: the cap this total has passed,
+ * or funding being closed.
+ *
+ * A hard vermilion edge on the field's own recess, never a wash of it — the
+ * field's colour is a bloom, and more of it would read as light rather than as
+ * a warning. The mark is near-white for the same reason.
+ */
+function Alert({
+  children,
+  title,
+  testId,
+  role,
+}: {
+  children: ReactNode
+  title?: string
+  testId?: string
+  role?: 'status'
+}) {
+  return (
+    <div
+      className="nd-alert"
+      {...(testId ? { 'data-testid': testId } : {})}
+      {...(role ? { role } : {})}
+    >
+      <WarningIcon size={18} />
+      <div>
+        {title ? <b>{title}</b> : null}
+        <p>{children}</p>
+      </div>
+    </div>
   )
 }
 
 function Row({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="flex items-baseline justify-between py-2.5">
-      <dt className="text-ink/60">{label}</dt>
-      <dd className="text-right tabular-nums">{children}</dd>
+    <div className="nd-row">
+      <dt>{label}</dt>
+      <dd>{children}</dd>
     </div>
   )
 }
@@ -856,9 +1013,9 @@ function Row({ label, children }: { label: string; children: ReactNode }) {
  */
 function LiveLimits({ limits }: { limits: PilotLimits }) {
   return (
-    <div data-testid="live-limits" className="mt-6 rounded-2xl bg-ink/4 px-4 py-3">
-      <p className="text-xs font-semibold tracking-wide text-ink/55 uppercase">Limits right now</p>
-      <dl className="mt-1.5 divide-y divide-ink/8 text-sm">
+    <div data-testid="live-limits" className="nd-limits">
+      <p>Limits right now</p>
+      <dl className="nd-rows">
         <Row label="Most in one drop">{limits.perDropMax} NIM</Row>
         <Row label="Free across all drops">
           {limits.remaining} of {limits.aggregateMax} NIM
@@ -888,19 +1045,12 @@ function LiveLimits({ limits }: { limits: PilotLimits }) {
  */
 function CustodyPoints({ points }: { points: { id: string; text: string }[] }) {
   return (
-    <ul data-testid="custody-points" className="mt-3 space-y-2.5">
-      {points.map((point, index) => (
-        <li
-          key={point.id}
-          data-point={point.id}
-          className={`flex gap-2.5 text-sm leading-relaxed break-words ${
-            index === 0 ? 'font-medium text-ink' : 'text-ink/70'
-          }`}
-        >
-          <span
-            aria-hidden="true"
-            className="mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-gold-deep"
-          />
+    <ul data-testid="custody-points" className="nd-points">
+      {points.map((point) => (
+        <li key={point.id} data-point={point.id}>
+          {/* `currentColor`, so the first point's stronger ink carries into its
+              own bullet and no second accent is introduced. */}
+          <span aria-hidden="true" />
           <span className="min-w-0">{point.text}</span>
         </li>
       ))}
@@ -931,12 +1081,12 @@ function CustodyBody({
 }) {
   return (
     <section className={heading ? 'mt-6' : ''}>
-      {heading ? <h3 className="text-sm font-semibold text-ink">What you are trusting</h3> : null}
+      {heading ? <h3 className="nd-subh">What you are trusting</h3> : null}
       {custody ? (
         <CustodyPoints points={custody.points} />
       ) : (
-        <div data-testid="custody-fallback" className="mt-3 space-y-2.5 text-sm leading-relaxed text-ink/70">
-          <p className="font-medium text-ink">
+        <div data-testid="custody-fallback" className="nd-prose">
+          <p className="is-lead">
             Your NIM goes to one wallet the NimDrops operator runs, not to an escrow contract. The
             operator holds the only key and can move everything in it.
           </p>
@@ -951,7 +1101,7 @@ function CustodyBody({
                 NimDrops checks the cap again when the drop is created and says what to do if there
                 is none.
               </p>
-              <button type="button" onClick={onRetry} className="nd-secondary mt-1 w-full">
+              <button type="button" onClick={onRetry} className="nd-quiet mt-1">
                 Load the limits again
               </button>
             </>
@@ -970,8 +1120,8 @@ function CustodyBody({
 function ShareRules() {
   return (
     <section className="mt-6">
-      <h3 className="text-sm font-semibold text-ink">How the shares work</h3>
-      <div className="mt-2 space-y-2 text-sm leading-relaxed text-ink/70">
+      <h3 className="nd-subh">How the shares work</h3>
+      <div className="nd-prose">
         <p>
           Shares are fixed and first come, first served — one per wallet. A signature proves control
           of one wallet, not one person.
@@ -1034,7 +1184,7 @@ function ReservationNote({
       : `Your room in the cap is held for another ${minutesLeft} minutes.`
 
   return (
-    <p data-testid="reservation-note" role="status" className="mt-8 text-xs leading-relaxed text-ink/55">
+    <p data-testid="reservation-note" role="status" className="nd-note mt-4">
       {text}
     </p>
   )
@@ -1070,10 +1220,13 @@ function PeopleStepper({ value, onChange }: { value: number; onChange: (n: numbe
   const clamp = (n: number) => Math.min(MAX_CLAIMS, Math.max(MIN_CLAIMS, n))
   return (
     <div>
-      <label htmlFor={id} className="block text-sm font-medium text-ink/70">
+      <label htmlFor={id} className="nd-lab">
         How many people
       </label>
-      <div className="mt-2 flex items-center gap-3">
+      {/* The claim screen's 44px circle, doing the only job it honestly has on
+          this side of the link. Two of them, 10px apart, so a thumb aiming at
+          one cannot land on the other. */}
+      <div className="nd-stepper">
         <StepButton label="One fewer person" onClick={() => onChange(clamp(value - 1))} disabled={value <= MIN_CLAIMS}>
           −
         </StepButton>
@@ -1088,14 +1241,14 @@ function PeopleStepper({ value, onChange }: { value: number; onChange: (n: numbe
             const next = Number.parseInt(event.target.value, 10)
             if (Number.isFinite(next)) onChange(clamp(next))
           }}
-          className="w-20 rounded-2xl border border-ink/12 bg-white py-3 text-center text-xl font-semibold tabular-nums text-ink outline-none focus:border-gold"
+          className="nd-input"
         />
         <StepButton label="One more person" onClick={() => onChange(clamp(value + 1))} disabled={value >= MAX_CLAIMS}>
           +
         </StepButton>
-        <span className="ml-auto text-xs text-ink/45">
+        <p className="nd-range">
           {MIN_CLAIMS}–{MAX_CLAIMS}
-        </span>
+        </p>
       </div>
     </div>
   )
@@ -1118,7 +1271,7 @@ function StepButton({
       aria-label={label}
       onClick={onClick}
       disabled={disabled}
-      className="h-12 w-12 rounded-2xl border border-ink/12 bg-white text-xl font-semibold text-ink disabled:opacity-35"
+      className="nd-round"
     >
       {children}
     </button>
@@ -1141,7 +1294,7 @@ function TextField({
   const id = useId()
   return (
     <div>
-      <label htmlFor={id} className="block text-sm font-medium text-ink/70">
+      <label htmlFor={id} className="nd-lab">
         {label}
       </label>
       <input
@@ -1150,7 +1303,7 @@ function TextField({
         maxLength={maxLength}
         placeholder={placeholder}
         onChange={(event) => onChange(event.target.value)}
-        className="mt-2 w-full rounded-2xl border border-ink/12 bg-white px-4 py-3 text-base text-ink outline-none placeholder:text-ink/25 focus:border-gold"
+        className="nd-input"
       />
     </div>
   )
@@ -1194,13 +1347,28 @@ const PENDING_SHARE_NOTE =
 const PENDING_LEAVE_NOTE =
   'You can close NimDrops. Reopen it on this device and you land back on this drop.'
 
+/**
+ * Funding, in flight.
+ *
+ * The money stays in the field and only the sheet changes, which is the same
+ * contract the claim surface keeps: a new state is a new sheet body and nothing
+ * else. Where there is no total to print yet — a remembered drop being read
+ * back — the title takes the field instead and the sheet carries no second copy
+ * of it.
+ */
 function Progress({
   phase,
-  draft,
+  nim,
+  funding,
+  peopleCaption,
   note,
 }: {
   phase: Phase
-  draft: Draft | null
+  /** The total to print in the field, or `null` when there is not one yet. */
+  nim: string | null
+  /** Whether that total is now a transaction rather than a form's arithmetic. */
+  funding: boolean
+  peopleCaption: string
   note?: ReactNode
 }) {
   const copy = PROGRESS_COPY[phase] ?? PROGRESS_COPY.creating
@@ -1211,54 +1379,66 @@ function Progress({
   ]
   const reached = steps.findIndex((s) => s.key === phase)
   return (
-    <Screen>
-      <div className="flex flex-1 flex-col justify-center py-16">
-        <div className="nd-pulse mb-8 h-1.5 w-16 rounded-full bg-gold" aria-hidden="true" />
-        <h1 className="text-2xl font-semibold tracking-tight">{copy.title}</h1>
-        <p className="mt-3 text-sm leading-relaxed text-ink/60">{copy.body}</p>
+    <Shell>
+      <div className="nd-upper">
+        {nim === null ? (
+          <Headline title={copy.title} mark="waiting" />
+        ) : (
+          <Money
+            nim={nim}
+            // The sentence this replaces read "Funding N NIM to the NimDrops
+            // custody address"; the figure above it is now that number, so the
+            // caption carries the rest of it rather than saying it twice.
+            caption={funding ? 'to the NimDrops custody address' : peopleCaption}
+          />
+        )}
+      </div>
 
+      <GlassSheet
+        header={nim === null ? null : <h2 className="nd-sheeth">{copy.title}</h2>}
+        caption={<p className="nd-note">{copy.body}</p>}
+      >
         {reached >= 0 ? (
           <>
-            <ol className="mt-8 flex gap-2" aria-label="Funding progress">
+            <ol className="nd-steps mt-4" aria-label="Funding progress">
               {steps.map((step, index) => (
                 <li
                   key={step.key}
                   aria-current={index === reached ? 'step' : undefined}
-                  className={`flex-1 rounded-full py-1.5 text-center text-xs font-medium ${
-                    index <= reached ? 'bg-ink text-paper' : 'bg-ink/8 text-ink/45'
-                  }`}
+                  data-reached={index <= reached ? 'true' : 'false'}
                 >
                   {step.label}
                 </li>
               ))}
             </ol>
-            <p
-              data-testid="pending-share-note"
-              className="mt-6 text-xs leading-relaxed text-ink/50"
-            >
+            <p data-testid="pending-share-note" className="nd-note mt-4">
               {PENDING_SHARE_NOTE}
             </p>
-            <p className="mt-2 text-xs leading-relaxed text-ink/50">{PENDING_LEAVE_NOTE}</p>
+            <p className="nd-note mt-2">{PENDING_LEAVE_NOTE}</p>
           </>
         ) : null}
 
-        {draft ? (
-          <p className="mt-8 text-xs text-ink/45">
-            Funding {draft.expectedFunding} NIM to the NimDrops custody address.
-          </p>
-        ) : null}
-
         {note}
-      </div>
-    </Screen>
+      </GlassSheet>
+    </Shell>
   )
 }
 
+/**
+ * A refusal, and the way out of it.
+ *
+ * There is no money in the field on any of these: nothing was sent, and
+ * printing a total the sponsor has not committed above the word that says they
+ * did not would be the one misreading this screen cannot afford. The heading
+ * takes the field instead, which is the same thing the claim surface does with
+ * its dead ends.
+ */
 function Recover({
   title,
   body,
   action,
   onAction,
+  mark = 'warn',
   quiet,
   secondary,
   onSecondary,
@@ -1269,6 +1449,8 @@ function Recover({
   body: string
   action: string
   onAction: () => void
+  /** Which of the four marks belongs above the heading. */
+  mark?: Mark
   quiet?: boolean
   /** A second way out, for a refusal that has two honest answers. */
   secondary?: string
@@ -1277,25 +1459,27 @@ function Recover({
   testId?: string
 }) {
   return (
-    <Screen>
-      <div
-        {...(testId ? { 'data-testid': testId } : {})}
-        className="flex flex-1 flex-col justify-center py-16"
-      >
-        <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
-        <p className="mt-3 text-sm leading-relaxed text-ink/60">{body}</p>
-        <button type="button" onClick={onAction} className={quiet ? 'nd-secondary mt-8 w-full' : 'nd-primary mt-8 w-full'}>
+    <Shell tone="quiet" {...(testId ? { testId } : {})}>
+      <div className="nd-upper">
+        <Headline title={title} mark={mark} />
+      </div>
+      <GlassSheet caption={<p className="nd-lede">{body}</p>}>
+        <button
+          type="button"
+          onClick={onAction}
+          className={quiet ? 'nd-quiet mt-5' : 'nd-action mt-5'}
+        >
           {action}
         </button>
         {secondary && onSecondary ? (
-          <button type="button" onClick={onSecondary} className="nd-secondary mt-3 w-full">
+          <button type="button" onClick={onSecondary} className="nd-quiet mt-3">
             {secondary}
           </button>
         ) : null}
 
         {note}
-      </div>
-    </Screen>
+      </GlassSheet>
+    </Shell>
   )
 }
 
@@ -1338,104 +1522,101 @@ function NoWallet() {
 function Live({
   draft,
   drop,
-  sealMark,
   onStartAnother,
 }: {
   draft: Draft
   drop: DropPublic | null
-  sealMark: string
   onStartAnother: () => void
 }) {
   const [copied, setCopied] = useState(false)
   const canShare = typeof navigator !== 'undefined' && typeof navigator.share === 'function'
 
   return (
-    <NdScreen>
-      {/* Sealed, and about to be handed round: the same object the claimant
-          will meet at the other end of the link. */}
-      <Envelope open={false} {...(sealMark ? { sealMark } : {})}>
-        <div className="pb-12">
-          <p className="inline-flex rounded-full bg-gold/20 px-2.5 py-1 text-xs font-semibold text-gold-deep">
-            Funded
-          </p>
-          <h1 className="mt-3 text-2xl font-semibold tracking-tight">Your drop is live</h1>
-          <p className="mt-3 text-sm leading-relaxed text-ink/60">
+    // `warm` is the field's memory. The claim surface keeps the hotter cast
+    // once a claim lands; the sponsor's equivalent is a drop that went live,
+    // and it is the one screen in this flow that earned it.
+    <Shell tone="warm">
+      <div className="nd-upper">
+        <Money nim={draft.expectedFunding} caption="funded" />
+      </div>
+
+      <GlassSheet
+        header={<h2 className="nd-sheeth">Your drop is live</h2>}
+        caption={
+          <p className="nd-note">
             {drop
               ? `${drop.remaining} of ${drop.claimCount} shares of ${drop.amountEach} NIM are waiting. Share the link — the first ${drop.claimCount} wallets to open it each get one.`
               : 'Share the link. Each wallet that opens it can claim one fixed share.'}
           </p>
+        }
+      >
+        <div data-testid="share-block" className="nd-rise mt-5">
+          <div className="nd-qr">
+            <img
+              src={`/drop/${draft.publicId}/qr.svg`}
+              alt="QR code for this drop's link"
+              width={220}
+              height={220}
+            />
+          </div>
+          <p className="nd-linkline">{draft.shareUrl}</p>
 
-          <div data-testid="share-block" className="nd-rise">
-            <div className="mt-8 rounded-3xl border border-ink/10 bg-white p-5">
-              <img
-                src={`/drop/${draft.publicId}/qr.svg`}
-                alt="QR code for this drop's link"
-                width={220}
-                height={220}
-                className="mx-auto h-auto w-full max-w-[200px]"
-              />
-              <p className="mt-4 text-center text-xs break-all text-ink/60">{draft.shareUrl}</p>
-            </div>
-
-            <div className="mt-6 space-y-3">
-              {canShare ? (
-                <button
-                  type="button"
-                  className="nd-primary w-full"
-                  onClick={() => {
-                    // A dismissed share sheet rejects with AbortError; that is a
-                    // choice, not a failure.
-                    //
-                    // `text` matters more here than anywhere else in the app.
-                    // This is the primary distribution path, and WhatsApp
-                    // routinely drops `title` and shows a bare link — so
-                    // without it the product's one-line description never
-                    // reaches the group chat, and the first thing a stranger
-                    // sees is an unexplained URL asking them to sign something.
-                    void navigator
-                      .share({
-                        title: 'A NimDrop for you',
-                        text: 'One link. A fixed share of NIM for everyone who opens it.',
-                        url: draft.shareUrl,
-                      })
-                      .catch(() => {})
-                  }}
-                >
-                  Share
-                </button>
-              ) : null}
+          <div className="mt-5 space-y-3">
+            {canShare ? (
               <button
                 type="button"
-                className={canShare ? 'nd-secondary w-full' : 'nd-primary w-full'}
+                className="nd-action"
                 onClick={() => {
-                  void navigator.clipboard
-                    ?.writeText(draft.shareUrl)
-                    .then(() => setCopied(true))
-                    .catch(() => setCopied(false))
+                  // A dismissed share sheet rejects with AbortError; that is a
+                  // choice, not a failure.
+                  //
+                  // `text` matters more here than anywhere else in the app.
+                  // This is the primary distribution path, and WhatsApp
+                  // routinely drops `title` and shows a bare link — so
+                  // without it the product's one-line description never
+                  // reaches the group chat, and the first thing a stranger
+                  // sees is an unexplained URL asking them to sign something.
+                  void navigator
+                    .share({
+                      title: 'A NimDrop for you',
+                      text: 'One link. A fixed share of NIM for everyone who opens it.',
+                      url: draft.shareUrl,
+                    })
+                    .catch(() => {})
                 }}
               >
-                {copied ? 'Link copied' : 'Copy link'}
+                Share
               </button>
-            </div>
+            ) : null}
+            <button
+              type="button"
+              className={canShare ? 'nd-quiet' : 'nd-action'}
+              onClick={() => {
+                void navigator.clipboard
+                  ?.writeText(draft.shareUrl)
+                  .then(() => setCopied(true))
+                  .catch(() => setCopied(false))
+              }}
+            >
+              {copied ? 'Link copied' : 'Copy link'}
+            </button>
           </div>
-
-          <p className="mt-8 text-xs leading-relaxed text-ink/50">
-            Unclaimed shares are refunded to the wallet that funded this drop, 24 hours after it
-            went live.
-          </p>
-          <p className="mt-2 text-xs leading-relaxed text-ink/50">
-            Reopen NimDrops on this device to come back to this link.
-          </p>
-
-          <button
-            type="button"
-            onClick={onStartAnother}
-            className="mt-5 min-h-12 w-full text-sm font-semibold text-ink/55"
-          >
-            Send another drop
-          </button>
         </div>
-      </Envelope>
-    </NdScreen>
+
+        <p className="nd-note mt-5">
+          Unclaimed shares are refunded to the wallet that funded this drop, 24 hours after it went
+          live.
+        </p>
+        <p className="nd-note mt-2">Reopen NimDrops on this device to come back to this link.</p>
+
+        <button
+          type="button"
+          onClick={onStartAnother}
+          className="nd-textlink mt-2 block w-full text-center"
+        >
+          Send another drop
+        </button>
+      </GlassSheet>
+    </Shell>
   )
 }

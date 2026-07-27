@@ -1017,6 +1017,13 @@ body {
   transform: scale(0.92);
 }
 
+/* Only the create flow's stepper can reach a floor or a ceiling; the claim
+   screen's rail buttons are never disabled. */
+.nd-round:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 /* ---- the fact tiles ------------------------------------------------------
  *
  * A RECESS, never a second pane of glass: exactly one element in the tree is
@@ -1372,7 +1379,11 @@ body {
   cursor: pointer;
 }
 
-.nd-custody svg {
+/* The one gold left in the product outside the wax, on both sides of the link:
+   the claimant's custody line and the sponsor's custody control. One rule, so
+   the count `surface.contrast.test.ts` keeps is still one. */
+.nd-custody svg,
+.nd-disclose > svg:first-child {
   flex: 0 0 auto;
   color: var(--nd-accent);
 }
@@ -1672,9 +1683,498 @@ body {
   color: var(--nd-on-surface);
 }
 
-.nd-sheet--plate {
-  background-color: var(--color-plate);
-  color: var(--color-ink);
+/* ===========================================================================
+ * The create flow
+ * ===========================================================================
+ *
+ * The sponsor's screen, composed the way the claimant's is: an open upper field
+ * carrying the money, and one sheet of glass over it carrying the transaction.
+ * It is the same two zones and the same primitives — `.nd-upper`, `.nd-money`,
+ * `.nd-glass`, `.nd-action`, `.nd-round` — and that is the point. The two ends
+ * of one link used to be two products.
+ *
+ * What is different, and why:
+ *
+ *   - THE MONEY IS THE TOTAL, and it is derived while the sponsor types. The
+ *     claimant's field prints what they get; the sponsor's prints what they are
+ *     about to send. Before a valid amount exists there is no total to print,
+ *     so the field carries the screen's own heading instead and the money takes
+ *     it over on the first keystroke that makes one.
+ *   - THE FORM IS IN THE SHEET. On the claim surface the sheet carries the
+ *     transaction; here the transaction IS the form, so that is what goes in
+ *     it. Every control inside it is a solid fill over the barrier, never a
+ *     second pane of glass, and every input is at least 48px tall and at least
+ *     16px of type — the second number is what stops iOS zooming the page on
+ *     focus, which on a funding form would move the amount out from under a
+ *     thumb mid-entry.
+ *   - THERE IS NO RAIL. The claim screen's two circular buttons are share
+ *     affordances, and this screen has none to offer until the server says
+ *     `live`. The same diameter comes back as the people stepper's two
+ *     controls, which is the only place a 44px circle is honest here.
+ *
+ * `.nd-stack` is a container of its own, and that is load-bearing rather than
+ * tidy: it re-anchors the `@container nd-field` queries to a column that is
+ * never 54rem wide, so the poster layout cannot fire on a surface that has no
+ * poster composition. This screen is a phone screen inside the Nimiq Pay
+ * WebView, and a browser gets the open-in-app gate instead — but the gate is
+ * decided by the wallet bridge, which takes up to 1.5s to answer, and the form
+ * is on screen for that second. A form that reflows into a broken poster and
+ * back is worse than one that is simply a centred column at every width.
+ */
+
+.nd-stack {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  width: 100%;
+  max-width: 30rem;
+  margin: 0 auto;
+  container-type: inline-size;
+  container-name: nd-field;
+}
+
+/* A sheet's lead paragraph: the sentence a refusal turns on, and the server's
+   own summary above the fund button. Full strength rather than muted, because
+   it is the thing being read rather than the note beside it. */
+.nd-lede {
+  margin: 0;
+  font-size: 0.9375rem;
+  line-height: 1.5;
+  color: var(--nd-on-surface);
+  text-wrap: pretty;
+}
+
+/* The sheet's own title. The money is the `h1` on every screen in this product,
+   so this is the second heading and is sized like one. */
+.nd-sheeth {
+  margin: 0;
+  font-size: 1.0625rem;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  line-height: 1.25;
+  color: var(--nd-on-surface);
+  text-wrap: balance;
+}
+
+/* The mark on a screen that is waiting for the network. It replaces a heading's
+   icon, so it is held to the 3:1 a non-text mark needs on the bare field. */
+.nd-beacon {
+  width: 2.75rem;
+  height: 3px;
+  border-radius: 999px;
+  background-color: var(--nd-mark);
+}
+
+/* ---- the constraint, under the money -------------------------------------
+ *
+ * The deployment's live ceiling, on the field, above the fields it constrains.
+ * A recess and not a lift, for the same arithmetic as the claim screen's fact
+ * tiles: over a field this bright the only direction with contrast headroom in
+ * it is down.
+ */
+.nd-limits {
+  margin-top: 1rem;
+  padding: 0.75rem 0.875rem 0.5rem;
+  border: 1px solid var(--nd-rule);
+  border-radius: 1.125rem;
+  background-color: var(--nd-recess-field);
+}
+
+.nd-limits > p {
+  margin: 0 0 0.25rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--nd-on-surface-muted);
+}
+
+/* The ledger's own edges are the recess it sits in. */
+.nd-limits .nd-rows {
+  border-top: 0;
+}
+
+.nd-limits .nd-row:last-child {
+  border-bottom: 0;
+}
+
+/* Funding is closed: the one fact that outranks the ceiling. Vermilion as a
+   hard 1px edge on the same recess, never as a fill — the field's own colour
+   is a bloom, and a wash of it here would read as more light rather than as a
+   warning. */
+.nd-alert {
+  display: flex;
+  gap: 0.625rem;
+  margin-top: 1rem;
+  padding: 0.875rem;
+  border: 1px solid rgb(255 77 20 / 0.5);
+  border-radius: 1.125rem;
+  background-color: var(--nd-recess-field);
+}
+
+.nd-alert svg {
+  flex: 0 0 auto;
+  margin-top: 0.0625rem;
+  color: var(--nd-on-surface);
+}
+
+.nd-alert b {
+  display: block;
+  font-size: 0.875rem;
+  font-weight: 700;
+  color: var(--nd-on-surface);
+}
+
+.nd-alert p {
+  margin: 0.1875rem 0 0;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--nd-on-surface-muted);
+}
+
+/* ---- the form ------------------------------------------------------------ */
+
+/**
+ * `minmax(0, 1fr)` rather than a bare `auto` column, and it is a correctness
+ * rule rather than a preference: an `<input>`'s max-content contribution is its
+ * `size` attribute in its own font, which at the amount field's 28px is over
+ * 400px. An auto track grows to that and the whole form runs off a 390px phone
+ * — clipped rather than scrollable, because the field clips, so it fails
+ * silently and only a rendered measurement catches it.
+ */
+.nd-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1.125rem;
+  margin-top: 0.875rem;
+}
+
+.nd-lab {
+  display: block;
+  margin-bottom: 0.375rem;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--nd-on-surface-muted);
+}
+
+.nd-hint {
+  margin: 0.4375rem 0 0;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: var(--nd-on-surface-muted);
+}
+
+/**
+ * A solid fill over the sheet's barrier, at the same 10% the trivia answer
+ * uses, so there is one input surface in the product rather than two.
+ *
+ * 16px of type is not a preference. Under it, iOS zooms the viewport on focus,
+ * and a page that zooms while a sponsor is typing an amount moves the number
+ * they are checking out from under their thumb.
+ */
+.nd-input {
+  display: block;
+  width: 100%;
+  min-height: 3rem;
+  padding: 0.75rem 0.9375rem;
+  border: 1px solid var(--nd-rule-strong);
+  border-radius: 0.875rem;
+  background-color: rgb(245 240 238 / 0.1);
+  color: var(--nd-on-surface);
+  font: inherit;
+  font-size: 1rem;
+  line-height: 1.4;
+}
+
+/* Placeholders are held to the body floor, not to a muted-grey default: a
+   placeholder nobody can read is a label nobody has. */
+.nd-input::placeholder,
+.nd-amountbox input::placeholder {
+  color: var(--nd-on-surface-muted);
+  opacity: 1;
+}
+
+/* The stepper owns the count, so the spinners are two more 12px targets doing
+   a job two 44px ones already do. */
+.nd-input[type='number'] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+.nd-input[type='number']::-webkit-outer-spin-button,
+.nd-input[type='number']::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/**
+ * The amount. The one control on the sheet that is sized like money, because it
+ * is the number the whole screen is about to multiply.
+ */
+.nd-amountbox {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  min-height: 3.5rem;
+  padding: 0.625rem 0.9375rem;
+  border: 1px solid var(--nd-rule-strong);
+  border-radius: 1rem;
+  background-color: rgb(245 240 238 / 0.1);
+}
+
+.nd-amountbox input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  background: none;
+  color: var(--nd-on-surface);
+  font: inherit;
+  font-size: 1.75rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  outline: none;
+}
+
+.nd-amountbox > span {
+  flex: 0 0 auto;
+  font-size: 0.875rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--nd-on-surface);
+}
+
+/* The ring belongs to the box, since the input inside it has no visible edge
+   of its own. */
+.nd-amountbox:focus-within {
+  outline: 2px solid var(--nd-focus);
+  outline-offset: 2px;
+}
+
+/* ---- the people stepper -------------------------------------------------- */
+
+.nd-stepper {
+  display: flex;
+  align-items: center;
+  gap: 0.625rem;
+}
+
+.nd-stepper .nd-input {
+  width: 4.75rem;
+  text-align: center;
+  font-size: 1.125rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The glyph, not an icon: a minus sign and a plus sign are the two shapes a
+   drawn icon would only approximate. */
+.nd-stepper .nd-round {
+  font: inherit;
+  font-size: 1.25rem;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.nd-range {
+  margin: 0 0 0 auto;
+  font-size: 0.75rem;
+  color: var(--nd-on-surface-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- the custody control ------------------------------------------------- */
+
+/**
+ * The least reassuring fact about the product, as the headline of a control
+ * rather than as a footnote under a button. It is the sponsor's half of the
+ * same move the claim screen makes with `.nd-custody`, and it is wider because
+ * this reader is the one about to pay.
+ */
+.nd-disclose {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+  min-height: 3.5rem;
+  padding: 0.875rem 0.9375rem;
+  border: 1px solid var(--nd-rule);
+  border-radius: 1.125rem;
+  background-color: rgb(12 7 6 / 0.32);
+  color: var(--nd-on-surface);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.nd-disclose > span {
+  min-width: 0;
+  flex: 1;
+}
+
+.nd-disclose b {
+  display: block;
+  font-size: 0.875rem;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.nd-disclose em {
+  display: block;
+  margin-top: 0.1875rem;
+  font-size: 0.75rem;
+  font-style: normal;
+  line-height: 1.45;
+  color: var(--nd-on-surface-muted);
+}
+
+.nd-disclose > svg:last-child {
+  flex: 0 0 auto;
+  color: var(--nd-on-surface-muted);
+}
+
+/* ---- the disclosure itself ----------------------------------------------- */
+
+.nd-subh {
+  margin: 0;
+  font-size: 0.875rem;
+  font-weight: 700;
+  color: var(--nd-on-surface);
+}
+
+/* The paragraphs that sit beside the server's points: this side's own account
+   of how a share is won, and the shipped fallback for when the live disclosure
+   will not load. Same size and colour as a point, so one sheet reads as one
+   document rather than as two. */
+.nd-prose {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0.625rem 0 0;
+}
+
+.nd-prose > p {
+  margin: 0;
+  font-size: 0.875rem;
+  line-height: 1.5;
+  color: var(--nd-on-surface-muted);
+  text-wrap: pretty;
+}
+
+.nd-prose > p:first-child:only-of-type,
+.nd-prose > p.is-lead {
+  color: var(--nd-on-surface);
+  font-weight: 600;
+}
+
+.nd-points {
+  display: grid;
+  gap: 0.625rem;
+  margin: 0.625rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nd-points > li {
+  display: flex;
+  gap: 0.625rem;
+  font-size: 0.875rem;
+  line-height: 1.5;
+  color: var(--nd-on-surface-muted);
+  overflow-wrap: anywhere;
+  text-wrap: pretty;
+}
+
+/* The first point is the one a sponsor is most likely to read and the one they
+   most need to. */
+.nd-points > li:first-child {
+  font-weight: 600;
+  color: var(--nd-on-surface);
+}
+
+.nd-points > li > span:first-child {
+  flex: 0 0 auto;
+  width: 0.3125rem;
+  height: 0.3125rem;
+  margin-top: 0.5625rem;
+  border-radius: 50%;
+  background-color: currentColor;
+  opacity: 0.5;
+}
+
+/* ---- funding, in flight -------------------------------------------------- */
+
+/**
+ * Detecting, Confirming, Live. Three states of one transaction, and the reached
+ * ones differ from the waiting ones by fill AND weight AND a word, never by a
+ * colour alone.
+ */
+.nd-steps {
+  display: flex;
+  gap: 0.375rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nd-steps > li {
+  flex: 1;
+  min-height: 2rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.375rem 0.375rem;
+  border: 1px solid var(--nd-rule);
+  border-radius: 999px;
+  background-color: rgb(12 7 6 / 0.32);
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--nd-on-surface-muted);
+}
+
+.nd-steps > li[data-reached='true'] {
+  border-color: rgb(245 240 238 / 0.52);
+  background-color: rgb(245 240 238 / 0.18);
+  font-weight: 600;
+  color: var(--nd-on-surface);
+}
+
+.nd-steps > li[aria-current='step'] {
+  border-color: var(--color-chalk);
+  background-color: var(--color-chalk);
+  font-weight: 700;
+  color: var(--color-chalk-ink);
+}
+
+/* ---- the reward for funding ---------------------------------------------- */
+
+/**
+ * The QR is white because a QR is white. The server draws it with an opaque
+ * `#FFFFFF` quiet zone and dark modules, so a plate of anything else would put
+ * a white square on a coloured card; and a scanner needs that quiet zone more
+ * than this screen needs the plate to be on palette.
+ */
+.nd-qr {
+  display: block;
+  width: 100%;
+  max-width: 13rem;
+  margin: 0 auto;
+  padding: 0.75rem;
+  border-radius: 1.25rem;
+  background-color: #ffffff;
+}
+
+.nd-qr img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.nd-linkline {
+  margin: 0.75rem 0 0;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  text-align: center;
+  color: var(--nd-on-surface);
+  overflow-wrap: anywhere;
 }
 
 /* ===========================================================================

@@ -317,6 +317,19 @@ function amountField() {
   return screen.getByLabelText(/NIM per person/i) as HTMLInputElement
 }
 
+/**
+ * The derived total, read the way a screen reader reads it.
+ *
+ * Since the redesign it is the same amount lockup the claimant meets — figure,
+ * Nimiq signet, unit — printed bare in the open field above the form, so its
+ * text content is three pieces and its accessible name is the sentence. Reading
+ * the name rather than the DOM is also the stricter check: it is what a sponsor
+ * who cannot see the screen is told the drop will cost.
+ */
+function totalNim(): string | null {
+  return screen.getByTestId('amount-hero').getAttribute('aria-label')
+}
+
 function fillForm(opts: { amount?: string; people?: string; from?: string } = {}) {
   fireEvent.change(screen.getByLabelText(/NIM per person/i), {
     target: { value: opts.amount ?? '2' },
@@ -368,13 +381,27 @@ describe('Create — amount entry', () => {
   it('derives the total from NIM per person × people', () => {
     renderCreate({ discoverBridge: bridgeOf(new MockBridge()) })
     fillForm({ amount: '2', people: '5' })
-    expect(screen.getByText('10 NIM')).toBeTruthy()
+    expect(totalNim()).toBe('10 NIM')
   })
 
   it('keeps the total exact for fractional amounts (no float drift)', () => {
     renderCreate({ discoverBridge: bridgeOf(new MockBridge()) })
     fillForm({ amount: '0.07', people: '3' })
-    expect(screen.getByText('0.21 NIM')).toBeTruthy()
+    expect(totalNim()).toBe('0.21 NIM')
+  })
+
+  /**
+   * The money slot on a form is never empty. It rests at zero and names what it
+   * is a total OF, so the derivation is on screen before the sponsor has to
+   * work out why the number changed when they touched the headcount.
+   */
+  it('rests at zero, and says what the total is a total of', () => {
+    renderCreate({ discoverBridge: bridgeOf(new MockBridge()) })
+    expect(totalNim()).toBe('0 NIM')
+    expect(screen.getByTestId('derived-total').textContent).toContain('total for 5 people')
+
+    fireEvent.change(screen.getByLabelText(/how many people/i), { target: { value: '8' } })
+    expect(screen.getByTestId('derived-total').textContent).toContain('total for 8 people')
   })
 })
 
@@ -386,7 +413,7 @@ describe('Create — "Drop one back" prefill', () => {
     // rather than being invented from the sender's drop.
     expect((screen.getByLabelText(/how many people/i) as HTMLInputElement).value).toBe('5')
     // 2.5 × 5 — derived from the seed exactly as it would be from typing.
-    expect(screen.getByTestId('derived-total').textContent).toBe('12.5 NIM')
+    expect(totalNim()).toBe('12.5 NIM')
   })
 
   it('accepts an amount that only just fits under the total cap', () => {
@@ -399,13 +426,13 @@ describe('Create — "Drop one back" prefill', () => {
     renderCreate({ discoverBridge: bridgeOf(new MockBridge()) }, '/create?amount=2.5')
     fireEvent.change(amountField(), { target: { value: '7' } })
     expect(amountField().value).toBe('7')
-    expect(screen.getByTestId('derived-total').textContent).toBe('35 NIM')
+    expect(totalNim()).toBe('35 NIM')
   })
 
   it('starts empty when no amount was passed', () => {
     renderCreate({ discoverBridge: bridgeOf(new MockBridge()) }, '/create')
     expect(amountField().value).toBe('')
-    expect(screen.getByTestId('derived-total').textContent).toBe('—')
+    expect(totalNim()).toBe('0 NIM')
   })
 
   // A link is not a keystroke: the claimant did not type any of this, so a param
@@ -430,7 +457,7 @@ describe('Create — "Drop one back" prefill', () => {
         `/create?amount=${encodeURIComponent(value)}`,
       )
       expect(amountField().value).toBe('')
-      expect(screen.getByTestId('derived-total').textContent).toBe('—')
+      expect(totalNim()).toBe('0 NIM')
       // The default form has no complaint on it; the cap note is for a total the
       // sponsor actually built.
       expect(screen.queryByText(/A drop can hold up to 100 NIM/i)).toBeNull()
@@ -473,19 +500,29 @@ describe('Create — review sheet', () => {
     expect(within(sheet).getByRole('button', { name: /load the limits again/i })).toBeTruthy()
   })
 
-  it('seals the envelope: the sponsor initial is pressed into wax on the sheet', () => {
+  /**
+   * The review sheet used to press a disc of gold wax with the sponsor's
+   * initial on it, on the argument that this is the moment they seal the
+   * envelope and that the claimant would break the same seal.
+   *
+   * That object no longer exists on the other side. The claim surface's packet
+   * (`ui/SealedEnvelope.tsx`) carries the Nimiq signet, not an initial, so the
+   * two seals were never the same object and the illustration was decorating a
+   * money confirmation. What the sponsor is shown instead is the transaction:
+   * four rows, in the order they matter, above the disclosure and above the
+   * button that opens the wallet.
+   */
+  it('states the transaction itself, with nothing decorative on it', () => {
     renderCreate({ discoverBridge: bridgeOf(new MockBridge()) })
     fillForm({ from: 'Team NimDrops' })
     const sheet = openReview()
 
-    // §4.4: this is the moment the sponsor seals it, so it carries the same
-    // wax the claimant will break at the other end of the link.
-    const wax = sheet.querySelector('.nd-wax')
-    expect(wax).toBeTruthy()
-    expect(wax?.getAttribute('aria-hidden')).toBe('true')
-    expect(wax?.querySelector('.nd-wax-mark')?.textContent).toBe('T')
-    // Decorative only — it must not have crowded out the dialog's own label.
     expect(within(sheet).getByRole('heading', { name: /before you fund/i })).toBeTruthy()
+    for (const label of ['Each person gets', 'People', 'You send', 'Expires']) {
+      expect(within(sheet).getByText(label)).toBeTruthy()
+    }
+    expect(within(sheet).getByText('10 NIM')).toBeTruthy()
+    expect(sheet.querySelector('.nd-wax')).toBeNull()
   })
 })
 
@@ -1137,9 +1174,9 @@ describe('Create — coming back to a funded drop', () => {
     await waitFor(() => screen.getByRole('heading', { name: /your drop is live/i }))
     expect(screen.getByText(SHARE_URL)).toBeTruthy()
     expect(screen.getByRole('img', { name: /qr/i })).toBeTruthy()
-    // The wax keeps the sponsor's initial, read back from the server rather
-    // than from a form that is now empty.
-    expect(document.querySelector('.nd-wax-mark')?.textContent).toBe('T')
+    // The form is empty after a reload, so the total in the field is the one
+    // the remembered record carries rather than one this screen recomputed.
+    expect(totalNim()).toBe('10 NIM')
   })
 
   it('resumes the funding poll when the drop is still confirming', async () => {
