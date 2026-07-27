@@ -11,81 +11,1164 @@
  */
 @source not "./pages/design";
 
-/**
- * Design §4.4: a sealed paper envelope, passed around one real group.
- * A deep blue field, one gold accent, system type, and nothing else.
+/* ===========================================================================
+ * The typeface
+ * ===========================================================================
  *
- * The envelope is not a card drawn on the screen — it IS the screen. The deep
- * blue field shows only as the safe-area frame and as the headroom the flap
- * swings into. Everything below builds that one object: face, flap, wax.
+ * Mulish, self-hosted, as one variable file per subset.
+ *
+ * This replaces a `system-ui` stack, and the reason is a shipped defect rather
+ * than a preference. `system-ui` is whatever the platform says it is, and on at
+ * least one of the machines this was reviewed on it resolved to a MONOSPACE
+ * face: a canvas advance-width test gave `iiiii` and `WWWWW` an identical width
+ * (ratio 1.00, against 4.25 for generic `sans-serif` on the same machine). Every
+ * screenshot taken there had a monospace 61px amount on it. A money app whose
+ * amount renders in an arbitrary face on somebody's phone is not a styling
+ * problem, and the Nimiq Pay WebView is exactly the kind of runtime where
+ * `system-ui` is least predictable.
+ *
+ * Mulish specifically because it is Nimiq's own brand face — `nimiq-style`
+ * declares Muli with a system fallback — and because it is under the SIL Open
+ * Font License, so self-hosting it is legitimate. The licence travels with the
+ * files in `public/fonts/mulish-OFL.txt`.
+ *
+ * `swap` rather than `block`, because text that is invisible for three seconds
+ * on a claim screen is worse than text in the fallback face for one frame. The
+ * swap cannot move anything vertically: every line-height in this stylesheet is
+ * a unitless number, so a box's height is a multiple of its font-size and does
+ * not depend on the font's own metrics. `index.html` preloads the latin subset,
+ * which is the one every digit and every English word comes from, so in
+ * practice the first paint is already Mulish.
  */
+@font-face {
+  font-family: 'Mulish';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 200 1000;
+  src: url('/fonts/mulish-latin-var.woff2') format('woff2-variations');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+2074, U+20AC, U+2122, U+2191, U+2193, U+2212,
+    U+2215, U+FEFF, U+FFFD;
+}
+
+/* Sponsor labels are free text and routinely are not English. */
+@font-face {
+  font-family: 'Mulish';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 200 1000;
+  src: url('/fonts/mulish-latin-ext-var.woff2') format('woff2-variations');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304,
+    U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0,
+    U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+/* ===========================================================================
+ * FIELD — the NimDrops design system
+ * ===========================================================================
+ *
+ * The drop is a live surface. One sheet of glass over something that is still
+ * changing while you read it. Direction C, approved 2026-07-27, specified in
+ * `docs/design/direction-options.md`.
+ *
+ * Three rules the whole system is built to keep, in priority order:
+ *
+ *   1. THE MONEY NEVER DEPENDS ON THE VISUAL LAYER. Every value below is a
+ *      plain declaration. Nothing on the claim path starts hidden and is
+ *      revealed by a transition, because transitions do not fire in headless
+ *      renderers, in background tabs, or under reduced motion, and a claim
+ *      screen that ships blank is a financial bug. `surface.test.ts` asserts
+ *      this against the stylesheet; `DropView.test.tsx` asserts it against
+ *      thirteen rendered states.
+ *
+ *   2. THE BLUR IS BUDGETED. `backdrop-filter` over a MOVING backdrop is the
+ *      expensive case: the blurred region is recomposited whenever what is
+ *      behind it changes, and this runs inside somebody's wallet WebView on
+ *      possibly a low-end Android. Four mitigations are built in rather than
+ *      hoped for: the lights move on `transform` only so nothing re-rasterises;
+ *      exactly one bounded element is ever blurred, never the page; the drift
+ *      pauses when the field is off screen or the document is hidden; and
+ *      `ui/surface.ts` degrades the whole thing to a solid sheet with static
+ *      lights on a coarse pointer with low memory or few cores.
+ *
+ *   3. CONTRAST IS COMPUTED, NEVER EYEBALLED. The field moves, so no ratio here
+ *      was measured off a screenshot. `--nd-field-max` below is the brightest
+ *      pixel the field can physically reach — the base gradient's lightest stop
+ *      with all three lights stacked on it at their post-claim peak — and every
+ *      foreground is checked against that worst case, composited through the
+ *      sheet's `saturate()` and barrier fill. `ui/surface.contrast.test.ts`
+ *      recomputes all of it from the tokens below and fails the build if a
+ *      value drifts.
+ */
+
 @theme {
+  /**
+   * Nimiq's own palette, read from `nimiq-style/src/theme.css`. This is the
+   * host wallet's identity, not a mood board: the field's radial is Nimiq's
+   * `--nimiq-blue-bg` and the action colour is Nimiq gold.
+   */
   --color-ink: #1f2348;
   --color-gold: #e9b213;
-  --color-gold-deep: #c8960b;
-  --color-paper: #fbf9f4;
-  /* The tone of a folded-over sheet: the same paper, one shade in shadow. */
-  --color-paper-fold: #f0ebdd;
+  /**
+   * Deep gold, for gold-coloured text and focus rings on a light surface.
+   * Was `#c8960b`, which is 2.43:1 on the plate and failed both the 4.5:1 text
+   * floor and the 3:1 non-text floor. `#7c5b04` is 5.67:1 on the plate and
+   * 5.11:1 on the `gold/18` pill wash.
+   */
+  --color-gold-deep: #7c5b04;
 
-  --font-sans:
-    system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', sans-serif;
+  /**
+   * The solid neutral. Chroma is near zero and what remains leans cool, toward
+   * the field's own violet rather than toward warmth-by-default.
+   *
+   * This replaces `--color-paper: #fbf9f4`, which is deleted. `#fbf9f4` sat in
+   * the warm near-white band `PRODUCT.md` names as an anti-reference, and the
+   * token name `--paper` is on the same list. Warmth in this brand is carried
+   * by the gold light in the field and by the reveal, never by a tinted
+   * off-white background.
+   */
+  --color-plate: #f4f3f7;
+  /** Text on the plate, and on the gold action. 16.09:1 and 9.18:1. */
+  --color-plate-ink: #181430;
+  /** The field's darkest base, before the radial and the lights. */
+  --color-field: #14112b;
+  /** What the glass sheet becomes when it cannot be glass. */
+  --color-sheet: #1c1930;
+
+  /**
+   * DEPRECATED, and load-bearing until the create flow is redesigned.
+   *
+   * `Create.tsx` still writes `text-paper` and may not be edited from this
+   * task, so removing the utility outright would leave that screen with
+   * invisible text. The VALUE `#fbf9f4` is gone; this name now resolves to the
+   * chroma-0 plate. Delete this line together with the create flow's redesign.
+   */
+  --color-paper: var(--color-plate);
+
+  /**
+   * One family, in weights. `system-ui` is deliberately NOT in this list: it is
+   * the token that resolved to a monospace face in review, and there is no
+   * value in keeping a name whose meaning is decided by the host. Everything
+   * after Mulish is a concrete face or the generic, which are predictable.
+   */
+  --font-sans: 'Mulish', 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', sans-serif;
 }
 
 :root {
-  /* Flap depth tracks the width, the way a real envelope's does. 320px → 104px,
-     390px → 117px, 430px and up → 129px. */
-  --nd-flap-h: clamp(6.5rem, 30vw, 8.125rem);
-  /**
-   * The blue the flap swings up into. It has to clear the flap's own projected
-   * height at the open angle — `flap × cos(48°) × perspective foreshortening`,
-   * about 0.62 of the flap — with a little air left over.
+  /* ---- the field ---------------------------------------------------------
+   *
+   * Nimiq's signature background is `radial-gradient(100% 100% at bottom
+   * right, #260133, var(--nimiq-blue))`, anchored bottom right. That anchor is
+   * the reason this is not the 135deg indigo-to-blue tell: it is the host
+   * wallet's own token, pushed one step darker so the lights on top have
+   * somewhere to be bright.
    */
+  --nd-field-image: radial-gradient(120% 120% at bottom right, #260133 0%, #1b1b3d 52%, #12102a 100%);
+  /** The lightest stop of the image above. Every contrast floor starts here. */
+  --nd-field-base-max: #1b1b3d;
+
+  /**
+   * Three lights, from Nimiq's own palette: light blue, purple, gold.
+   *
+   * Each is declared as a literal `rgb(… / α)` rather than assembled from a hex
+   * with relative colour syntax. `rgb(from …)` is Chrome 119 / Safari 16.4 and
+   * up, and a WebView that does not know it drops the whole declaration, which
+   * would take the light with it. The fill alpha and the layer opacity are kept
+   * apart because `surface.contrast.test.ts` multiplies them to derive the
+   * brightest pixel the field can reach.
+   */
+  --nd-light-1-fill: rgb(5 130 202 / 0.58);
+  --nd-light-1-fade: rgb(5 130 202 / 0);
+  --nd-light-1-o: 0.42;
+  --nd-light-2-fill: rgb(95 75 139 / 0.66);
+  --nd-light-2-fade: rgb(95 75 139 / 0);
+  --nd-light-2-o: 0.34;
+  --nd-light-3-fill: rgb(233 178 19 / 0.5);
+  --nd-light-3-fade: rgb(233 178 19 / 0);
+  --nd-light-3-o: 0.3;
+  /** The warmer cast the field keeps after a claim. The screen remembers. */
+  --nd-light-3-o-warm: 0.44;
+
+  /**
+   * The brightest pixel the field can reach: `--nd-field-base-max` with all
+   * three lights stacked at their peak, gold at its post-claim value. Derived,
+   * not chosen — the test recomputes it from the eight tokens above and fails
+   * if this constant no longer matches.
+   */
+  --nd-field-max: #515456;
+
+  /**
+   * A scrim over the lights and under the content, in the two bands where the
+   * poster furniture sits. It is composition first — a poster wants its edges
+   * weighted — and contrast headroom second. The furniture clears 4.5:1 on the
+   * unscrimmed worst case anyway; this buys back the margin the drift eats.
+   */
+  --nd-scrim-top: rgb(11 9 26 / 0.48);
+  --nd-scrim-bottom: rgb(11 9 26 / 0.55);
+  --nd-scrim-clear: rgb(11 9 26 / 0);
+
+  /* ---- the sheet ---------------------------------------------------------
+   *
+   * The barrier fill goes under the blur, so text contrast is a property of
+   * the sheet rather than of whatever happens to be behind it at that instant.
+   * A moving backdrop is exactly the case where "check it against the
+   * screenshot" is wrong. `-bottom` is the thinner end, and it is the one every
+   * contrast floor is computed against.
+   *
+   * `-flat` is what a renderer with no `backdrop-filter` gets: nearly opaque,
+   * so the sheet is a surface rather than a wash. Its composite is within a
+   * hair of `--color-sheet`, which is what Reduce Transparency swaps in, so all
+   * three paths land on the same reading.
+   */
+  --nd-barrier-glass-top: rgb(20 15 42 / 0.58);
+  --nd-barrier-glass-bottom: rgb(20 15 42 / 0.46);
+  --nd-barrier-flat-top: rgb(20 15 42 / 0.9);
+  --nd-barrier-flat-bottom: rgb(20 15 42 / 0.84);
+  --nd-blur: 16px;
+  /* Saturation is what stops frosted glass reading as grey plastic. */
+  --nd-saturate: 160%;
+
+  /* ---- ink roles ---------------------------------------------------------
+   * Computed against the worst case, never against a screenshot. The figures
+   * in each comment are the ratios `surface.contrast.test.ts` asserts.
+   */
+  /** On the sheet: 13.25:1. On the field: 6.92:1. */
+  --nd-on-surface: #f4f3f7;
+  /** Secondary body copy. On the sheet: 8.28:1. On the field: 5.13:1. */
+  --nd-on-surface-muted: rgb(244 243 247 / 0.76);
+  /** Hairlines and dividers. Not text; not a state carrier. */
+  --nd-rule: rgb(244 243 247 / 0.16);
+  --nd-rule-strong: rgb(244 243 247 / 0.3);
+  /** On the plate: 16.09:1 and 7.76:1. */
+  --nd-on-plate: #181430;
+  --nd-on-plate-muted: rgb(24 20 48 / 0.76);
+
+  /* ---- action ------------------------------------------------------------ */
+  --nd-action: var(--color-gold);
+  --nd-on-action: var(--color-plate-ink);
+  --nd-focus: var(--color-gold);
+
+  /* ---- geometry ---------------------------------------------------------- */
+  /** The sheet's true size. It does not grow on a desktop; the field does. */
+  --nd-sheet-w: 28.75rem;
+  --nd-radius-sheet: 1.5rem;
+  --nd-radius-plate: 1.125rem;
+  --nd-radius-control: 0.9375rem;
+  /** 16px at 320px, 24px from ~400px up. */
+  --nd-gutter: clamp(1rem, 5vw, 1.5rem);
+
+  /* ---- motion ------------------------------------------------------------
+   *
+   * One curve for entering (ease-out-expo; no bounce, no elastic), one for
+   * leaving, and four durations. Everything in the product picks from this
+   * list, so the whole surface shares a rhythm.
+   */
+  --nd-ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --nd-ease-exit: cubic-bezier(0.4, 0, 1, 1);
+  /** Press feedback. Under the 100ms perceptual floor for "instant". */
+  --nd-t-press: 120ms;
+  /** State change: selected, disabled, expanded. */
+  --nd-t-state: 180ms;
+  /** Something arriving. */
+  --nd-t-enter: 260ms;
+  /** Page choreography. The only duration allowed past 300ms, used once. */
+  --nd-t-reveal: 900ms;
+  /** The field's drift. Weather, not a screensaver. */
+  --nd-t-drift-1: 46s;
+  --nd-t-drift-2: 58s;
+  --nd-t-drift-3: 52s;
+
+  /* ---- z-index -----------------------------------------------------------
+   * Semantic, and the whole scale. No component invents a number.
+   */
+  --nd-z-base: 0;
+  --nd-z-light: 1;
+  --nd-z-texture: 2;
+  --nd-z-content: 3;
+  --nd-z-sticky: 20;
+  --nd-z-scrim: 40;
+  --nd-z-dialog: 41;
+  --nd-z-toast: 60;
+
+  /* ---- legacy: the create flow's envelope --------------------------------
+   * Quarantined below. See the LEGACY section at the foot of this file.
+   */
+  --nd-flap-h: clamp(6.5rem, 30vw, 8.125rem);
   --nd-headroom: calc(var(--nd-flap-h) * 0.68);
-  /** How far past vertical the flap leans when the envelope is open. */
   --nd-open-angle: -132deg;
-  /* Side gutter: 20px on a 320px phone, 24px from ~400px up. */
-  --nd-gutter: clamp(1.25rem, 6vw, 1.5rem);
   --nd-wax-size: 3.5rem;
 }
 
 html {
-  /* The paper column sits on the deep blue field. */
-  background-color: var(--color-ink);
+  background-color: var(--color-field);
   -webkit-text-size-adjust: 100%;
 }
 
 body {
   font-family: var(--font-sans);
+  color: var(--nd-on-surface);
+}
+
+/* ===========================================================================
+ * The field
+ * ======================================================================== */
+
+/**
+ * The backdrop the whole product sits on, and the reason glass is defensible
+ * here at all: a NimDrop is a live surface, other people are taking shares out
+ * of it while you read it, and the field is where that state lives.
+ *
+ * `overflow: clip` rather than `hidden` on purpose. The lights are 78vmax
+ * circles hung well outside the box, and an unclipped one hands the document
+ * sideways scroll; but `hidden` would make the field a scroll container and
+ * take the page's own scrolling away from it. `clip` does the first without the
+ * second, and the box still grows to fit its in-flow content, so nothing real
+ * is ever clipped — only decoration is.
+ */
+.nd-field {
+  position: relative;
+  overflow: clip;
+  display: flex;
+  flex-direction: column;
+  min-height: 100dvh;
+  background-color: var(--color-field);
+  background-image: var(--nd-field-image);
+  color: var(--nd-on-surface);
+  /* The WebView has a notch and a home indicator. The field absorbs both. */
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)
+    env(safe-area-inset-left);
+}
+
+/**
+ * Three lights, moved with `transform` only.
+ *
+ * This is the single most important performance decision on the screen. A
+ * gradient animated by changing its position or size is re-rasterised every
+ * frame; a gradient animated by transform is painted once and moved by the
+ * compositor. With a `backdrop-filter` sheet on top of it, the difference is
+ * between "the blurred region re-reads a freshly painted backdrop 60 times a
+ * second" and "it re-reads a moved layer", which is the whole WebView risk.
+ */
+.nd-field-light {
+  position: absolute;
+  z-index: var(--nd-z-light);
+  width: 78vmax;
+  height: 78vmax;
+  border-radius: 50%;
+  filter: blur(44px);
+  pointer-events: none;
+  /* Bounded to three elements, and only these three. */
+  will-change: transform;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+  animation-direction: alternate;
+}
+
+.nd-field-light.is-1 {
+  top: -32vmax;
+  left: -24vmax;
+  opacity: var(--nd-light-1-o);
+  background: radial-gradient(closest-side, var(--nd-light-1-fill), var(--nd-light-1-fade) 70%);
+  animation-name: nd-drift-1;
+  animation-duration: var(--nd-t-drift-1);
+}
+
+.nd-field-light.is-2 {
+  top: 4%;
+  right: -28vmax;
+  opacity: var(--nd-light-2-o);
+  background: radial-gradient(closest-side, var(--nd-light-2-fill), var(--nd-light-2-fade) 70%);
+  animation-name: nd-drift-2;
+  animation-duration: var(--nd-t-drift-2);
+}
+
+.nd-field-light.is-3 {
+  bottom: -34vmax;
+  left: -8%;
+  opacity: var(--nd-light-3-o);
+  background: radial-gradient(closest-side, var(--nd-light-3-fill), var(--nd-light-3-fade) 70%);
+  animation-name: nd-drift-3;
+  animation-duration: var(--nd-t-drift-3);
+  transition: opacity var(--nd-t-reveal) ease-out;
+}
+
+/* The screen remembers that you claimed: the gold light stays up afterwards. */
+.nd-field[data-tone='warm'] .nd-field-light.is-3 {
+  opacity: var(--nd-light-3-o-warm);
+}
+
+/* Dead ends — ended, all claimed, paused. Nothing here is going to be opened,
+   and the field says so before the sentence does. */
+.nd-field[data-tone='quiet'] .nd-field-light.is-3 {
+  opacity: 0.1;
+}
+.nd-field[data-tone='quiet'] .nd-field-light.is-1 {
+  opacity: 0.24;
+}
+
+@keyframes nd-drift-1 {
+  to {
+    transform: translate3d(16vmax, 10vmax, 0) scale(1.12);
+  }
+}
+@keyframes nd-drift-2 {
+  to {
+    transform: translate3d(-14vmax, 12vmax, 0) scale(1.08);
+  }
+}
+@keyframes nd-drift-3 {
+  to {
+    transform: translate3d(12vmax, -9vmax, 0) scale(1.14);
+  }
+}
+
+/**
+ * Pausing, which is the cheapest of the four mitigations and the one nobody
+ * can see. A paused compositor animation stops the sheet's blurred region
+ * being recomputed at all.
+ *
+ *   `data-awake="false"` — the document is hidden, or the field has scrolled
+ *   out of the viewport. `Field.tsx` sets it.
+ *   `data-motion="off"`  — the device asked for less, or is too small to pay
+ *   for this. `ui/surface.ts` sets it on the document element.
+ */
+.nd-field[data-awake='false'] .nd-field-light {
+  animation-play-state: paused;
+}
+
+:root[data-nd-motion='off'] .nd-field-light {
+  animation: none;
+}
+/* Static, but composed: the lights hold a deliberate position rather than all
+   sitting at their `from` frame in a corner. */
+:root[data-nd-motion='off'] .nd-field-light.is-1 {
+  transform: translate3d(8vmax, 5vmax, 0);
+}
+:root[data-nd-motion='off'] .nd-field-light.is-2 {
+  transform: translate3d(-7vmax, 6vmax, 0);
+}
+:root[data-nd-motion='off'] .nd-field-light.is-3 {
+  transform: translate3d(6vmax, -4vmax, 0);
+}
+
+/**
+ * Grain, as an inline SVG data URI.
+ *
+ * A large flat field of one colour bands on an 8-bit phone panel, and a
+ * gradient over it bands worse. Three octaves of fractal noise at 4% kills
+ * both, costs one composited layer, and is the difference between a surface
+ * that looks printed and one that looks like a CSS gradient.
+ */
+.nd-field-texture {
+  position: absolute;
+  inset: 0;
+  z-index: var(--nd-z-texture);
+  opacity: 0.045;
+  pointer-events: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23g)'/%3E%3C/svg%3E");
+}
+
+/* Weighted edges: a poster wants them, and the furniture reads on them. */
+.nd-field-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: var(--nd-z-texture);
+  pointer-events: none;
+  background-image: linear-gradient(
+    180deg,
+    var(--nd-scrim-top) 0%,
+    var(--nd-scrim-clear) 20%,
+    var(--nd-scrim-clear) 72%,
+    var(--nd-scrim-bottom) 100%
+  );
+}
+
+/**
+ * The one ring, once, when the seal that is not a seal comes apart.
+ *
+ * It is sized to the field and grows from `scale(0.04)` to exactly `scale(1)`.
+ * That bound is a correctness rule carried over from the envelope it replaces,
+ * not a taste one: an absolutely positioned decoration counts towards the
+ * document's scrollable overflow at its SCALED size, so a ring grown past 1
+ * hands the page sideways scroll for the second the claimant is looking
+ * hardest. A soft radial gradient rather than a hard border, because a border
+ * scaled twenty times is a smear and a gradient is not.
+ */
+.nd-ripple {
+  position: absolute;
+  inset: 0;
+  z-index: var(--nd-z-texture);
+  border-radius: 50%;
+  transform-origin: 50% 74%;
+  pointer-events: none;
+  background-image: radial-gradient(
+    closest-side,
+    rgb(233 178 19 / 0) 54%,
+    rgb(233 178 19 / 0.3) 68%,
+    rgb(233 178 19 / 0) 80%
+  );
+  animation: nd-ripple var(--nd-t-reveal) var(--nd-ease) 1 both;
+}
+
+@keyframes nd-ripple {
+  from {
+    transform: scale(0.04);
+    opacity: 0.95;
+  }
+  to {
+    transform: scale(1);
+    opacity: 0;
+  }
+}
+
+/* ---- the poster composition ----------------------------------------------
+ *
+ * On a phone this is one column: wordmark, sheet, the drop's live facts, the
+ * custody line. On a wide surface the same four elements become a poster —
+ * field full bleed, sheet centred at its true size, facts top right, custody
+ * bottom left. Not a widened column, and nothing appears twice: each fact is
+ * ONE element that the container query moves, so there is no second copy to
+ * fall out of sync or to be read twice by a screen reader.
+ *
+ * `@container` against the field's own width rather than a media query, so the
+ * same component renders correctly inside `/preview`'s 390px frame and at full
+ * width without either knowing anything about the page.
+ */
+.nd-field-inner {
+  position: relative;
+  z-index: var(--nd-z-content);
+  container-type: inline-size;
+  container-name: nd-field;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  padding: 1.125rem var(--nd-gutter) 1.5rem;
+}
+
+.nd-mast {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin: 0;
+  font-size: 0.8125rem;
+  line-height: 1.4;
+  color: var(--nd-on-surface-muted);
+}
+
+.nd-mast b {
+  font-size: 0.9375rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--nd-on-surface);
+}
+
+/* The sheet's room. It centres on tall screens and scrolls on short ones. */
+.nd-stage {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 0;
+  padding: 1.25rem 0 0;
+}
+
+.nd-poster-tr,
+.nd-poster-bl {
+  width: 100%;
+  max-width: var(--nd-sheet-w);
+  margin-inline: auto;
+}
+
+/* Attached to the sheet it describes, not floating under it. */
+.nd-poster-tr {
+  margin-top: 0.875rem;
+}
+
+/* The field's footer, held off the home indicator by the safe-area inset on
+   `.nd-field` plus this file's own bottom padding. */
+.nd-poster-bl {
+  margin-top: 1.5rem;
+}
+
+@container nd-field (min-width: 54rem) {
+  .nd-field-inner {
+    padding: 2rem 2.5rem 2.125rem;
+  }
+  .nd-stage {
+    justify-content: center;
+    padding: 0;
+  }
+  .nd-poster-tr {
+    position: absolute;
+    top: 2rem;
+    right: 2.5rem;
+    width: auto;
+    max-width: 22rem;
+    margin: 0;
+    text-align: right;
+  }
+  .nd-poster-bl {
+    position: absolute;
+    bottom: 2rem;
+    left: 2.5rem;
+    width: auto;
+    max-width: 24rem;
+    margin: 0;
+  }
+}
+
+/* ===========================================================================
+ * The sheet
+ * ======================================================================== */
+
+/**
+ * The one glass surface in the product, and the only element that is ever
+ * blurred. Nothing translucent stacks on it: every control inside is a solid
+ * fill, per Apple's own rule for the controls layer, and the money button in
+ * particular is never translucent.
+ *
+ * The barrier fill is declared FIRST, in the non-`@supports` branch, so a
+ * renderer with no `backdrop-filter` gets a nearly opaque sheet instead of a
+ * washed one. Everything downstream reads correctly on both.
+ */
+.nd-glass {
+  position: relative;
+  width: 100%;
+  max-width: var(--nd-sheet-w);
+  margin-inline: auto;
+  padding: 1.375rem 1.25rem 1.25rem;
+  border: 1px solid rgb(244 243 247 / 0.2);
+  border-radius: var(--nd-radius-sheet);
+  background-image: linear-gradient(var(--nd-barrier-flat-top), var(--nd-barrier-flat-bottom));
+  /* The 1px inner highlight is the tell that separates a sheet of glass from a
+     dark rectangle: it is the lit top edge of a physical pane. */
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.16),
+    0 1.125rem 2.5rem -1.5rem rgb(0 0 0 / 0.9);
+}
+
+@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :root[data-nd-glass='on'] .nd-glass {
+    background-image: linear-gradient(var(--nd-barrier-glass-top), var(--nd-barrier-glass-bottom));
+    -webkit-backdrop-filter: blur(var(--nd-blur)) saturate(var(--nd-saturate));
+    backdrop-filter: blur(var(--nd-blur)) saturate(var(--nd-saturate));
+  }
+}
+
+/**
+ * Reduce Transparency means SOLID, not "a bit less blur". That is what the
+ * setting means, and halving an opacity is the reading that misses the point.
+ * `ui/surface.ts` also flips `data-nd-glass` for the same media query, so the
+ * runtime and the stylesheet cannot disagree.
+ */
+@media (prefers-reduced-transparency: reduce) {
+  .nd-glass {
+    background-image: none;
+    background-color: var(--color-sheet);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
+
+:root[data-nd-glass='off'] .nd-glass {
+  background-image: none;
+  background-color: var(--color-sheet);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+/* ===========================================================================
+ * The money
+ * ======================================================================== */
+
+/**
+ * The only fully opaque element on the screen is the amount. That is the
+ * hierarchy statement of the whole direction, and it is also rule 1 in its
+ * physical form: the number a stranger is deciding about cannot depend on what
+ * happens to be behind it.
+ */
+.nd-plate {
+  margin-top: 1.375rem;
+  padding: 1.125rem 1rem 0.875rem;
+  border-radius: var(--nd-radius-plate);
+  background-color: var(--color-plate);
+  color: var(--nd-on-plate);
+  text-align: center;
+}
+
+/**
+ * The amount wraps its unit rather than overflowing.
+ *
+ * What overflows a 320px screen is `10000.00000`, not a narrow viewport, so the
+ * size steps down by character count (in `DropView`). `flex-wrap` is the belt:
+ * if a step-down still does not fit, `NIM` drops to its own centred line and
+ * the number stays whole. A denomination never breaks across two lines and is
+ * never truncated.
+ */
+.nd-amount {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: center;
+  gap: 0 0.5rem;
+  margin: 0;
+  font-weight: 600;
+  line-height: 0.95;
+  letter-spacing: -0.035em;
+  font-variant-numeric: tabular-nums;
+}
+
+.nd-amount > span:first-child {
+  white-space: nowrap;
+}
+
+.nd-amount[data-size='lg'] {
+  font-size: 3.8125rem;
+}
+.nd-amount[data-size='md'] {
+  font-size: 2.75rem;
+}
+.nd-amount[data-size='sm'] {
+  font-size: 1.9375rem;
+}
+
+.nd-unit {
+  font-size: 0.3em;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  color: var(--nd-on-plate-muted);
+}
+
+.nd-plate-note {
+  margin: 0.625rem 0 0;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--nd-on-plate-muted);
+  text-wrap: pretty;
+}
+
+/**
+ * The caption slot: the line directly under the amount.
+ *
+ * One sentence of context on an ordinary drop, the trivia question on a gated
+ * one. Sized so a heading-weight question needs no layout change, and never
+ * clamped — a question a claimant cannot finish reading is not a question.
+ */
+.nd-caption {
+  margin-top: 1rem;
+  text-align: center;
+}
+
+.nd-caption > :first-child {
+  margin-top: 0;
+}
+
+/* The one celebratory beat in the product, and it lands only after the backend
+   has said `paid`. */
+.nd-keyline {
+  width: 3.25rem;
+  height: 2px;
+  margin: 0.75rem auto 0;
+  border-radius: 999px;
+  background-color: var(--color-gold);
+  animation: nd-keyline var(--nd-t-enter) var(--nd-ease) 1 both;
+}
+
+@keyframes nd-keyline {
+  from {
+    transform: scaleX(0);
+  }
+}
+
+/* ===========================================================================
+ * Controls
+ * ======================================================================== */
+
+/**
+ * One primary per screen, and it always looks like this: a solid fill, never
+ * glass. The control whose label a claimant checks against the number they are
+ * about to accept is the last place to put a translucent surface.
+ */
+.nd-action {
+  display: block;
+  width: 100%;
+  min-height: 3.25rem;
+  padding: 0.875rem 1.25rem;
+  border: 0;
+  border-radius: var(--nd-radius-control);
+  background-color: var(--nd-action);
+  color: var(--nd-on-action);
+  font: inherit;
+  font-size: 1.0625rem;
+  font-weight: 650;
+  text-align: center;
+  cursor: pointer;
+  transition:
+    opacity var(--nd-t-press) var(--nd-ease-exit),
+    transform var(--nd-t-press) var(--nd-ease-exit);
+}
+
+.nd-action:disabled,
+.nd-action[aria-disabled='true'] {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.nd-action:not(:disabled):active {
+  opacity: 0.9;
+  transform: scale(0.99);
+}
+
+.nd-quiet {
+  display: block;
+  width: 100%;
+  min-height: 3.25rem;
+  padding: 0.875rem 1.25rem;
+  border: 1px solid var(--nd-rule-strong);
+  border-radius: var(--nd-radius-control);
+  background-color: transparent;
+  color: var(--nd-on-surface);
+  font: inherit;
+  font-size: 1.0625rem;
+  font-weight: 600;
+  text-align: center;
+  cursor: pointer;
+  transition:
+    border-color var(--nd-t-state) var(--nd-ease),
+    background-color var(--nd-t-state) var(--nd-ease);
+}
+
+.nd-quiet:hover {
+  border-color: rgb(244 243 247 / 0.5);
+  background-color: rgb(244 243 247 / 0.06);
+}
+
+.nd-quiet:active {
+  background-color: rgb(244 243 247 / 0.1);
+}
+
+/**
+ * The trivia answer.
+ *
+ * A solid fill nested inside the sheet, never a second pane of glass. Selection
+ * is carried by a border, a fill AND a weight change, because colour alone is
+ * not a state carrier. Exported as a token so `Trivia.tsx` composes the same
+ * control rather than inventing one; see the slot contract on `GlassSheet`.
+ */
+.nd-option {
+  display: block;
+  width: 100%;
+  min-height: 3rem;
+  padding: 0.75rem 0.9375rem;
+  border: 1px solid var(--nd-rule-strong);
+  border-radius: 0.8125rem;
+  background-color: rgb(244 243 247 / 0.1);
+  color: var(--nd-on-surface);
+  font: inherit;
+  font-size: 1rem;
+  font-weight: 400;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color var(--nd-t-state) var(--nd-ease),
+    background-color var(--nd-t-state) var(--nd-ease);
+}
+
+.nd-option[aria-pressed='true'],
+.nd-option[aria-checked='true'] {
+  border-color: var(--color-gold);
+  background-color: rgb(233 178 19 / 0.22);
+  font-weight: 600;
+}
+
+.nd-option:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/** A text-weight action. `py` keeps it past 44px: a link is a control too. */
+.nd-textlink {
+  display: inline-block;
+  min-height: 2.75rem;
+  padding: 0.75rem 0;
+  background: none;
+  border: 0;
+  color: var(--nd-on-surface);
+  font: inherit;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 4px;
+  cursor: pointer;
+}
+
+:where(button, a, input, [tabindex]):focus-visible {
+  outline: 2px solid var(--nd-focus);
+  outline-offset: 2px;
+}
+
+/* Inside the plate and the create flow's paper, gold is 2.4:1. Deep gold is
+   5.7:1 and is the ring there. */
+:where(.nd-plate, .nd-face) :where(button, a, input, [tabindex]):focus-visible {
+  outline-color: var(--color-gold-deep);
+}
+
+/* ===========================================================================
+ * Small parts
+ * ======================================================================== */
+
+/** The one-word answer to "where is my claim right now". */
+.nd-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.25rem 0.625rem;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+/* Gold = something is happening. */
+.nd-pill[data-tone='live'] {
+  border-color: rgb(233 178 19 / 0.45);
+  background-color: rgb(233 178 19 / 0.16);
+  color: var(--nd-on-surface);
+}
+/* Solid = a settled fact. */
+.nd-pill[data-tone='settled'] {
+  background-color: var(--color-plate);
+  color: var(--nd-on-plate);
+}
+/* Quiet = a dead end, or nothing has started. */
+.nd-pill[data-tone='quiet'] {
+  border-color: var(--nd-rule);
+  background-color: rgb(244 243 247 / 0.08);
+  color: var(--nd-on-surface-muted);
+}
+
+/** An inset block of explanation. One surface, no card inside a card. */
+.nd-panel {
+  padding: 0.9375rem;
+  border-radius: 1rem;
+  background-color: rgb(244 243 247 / 0.07);
+}
+
+.nd-panel--warn {
+  border: 1px solid rgb(233 178 19 / 0.4);
+  background-color: rgb(233 178 19 / 0.12);
+}
+
+.nd-note {
+  margin: 0;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--nd-on-surface-muted);
+  text-wrap: pretty;
+}
+
+.nd-rows {
+  border-top: 1px solid var(--nd-rule);
+}
+
+.nd-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.875rem;
+  margin: 0;
+  padding: 0.625rem 0;
+  border-bottom: 1px solid rgb(244 243 247 / 0.1);
+  font-size: 0.8125rem;
+}
+
+.nd-row > dt,
+.nd-row > span:first-child {
+  flex-shrink: 0;
+  color: var(--nd-on-surface-muted);
+}
+
+.nd-row > dd,
+.nd-row > b {
+  min-width: 0;
+  margin: 0;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+/** The drop's live state, as the field's own furniture. */
+.nd-facts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem 0.625rem;
+  margin: 0;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  /* Full strength, not muted: a countdown is a money fact and is held to AA
+     regardless of size. 6.92:1 on the field's brightest possible pixel. */
+  color: var(--nd-on-surface);
+  font-variant-numeric: tabular-nums;
+}
+
+.nd-marks {
+  display: inline-flex;
+  gap: 0.25rem;
+}
+
+.nd-marks > i {
+  display: block;
+  width: 1rem;
+  height: 0.25rem;
+  border-radius: 999px;
+  /* 3.95:1 on the field's brightest pixel, past the 3:1 non-text floor. The
+     count beside it carries the same fact in words, so the marks are never the
+     only carrier. */
+  background-color: var(--color-gold);
+}
+
+.nd-marks > i[data-taken='true'] {
+  background-color: rgb(244 243 247 / 0.26);
+}
+
+@container nd-field (min-width: 54rem) {
+  .nd-facts {
+    justify-content: flex-end;
+    font-size: 0.9375rem;
+  }
+  .nd-poster-bl .nd-note {
+    max-width: 34ch;
+  }
+}
+
+@keyframes nd-rise {
+  from {
+    opacity: 0;
+    transform: translateY(0.875rem);
+  }
+}
+
+/**
+ * The receipt rising into the sheet, after the ripple has left.
+ *
+ * `both` rather than `forwards` and a `from`-only keyframe: the element's
+ * resting state is fully visible, and the animation only describes where it
+ * comes FROM. With animation disabled entirely the receipt simply is there.
+ */
+.nd-rise {
+  animation: nd-rise var(--nd-t-enter) var(--nd-ease) 180ms both;
+}
+
+@keyframes nd-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.nd-pulse {
+  animation: nd-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes nd-sheet-in {
+  from {
+    transform: translateY(12%);
+    opacity: 0.6;
+  }
+}
+
+/** The modal panel of `ui/Sheet.tsx`. */
+.nd-sheet {
+  animation: nd-sheet-in var(--nd-t-state) ease-out;
+}
+
+.nd-sheet--field {
+  background-color: var(--color-sheet);
+  color: var(--nd-on-surface);
+}
+
+.nd-sheet--plate {
+  background-color: var(--color-plate);
   color: var(--color-ink);
 }
 
-/* ---- the field ------------------------------------------------------------ */
-
-/**
- * The WebView can have a notch and a home indicator. The field absorbs both, so
- * the paper never runs under hardware and the blue that is left over reads as
- * intentional matting rather than a clipped screen.
+/* ===========================================================================
+ * Reduced motion
+ * ===========================================================================
+ *
+ * The target is not "no animation", it is a different one: every surface lands
+ * on its finished, legible frame.
+ *
+ * The DELAYS have to be crushed as well as the durations, and that is not the
+ * same statement. A rule that zeroed only durations would leave a reduced
+ * motion user waiting out the ladder's delays in front of a screen where
+ * nothing had happened — a slower reveal than the animated one, made of
+ * nothing. `surface.test.ts` asserts both halves on the universal selector, so
+ * nothing added later can escape it.
  */
-.nd-field {
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
+  }
+
+  /* The field keeps every bit of its colour. Only the movement goes. */
+  .nd-field-light.is-1 {
+    transform: translate3d(8vmax, 5vmax, 0);
+  }
+  .nd-field-light.is-2 {
+    transform: translate3d(-7vmax, 6vmax, 0);
+  }
+  .nd-field-light.is-3 {
+    transform: translate3d(6vmax, -4vmax, 0);
+  }
+
+  /* A ring crossing the screen has no reduced-motion equivalent worth having.
+     The warmer cast the field keeps is the part that carries the meaning, and
+     it survives as a plain state. */
+  .nd-ripple {
+    display: none;
+  }
+}
+
+/* ===========================================================================
+ * LEGACY — the create flow's envelope
+ * ===========================================================================
+ *
+ * `Create.tsx` still renders `ui/Envelope.tsx` and the `.nd-face` paper. The
+ * claim surface no longer does: `DropView` is a field and a sheet, and the
+ * envelope's own test file has been replaced by tests against the new surface.
+ *
+ * This block exists only so the sponsor's flow keeps working while the create
+ * flow is redesigned as its own task, and it goes when that lands. It has been
+ * retinted off `#fbf9f4` onto the chroma-0 plate, because that value must not
+ * survive anywhere in shipped CSS; the retint is the only change to it.
+ */
+
+.nd-page {
   display: flex;
   justify-content: center;
   min-height: 100dvh;
   background-color: var(--color-ink);
-  padding-top: env(safe-area-inset-top);
-  padding-right: env(safe-area-inset-right);
-  padding-bottom: env(safe-area-inset-bottom);
-  padding-left: env(safe-area-inset-left);
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)
+    env(safe-area-inset-left);
 }
 
-.nd-column {
+.nd-page-column {
   display: flex;
   flex-direction: column;
   width: 100%;
   min-width: 0;
-  max-width: 430px;
+  max-width: 26.875rem;
 }
-
-/* ---- the envelope ---------------------------------------------------------- */
 
 .nd-envelope {
   position: relative;
@@ -105,41 +1188,22 @@ body {
   padding-right: var(--nd-gutter);
   padding-left: var(--nd-gutter);
   border-radius: 0.75rem 0.75rem 0 0;
-  /**
-   * The sheet is opaque, so nothing printed on it reaches past its edge. Belt
-   * and braces behind the bloom's own geometry: any future decoration that
-   * forgets it is sitting on a 320px-wide piece of paper gets clipped here
-   * instead of handing the whole document a sideways scrollbar. `clip` rather
-   * than `hidden` because this must not become a scroll container, and only on
-   * the inline axis because the sheet's height is the page's height.
-   */
+  /* `clip` rather than `hidden`: this must not become a scroll container. */
   overflow-x: clip;
-  /* Flat paper on purpose: the flap needs a clean sheet to cast a crease onto. */
-  background-color: var(--color-paper);
-  /* Stated, not inherited — nothing about this surface should depend on what
-     mounts it. */
+  background-color: var(--color-plate);
   color: var(--color-ink);
-  box-shadow: 0 18px 44px -20px rgb(0 0 0 / 0.6);
-  /* Second beat: the sheet lifts with the flap, not ahead of it. See the
-     reveal ladder note above `.nd-flap`. */
+  box-shadow: 0 1.125rem 2.75rem -1.25rem rgb(0 0 0 / 0.6);
   transition: transform 620ms cubic-bezier(0.22, 1.15, 0.36, 1) 90ms;
 }
 
-/* Room for the flap and the wax that straddles its point. */
 .nd-face--sealed {
   padding-top: calc(var(--nd-flap-h) + 1.5rem);
 }
 
 .nd-envelope[data-envelope-open='true'] .nd-face {
-  /* The face lifts a few pixels as the flap comes away from it. */
   transform: translateY(-6px);
 }
 
-/**
- * The inside of the envelope, revealed where the flap used to lie. Without it
- * an opened envelope is just a blank margin; with it, the top of the face reads
- * as depth you are looking into.
- */
 .nd-liner {
   position: absolute;
   top: 0;
@@ -148,15 +1212,14 @@ body {
   z-index: 1;
   height: calc(var(--nd-flap-h) + 0.25rem);
   border-radius: 0.75rem 0.75rem 0 0;
-  /* Warm, because paper in its own shadow is brown, not grey. */
+  /* Cool, matching the plate it is a shadow on. */
   background-image: linear-gradient(
     180deg,
-    rgb(92 72 34 / 0.17) 0%,
-    rgb(92 72 34 / 0.06) 44%,
-    rgb(92 72 34 / 0) 100%
+    rgb(40 34 66 / 0.16) 0%,
+    rgb(40 34 66 / 0.06) 44%,
+    rgb(40 34 66 / 0) 100%
   );
   opacity: 0;
-  /* Third beat: depth appears once the flap has cleared the top of the sheet. */
   transition: opacity 520ms ease-out 220ms;
   pointer-events: none;
 }
@@ -165,29 +1228,6 @@ body {
   opacity: 1;
 }
 
-/**
- * The reveal is a sequence, not a chord.
- *
- * Nine things used to start on the same frame, so the eye had no order to
- * follow and the gold bloom peaked (38% of 900ms ≈ 340ms) while the flap was
- * still halfway through its 640ms travel — warmth arriving before the thing it
- * was warming. The delays below stage it the way a seal actually breaks:
- *
- *   0ms    the wax splits          — it is the thing being broken
- *   90ms   the flap swings, the face lifts — paper follows the seal
- *   220ms  the liner fades in      — depth appears as the flap clears
- *   260ms  the bloom starts        — peaks ~600ms, with the flap's arrival
- *   180ms  the receipt rises       — only on `paid`
- *
- * Wall clock goes to ~830ms and felt time goes down, because it now has a
- * beginning, a middle and an end.
- *
- * These delays are load-bearing for `prefers-reduced-motion`: the global block
- * at the bottom of this file has to zero `transition-delay` and
- * `animation-delay` as well as the durations, or a reduced-motion user spends
- * 260ms looking at a screen where nothing has happened yet. `Envelope.test.tsx`
- * asserts both halves.
- */
 .nd-flap {
   position: absolute;
   top: 0;
@@ -205,26 +1245,17 @@ body {
   transform: rotateX(var(--nd-open-angle));
 }
 
-/**
- * The two diagonal fold seams. They are the clipped edges of the flap itself,
- * and the shadow the clip casts onto the sheet below is what makes them read as
- * creases in paper rather than as a shape someone drew.
- */
 .nd-flap-face {
   height: 100%;
   border-radius: 0.75rem 0.75rem 0 0;
   clip-path: polygon(0 0, 100% 0, 50% 100%);
-  background-image: linear-gradient(176deg, #f8f4ea 0%, #f1ecdd 62%, #e9e2d0 100%);
+  background-image: linear-gradient(176deg, #fafafc 0%, #f0eff5 62%, #e6e5ee 100%);
   filter: drop-shadow(0 2px 3px rgb(31 35 72 / 0.13));
 }
 
-/* Leaned back past vertical, the flap shows its underside — so it is shaded,
-   and it throws a longer shadow. */
 .nd-envelope[data-envelope-open='true'] .nd-flap-face {
   filter: drop-shadow(0 6px 12px rgb(10 12 30 / 0.4)) brightness(0.9);
 }
-
-/* ---- the wax ---------------------------------------------------------------- */
 
 .nd-seal {
   position: absolute;
@@ -240,7 +1271,6 @@ body {
   transform: translateX(-50%) scale(0.86);
 }
 
-/** A disc of gold wax, pressed slightly off-square the way a real stamp lands. */
 .nd-wax {
   position: relative;
   display: inline-block;
@@ -250,15 +1280,9 @@ body {
   transform: rotate(-7deg);
 }
 
-/**
- * Wax, not a bauble. A pressed disc is nearly flat: a broad, low sheen instead
- * of a specular dot, a darker rim where it spread and cooled, and a ring
- * pressed in by the stamp. The ring lives on each half so it splits with them.
- */
 .nd-wax-half {
   position: absolute;
   inset: 0;
-  /* Not a circle: wax spreads. */
   border-radius: 47% 53% 52% 48% / 51% 49% 51% 49%;
   background-image:
     radial-gradient(ellipse 70% 60% at 38% 30%, rgb(255 249 219 / 0.5) 0%, rgb(255 249 219 / 0) 62%),
@@ -283,7 +1307,6 @@ body {
     inset 0 1px 0 rgb(255 244 205 / 0.3);
 }
 
-/* The halves overlap by a hair so the sealed disc has no crack down it. */
 .nd-wax-half.is-left {
   clip-path: inset(0 49.6% 0 0);
 }
@@ -291,7 +1314,6 @@ body {
   clip-path: inset(0 0 0 49.6%);
 }
 
-/* The seal breaks: the disc splits along its middle and fades. */
 .nd-envelope[data-envelope-open='true'] .nd-wax-half.is-left {
   transform: translateX(-0.6rem) rotate(-13deg);
   opacity: 0;
@@ -310,7 +1332,6 @@ body {
   font-weight: 700;
   letter-spacing: 0.02em;
   color: color-mix(in srgb, var(--color-ink) 72%, transparent);
-  /* Struck into the wax, so it has a lit lower edge. */
   text-shadow: 0 1px 0 rgb(255 244 205 / 0.4);
   transition: opacity 240ms ease-out;
 }
@@ -319,118 +1340,22 @@ body {
   opacity: 0;
 }
 
-/* Dead ends — ended, all claimed, paused. Nothing here is going to be opened,
-   and the wax says so before the sentence does. */
 .nd-envelope[data-envelope-tone='quiet'] .nd-wax-half {
   background-image:
     radial-gradient(ellipse 70% 60% at 38% 30%, rgb(255 255 255 / 0.4) 0%, rgb(255 255 255 / 0) 62%),
     radial-gradient(circle at 50% 44%, #cdc8bb 0%, #b6b1a2 58%, #8e8977 100%);
 }
 
-/* ---- the printed amount ------------------------------------------------------ */
-
-/** Struck onto the face like a denomination, not typed into a field. */
-.nd-amount {
-  font-weight: 600;
-  line-height: 0.95;
-  letter-spacing: -0.035em;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-/** The single celebratory beat in the whole product. */
-.nd-keyline {
-  width: 3.25rem;
-  height: 2px;
-  margin: 0.875rem auto 0;
-  border-radius: 999px;
-  background-color: var(--color-gold);
-  animation: nd-keyline 520ms cubic-bezier(0.22, 1.15, 0.36, 1) 1 both;
-}
-
-@keyframes nd-keyline {
-  from {
-    transform: scaleX(0);
-  }
-}
-
-/**
- * One pass of warmth behind the amount as the seal comes apart. Once.
- *
- * It grows INTO the paper, never out of it, and that is a correctness rule
- * rather than a taste one. An absolutely positioned decoration still counts
- * towards the page's scrollable overflow, and a scaled one counts at its
- * *scaled* size — so a bloom hung past the paper's edges and then grown past
- * `scale(1)` hands the document ~100px of sideways scroll for the 900ms it is
- * alive. That is the one moment a claimant is looking hardest, and the page
- * wobbles under their thumb.
- *
- * Hence: edges pinned to the face, and the growth spends itself between
- * `scale(0.62)` and `scale(1)`. The widest this is ever painted is exactly the
- * width of the paper it blooms on. The pass reads the same — the gradient is
- * `closest-side`, so its reach was always set by the 12rem height, which is
- * untouched.
- */
-.nd-bloom {
-  position: absolute;
-  top: calc(var(--nd-flap-h) + 1.5rem);
-  right: 0;
-  left: 0;
-  height: 12rem;
-  border-radius: 50%;
-  background-image: radial-gradient(
-    closest-side,
-    color-mix(in srgb, var(--color-gold) 58%, transparent) 0%,
-    transparent 100%
-  );
-  filter: blur(18px);
-  opacity: 0;
-  /* Fourth beat, 260ms in: the warmth peaks as the flap lands, not before it
-     has moved. `BLOOM_MS` in `Envelope.tsx` covers delay + duration, so the
-     element is never unmounted mid-fade. */
-  animation: nd-bloom 900ms ease-out 260ms 1;
-  pointer-events: none;
-}
-
-@keyframes nd-bloom {
-  0% {
-    opacity: 0;
-    transform: scale(0.62);
-  }
-  38% {
-    opacity: 0.55;
-  }
-  100% {
-    opacity: 0;
-    transform: scale(1);
-  }
-}
-
-/** The receipt rising into the opened envelope, after the flap has moved. */
-.nd-rise {
-  animation: nd-rise 520ms cubic-bezier(0.22, 1.1, 0.36, 1) 180ms both;
-}
-
-@keyframes nd-rise {
-  from {
-    opacity: 0;
-    transform: translateY(14px);
-  }
-}
-
-/* ---- controls ---------------------------------------------------------------- */
-
-/* One primary action per screen, and it always looks like this. */
+/* The create flow's own buttons, on paper. */
 .nd-primary {
   border-radius: 1rem;
   background-color: var(--color-ink);
-  color: var(--color-paper);
+  color: var(--color-plate);
   font-size: 1rem;
   font-weight: 600;
-  /* ~52px tall: comfortably past the 44px touch-target floor. */
   padding: 0.9rem 1.25rem;
   min-height: 3.25rem;
-  transition: opacity 120ms ease-out;
+  transition: opacity var(--nd-t-press) ease-out;
 }
 .nd-primary:disabled {
   opacity: 0.35;
@@ -448,58 +1373,4 @@ body {
   font-weight: 600;
   padding: 0.9rem 1.25rem;
   min-height: 3.25rem;
-}
-
-:where(button, a, input):focus-visible {
-  outline: 2px solid var(--color-gold-deep);
-  outline-offset: 2px;
-}
-
-@keyframes nd-sheet-in {
-  from {
-    transform: translateY(12%);
-    opacity: 0.6;
-  }
-}
-
-@keyframes nd-pulse {
-  50% {
-    opacity: 0.35;
-  }
-}
-
-.nd-sheet {
-  animation: nd-sheet-in 180ms ease-out;
-}
-
-.nd-pulse {
-  animation: nd-pulse 1.6s ease-in-out infinite;
-}
-
-/**
- * Design §4.4: every state is reachable with animation off.
- *
- * The opened envelope is a STATE, not a keyframe — the flap angle, the split
- * wax and the lifted face are all plain declarations under
- * `[data-envelope-open='true']`, reached by transition. Killing the durations
- * here therefore lands on the finished, legible opened envelope rather than
- * skipping it.
- *
- * The DELAYS have to go too, and that is not the same statement. The reveal
- * ladder staggers the flap, the liner and the bloom by up to 260ms; a rule that
- * zeroed only the durations would leave a reduced-motion user waiting out those
- * delays in front of a screen where nothing is happening — a slower reveal than
- * the animated one, made of nothing. Zeroing both lands every stage on its
- * finished state on the same frame.
- */
-@media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    animation-duration: 0.01ms !important;
-    animation-delay: 0ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
-    transition-delay: 0ms !important;
-  }
 }

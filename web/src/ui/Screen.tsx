@@ -1,16 +1,20 @@
 import type { ReactNode } from 'react'
 
 /**
- * The deep blue field every NimDrops screen sits on (design §4.4).
+ * LEGACY. The create flow's page frame.
  *
- * Its only job is the part a phone gets wrong: `env(safe-area-inset-*)` so the
- * paper never runs under a notch or a home indicator, and a 430px column so the
- * same markup is honest at 320px and at tablet width.
+ * A deep blue page with a 430px paper column on it, absorbing
+ * `env(safe-area-inset-*)` so the paper never runs under a notch or a home
+ * indicator. The claim surface no longer uses it: `DropView` composes `Field`,
+ * which owns the safe areas itself and is full bleed rather than a column.
+ *
+ * This goes with the create flow's redesign, together with `Envelope.tsx` and
+ * the legacy block at the foot of `index.css`.
  */
 export default function Screen({ children }: { children: ReactNode }) {
   return (
-    <div className="nd-field">
-      <div className="nd-column">{children}</div>
+    <div className="nd-page">
+      <div className="nd-page-column">{children}</div>
     </div>
   )
 }

@@ -48,7 +48,7 @@ const SIZES = [16, 20, 24, 32] as const
 interface SurfaceProps {
   Icon: IconComponent
   iconName: string
-  tone: 'paper' | 'ink'
+  tone: 'plate' | 'ink'
 }
 
 function Surface({ Icon, iconName, tone }: SurfaceProps) {
@@ -63,8 +63,8 @@ function Surface({ Icon, iconName, tone }: SurfaceProps) {
         gap: '0.5rem',
         borderRadius: '0.5rem',
         padding: '0.75rem',
-        color: onInk ? 'var(--color-paper)' : 'var(--color-ink)',
-        background: onInk ? 'var(--color-ink)' : 'var(--color-paper)',
+        color: onInk ? 'var(--color-plate)' : 'var(--color-ink)',
+        background: onInk ? 'var(--color-ink)' : 'var(--color-plate)',
       }}
     >
       {SIZES.map((size) => (
@@ -97,7 +97,7 @@ export function IconPreview() {
       style={{
         padding: '1.5rem',
         color: 'var(--color-ink)',
-        background: 'var(--color-paper)',
+        background: 'var(--color-plate)',
         fontFamily: 'var(--font-sans)',
       }}
     >
@@ -117,7 +117,7 @@ export function IconPreview() {
         {ICONS.map(([name, Icon]) => (
           <article key={name} style={{ display: 'grid', gap: '0.5rem' }}>
             <h2 style={{ margin: 0, fontSize: '0.8125rem', fontWeight: 650 }}>{name}</h2>
-            <Surface Icon={Icon} iconName={name} tone="paper" />
+            <Surface Icon={Icon} iconName={name} tone="plate" />
             <Surface Icon={Icon} iconName={name} tone="ink" />
           </article>
         ))}

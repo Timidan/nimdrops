@@ -4,6 +4,18 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      The latin subset carries every digit and every English word on the claim
+      screen, so preloading it means the amount is in Mulish on the first paint
+      rather than after a swap. Self-hosted: no external host, no CSP exception.
+    -->
+    <link
+      rel="preload"
+      href="/fonts/mulish-latin-var.woff2"
+      as="font"
+      type="font/woff2"
+      crossorigin
+    />
     <title>NimDrops</title>
   </head>
   <body>

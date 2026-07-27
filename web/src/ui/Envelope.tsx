@@ -1,27 +1,36 @@
-import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import type { CSSProperties, ReactNode } from 'react'
 
 /**
- * The signature surface (design §4.4): "a sealed paper envelope, passed around
- * one real group".
+ * LEGACY. The create flow's envelope, and nothing else.
  *
- * Three decisions are worth defending.
+ * The claim surface no longer has an envelope. Direction C replaced it with a
+ * field and one sheet of glass, and the reasoning is in
+ * `docs/design/direction-options.md`: the envelope's entire payload is
+ * concealment, and this product deliberately refuses to conceal — the amount is
+ * printed at full size before anyone touches anything. A signature object that
+ * means the opposite of what the product does had to go.
  *
- * **The envelope is the screen, not a card on it.** The paper column runs
- * edge to edge; the deep blue field shows only as the safe-area frame and as
- * the headroom above the flap. There is no white rounded box in the middle of
- * a coloured page, because a physical object handed to you does not sit inside
- * a container.
+ * What is left here is the *sponsor's* side. `Create.tsx` still renders a
+ * sealed envelope at the moment the sponsor seals one, and `Sheet.tsx` still
+ * presses the same wax onto the review panel. Both belong to the create flow,
+ * which is a separate task, so this file survives exactly as long as that flow
+ * does and goes with it.
  *
- * **Opened is a state, not a keyframe.** The flap angle, the split wax and the
- * lifted face are declarations under `[data-envelope-open='true']`, reached by
- * CSS transition. That is what makes `prefers-reduced-motion` correct for free:
- * with durations crushed to nothing the opened envelope simply *is*, fully
- * legible, instead of an animation being skipped and leaving nothing behind.
+ * Two things are gone with the claim surface:
  *
- * **The amount is never hidden.** Design §4.3's honesty rule: someone deciding
- * whether to open a wallet has to see what they are being offered. Concealing
- * the number until after the claim would reintroduce exactly the lottery
- * framing this product removed.
+ *   - `EnvelopeAmount`, which was the claim screen's printed denomination. Its
+ *     replacement is the opaque plate in `DropView`, whose behaviour (step the
+ *     type down by character count, never break a number across two lines,
+ *     never truncate) is carried over intact and re-tested there.
+ *   - `Envelope.test.tsx`, 346 lines. Every invariant in it that was about
+ *     BEHAVIOUR rather than about the envelope's own DOM has been carried over
+ *     to `ui/surface.test.ts` and `pages/DropView.test.tsx`; the ones that were
+ *     about the flap, the wax and the bloom specifically went with them.
+ *
+ * The one behaviour still worth stating here: opened is a STATE, not a
+ * keyframe. The flap angle, the split wax and the lifted face are plain
+ * declarations under `[data-envelope-open='true']`, so crushing every duration
+ * lands on the finished, legible opened envelope rather than skipping past it.
  */
 export interface EnvelopeProps {
   /** Reserved, confirming, paid: the seal is broken and the flap stands open. */
@@ -36,31 +45,7 @@ export interface EnvelopeProps {
   children: ReactNode
 }
 
-/**
- * How long the gold bloom is mounted: `nd-bloom`'s 260ms delay plus its 900ms
- * duration, with a frame to spare. Unmounting before the animation has spent
- * itself would cut the warmth off mid-fade.
- */
-const BLOOM_MS = 1200
-
 export default function Envelope({ open, tone = 'live', sealMark, children }: EnvelopeProps) {
-  /**
-   * A reveal is a seal coming apart, and it happens once. Landing straight on
-   * an opened envelope — a reload that resumes a claim already in flight — has
-   * no seal to break, so it gets the opened state with no theatre.
-   */
-  const mountedOpen = useRef(open)
-  const revealed = useRef(false)
-  const [bloom, setBloom] = useState(false)
-
-  useEffect(() => {
-    if (!open || revealed.current || mountedOpen.current) return
-    revealed.current = true
-    setBloom(true)
-    const timer = setTimeout(() => setBloom(false), BLOOM_MS)
-    return () => clearTimeout(timer)
-  }, [open])
-
   return (
     <div
       data-testid="envelope"
@@ -76,7 +61,6 @@ export default function Envelope({ open, tone = 'live', sealMark, children }: En
       </div>
       <div className="nd-face nd-face--sealed">
         <span className="nd-liner" aria-hidden="true" />
-        {bloom ? <span data-testid="seal-bloom" className="nd-bloom" aria-hidden="true" /> : null}
         {children}
       </div>
     </div>
@@ -99,44 +83,5 @@ export function Wax({ mark, size }: WaxProps) {
       <span className="nd-wax-half is-right" />
       {mark ? <span className="nd-wax-mark">{mark}</span> : null}
     </span>
-  )
-}
-
-export interface EnvelopeAmountProps {
-  /** Decimal NIM, exactly as the server said it. */
-  amount: string
-  /** Adds the one gold keyline in the product. Only ever true after `paid`. */
-  paid?: boolean
-}
-
-/**
- * The denomination printed on the face.
- *
- * The size steps down by character count rather than by media query, because
- * what overflows a 320px phone is `10000.00000`, not a narrow screen. Eleven
- * tabular characters at 34px are ~210px wide, which clears the 280px a 320px
- * screen leaves inside the gutters — with `nowrap` guaranteeing a number never
- * breaks across two lines.
- */
-export function EnvelopeAmount({ amount, paid }: EnvelopeAmountProps) {
-  const size =
-    amount.length <= 6
-      ? 'text-[3.5rem]'
-      : amount.length <= 9
-        ? 'text-[2.75rem]'
-        : 'text-[2.125rem]'
-
-  return (
-    <div className="mt-6 text-center">
-      <h1
-        data-testid="amount-hero"
-        aria-label={`${amount} NIM`}
-        className={`nd-amount text-ink ${size}`}
-      >
-        {amount}
-        <span className="ml-2 text-[0.34em] font-semibold tracking-[0.16em] text-ink/45">NIM</span>
-      </h1>
-      {paid ? <div data-testid="paid-keyline" className="nd-keyline" /> : null}
-    </div>
   )
 }
