@@ -112,30 +112,39 @@ export type CloseResult =
       error: Error
     }
 
-export interface CloseLiveDropOptions {
+/**
+ * Authorization, run INSIDE the close transaction with `custody_controls` and
+ * the drop row already locked and the drop already confirmed `live`.
+ *
+ * It is handed the locked row precisely so that the address it checks is the
+ * one this transaction will refund to — not a copy read earlier, not a value
+ * from a request body. Throwing aborts the whole close, including anything the
+ * hook itself wrote (a consumed challenge nonce), which is what lets the hook
+ * spend a single-use token without a failed close burning it.
+ */
+export type CloseAuthorize = (client: PoolClient, drop: ClosableDropRow) => Promise<void>
+
+/** The two fields every close needs, whatever its authority is. */
+interface CloseLiveDropCommon {
   dropId: string
   /** Written to `closing_reason`, and named in the alert and the log line. */
   reason: ClosingReason
   /** Names this caller in operator alerts. Unchanged for the sweeper. */
   stage: string
-  /**
-   * Refuse unless the drop's own deadline has already passed. True for the
-   * sweeper, whose whole authority to close IS the clock; false for the
-   * sponsor, whose authority is a signature.
-   */
-  requireExpired: boolean
-  /**
-   * Authorization, run INSIDE the close transaction with `custody_controls` and
-   * the drop row already locked and the drop already confirmed `live`.
-   *
-   * It is handed the locked row precisely so that the address it checks is the
-   * one this transaction will refund to — not a copy read earlier, not a value
-   * from a request body. Throwing aborts the whole close, including anything the
-   * hook itself wrote (a consumed challenge nonce), which is what lets the hook
-   * spend a single-use token without a failed close burning it.
-   */
-  authorize?: (client: PoolClient, drop: ClosableDropRow) => Promise<void>
 }
+
+/**
+ * The authority to close a live drop: the CLOCK or a HOOK, never neither.
+ *
+ * A union rather than a `requireExpired: boolean` beside an optional hook,
+ * because that pair could spell `{ requireExpired: false }` with nothing
+ * authorising it — a live drop closed and refunded on nobody's say-so.
+ */
+export type CloseAuthority =
+  | { requireExpired: true; authorize?: undefined }
+  | { requireExpired: false; authorize: CloseAuthorize }
+
+export type CloseLiveDropOptions = CloseLiveDropCommon & CloseAuthority
 
 /**
  * Close every `live` drop that is past its expiry and write its refund.
@@ -212,6 +221,17 @@ export async function closeLiveDrop(
   o: CloseLiveDropOptions,
 ): Promise<CloseResult> {
   const { dropId, reason, stage } = o
+
+  // {@link CloseAuthority} makes this unspellable in TypeScript; this catches a
+  // JavaScript caller or a cast. Before `BEGIN`, so nothing is locked or written.
+  if (!o.requireExpired && typeof o.authorize !== 'function') {
+    throw new Error(
+      `closeLiveDrop(${reason}) was asked to close a drop that need not be expired, with no ` +
+        'authorize hook. A close that is neither past its deadline nor authorised would refund ' +
+        'a live drop on nobody\'s authority.',
+    )
+  }
+
   try {
     await client.query('BEGIN')
 
@@ -259,8 +279,10 @@ export async function closeLiveDrop(
 
     // Authorization runs here and nowhere else: after both locks, after the
     // drop is known to be live, and before anything is written. It sees the
-    // same locked row this transaction will refund to.
-    if (o.authorize) await o.authorize(client, drop)
+    // same locked row this transaction will refund to. Branching on
+    // `requireExpired` rather than on the hook's presence is what makes the
+    // "not expired and not authorised" path unreachable.
+    if (!o.requireExpired) await o.authorize(client, drop)
 
     const { rows: counted } = await client.query<{ reserved: number }>(
       'SELECT count(*)::int AS reserved FROM claims WHERE drop_id = $1',

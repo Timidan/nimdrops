@@ -36,6 +36,11 @@
 --    commit to is a promise the deployment has not earned. It can be raised
 --    later against evidence; it cannot be lowered without stranding drops.
 --
+--    SUPERSEDED IN PART: 017 gives the funding wallet an early close, so the
+--    first of those three reasons no longer holds. The ceiling and the other
+--    two stand. 017 re-issues the persistent constraint comment below, for
+--    databases that already ran this file.
+--
 -- IMMUTABLE ONCE CHOSEN. The value is fixed when the draft is created and read
 -- back out of THIS COLUMN at activation — `activate()` computes
 -- `expires_at = now() + make_interval(hours => expiry_hours)` against the drop
@@ -58,19 +63,25 @@
 --     anything — so a drop mid-flight when this runs is unaffected. Open drafts
 --     get 24 and activate to the same instant they would have. In-flight
 --     transfers never read the column at all.
---  3. THE LOCK IS BOUNDED. Both statements take ACCESS EXCLUSIVE on `drops`,
---     which is brief but still queues behind any long transaction and blocks
---     everything behind IT while it waits. `lock_timeout` caps that wait: the
---     migration fails and rolls back cleanly rather than stalling the claim
---     path, and the runner reapplies it on the next start.
+--  3. THE LOCK IS BOUNDED IN BOTH DIRECTIONS. `lock_timeout` caps how long
+--     ACCESS EXCLUSIVE is WAITED for; it says nothing about how long it is
+--     HELD, and a validated `ADD CONSTRAINT ... CHECK` holds it for a full
+--     table scan. `drops` is unbounded — a cancelled draft is never deleted —
+--     so that scan can outlast the wait cap by any margin, with every read and
+--     every claim queued behind it. Hence `NOT VALID`, which is catalogue-only
+--     and still fully enforced against every INSERT and UPDATE; migration 018
+--     proves the pre-existing rows separately, under a lock that blocks nobody.
+--     `statement_timeout` bounds the work as well as the wait.
 --  4. IDEMPOTENT. `IF NOT EXISTS` on the column, and a catalogue check before
 --     the constraint, so a database that already has either converges instead
---     of erroring. The runner's `schema_migrations` bookkeeping already stops
---     a second ordinary run; this is for a hand-repaired database.
+--     of erroring. The check is on existence, not validity, so a database
+--     carrying the validated constraint from the first version of this file
+--     keeps it and 018 skips it.
 --
 -- Migration 015 is untouched. This builds on top of it.
 
 SET LOCAL lock_timeout = '3s';
+SET LOCAL statement_timeout = '15s';
 
 ALTER TABLE drops
   ADD COLUMN IF NOT EXISTS expiry_hours INT NOT NULL DEFAULT 24;
@@ -83,7 +94,7 @@ BEGIN
   ) THEN
     ALTER TABLE drops
       ADD CONSTRAINT drops_expiry_hours_range
-        CHECK (expiry_hours BETWEEN 1 AND 336);
+        CHECK (expiry_hours BETWEEN 1 AND 336) NOT VALID;
   END IF;
 END $$;
 
@@ -95,5 +106,6 @@ COMMENT ON COLUMN drops.expiry_hours IS
 
 COMMENT ON CONSTRAINT drops_expiry_hours_range ON drops IS
   'floor of 1 hour so a drop cannot expire before anyone could realistically open the link; '
-  'ceiling of 336 hours (14 days) because nothing can end a drop early, so this is the longest '
-  'the operator holds a sponsor''s NIM with no way out for either of them';
+  'ceiling of 336 hours (14 days) because this is the longest the operator holds a sponsor''s NIM '
+  'on the clock alone. Since migration 017 the funding wallet can close the drop early and take '
+  'the unclaimed remainder back, so the ceiling bounds the wait, not a trap';

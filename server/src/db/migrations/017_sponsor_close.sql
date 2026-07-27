@@ -27,11 +27,11 @@
 --     than the nearest of the two existing ones.
 --
 --     The old CHECK is dropped and a strictly WEAKER one added in its place, so
---     no existing row can fail it. PostgreSQL still scans the table to validate
---     the new constraint; `drops` is small by construction — one row per drop
---     ever created — and `lock_timeout` bounds the wait for the ACCESS EXCLUSIVE
---     lock, so the migration fails and rolls back cleanly rather than stalling
---     the claim path behind a long transaction.
+--     every existing row already satisfies it. Added `NOT VALID` all the same:
+--     a validated `ADD CONSTRAINT` holds ACCESS EXCLUSIVE for a full pass over
+--     `drops`, which is unbounded because a cancelled draft is never deleted,
+--     and `lock_timeout` bounds only the WAIT for that lock and not the hold.
+--     Migration 018 records the proof under a lock that blocks nobody.
 --
 --  2. `wallet_challenges.action` records WHICH action a challenge authorizes.
 --
@@ -64,12 +64,19 @@
 --  * NO IN-FLIGHT DROP CHANGES MEANING. `closing_reason` is only ever written at
 --    the moment a drop closes; widening the set of legal values changes nothing
 --    already written, and no reader treats an unknown reason as fatal.
+--  * NO STATEMENT SCANS A TABLE. Both constraints are `NOT VALID` and the new
+--    column stores its default in the catalogue, so every statement here costs
+--    the same whatever the history. `lock_timeout` bounds the wait for ACCESS
+--    EXCLUSIVE, `statement_timeout` the work done while holding it.
 --  * IDEMPOTENT. Every statement is guarded by a catalogue check, so a
 --    hand-repaired database converges instead of erroring.
 --
--- Migrations 015 and 016 are untouched. This builds on top of both.
+-- Migration 015 is untouched. 016 is untouched as SCHEMA; its persistent
+-- comment on `drops_expiry_hours_range` is re-issued at the bottom of this file
+-- because this migration is what made part of it false.
 
 SET LOCAL lock_timeout = '3s';
+SET LOCAL statement_timeout = '15s';
 
 -- 1. `closed_by_sponsor` joins `expired` and `exhausted`.
 
@@ -87,7 +94,7 @@ BEGIN
       CHECK (
         closing_reason IS NULL
         OR closing_reason IN ('expired', 'exhausted', 'closed_by_sponsor')
-      );
+      ) NOT VALID;
 END $$;
 
 COMMENT ON CONSTRAINT drops_closing_reason_allowed ON drops IS
@@ -107,9 +114,11 @@ BEGIN
     WHERE conname = 'wallet_challenges_action_allowed'
       AND conrelid = 'wallet_challenges'::regclass
   ) THEN
+    -- NOT VALID: `wallet_challenges` has no GC, and every pre-existing row
+    -- reads the 'claim' default the statement above gave it.
     ALTER TABLE wallet_challenges
       ADD CONSTRAINT wallet_challenges_action_allowed
-        CHECK (action IN ('claim', 'close'));
+        CHECK (action IN ('claim', 'close')) NOT VALID;
   END IF;
 END $$;
 
@@ -118,3 +127,14 @@ COMMENT ON COLUMN wallet_challenges.action IS
   'that the wallet actually signed. The consuming UPDATE filters on it, so a claim challenge can '
   'never be spent as a close and a close challenge can never be spent as a claim — enforced here as '
   'well as in the signed bytes, because this is the authorization on a refund path';
+
+-- 3. Correct the comment this migration falsified. 016 wrote onto the database
+--    that the ceiling exists "because nothing can end a drop early", and will
+--    never run again on a database that has applied it, so the correction has
+--    to be issued from here.
+
+COMMENT ON CONSTRAINT drops_expiry_hours_range ON drops IS
+  'floor of 1 hour so a drop cannot expire before anyone could realistically open the link; '
+  'ceiling of 336 hours (14 days) because this is the longest the operator holds a sponsor''s NIM '
+  'on the clock alone. Since this migration the funding wallet can close the drop early and take '
+  'the unclaimed remainder back, so the ceiling bounds the wait, not a trap';

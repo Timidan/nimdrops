@@ -31,6 +31,12 @@ import { GetNimiqPay } from '../ui/OpenInApp'
  * else will find the drop closed; and that none of it can be reversed. Only then
  * a button, and the button names the amount rather than saying "Confirm".
  *
+ * **What the number on the button is worth.** The signed challenge binds the
+ * action and the drop, never an amount. So the screen re-reads the drop
+ * immediately before opening the wallet, refuses to proceed on a figure that
+ * has moved, and says out loud that a claim landing during the approval is
+ * still paid.
+ *
  * **What it never says.** That the refund has arrived. Closing commits the
  * intent; the transfer is the worker's, and this screen says "on its way back"
  * for exactly as long as that is the true sentence.
@@ -41,7 +47,7 @@ import { GetNimiqPay } from '../ui/OpenInApp'
  * secret. Anyone may open it; only one wallet can finish it.
  */
 
-type Stage = 'loading' | 'unreadable' | 'confirm' | 'signing' | 'closing' | 'closed'
+type Stage = 'loading' | 'unreadable' | 'confirm' | 'checking' | 'signing' | 'closing' | 'closed'
 
 export interface CloseDropProps {
   /** Test seam; production uses the real provider discovery. */
@@ -102,6 +108,32 @@ export default function CloseDrop({ discoverBridge = resolveBridge }: CloseDropP
       return
     }
 
+    // The button names a figure from a read that may be minutes old, and the
+    // signature binds no amount. Re-read, and send a moved figure back to a
+    // redrawn screen rather than into the wallet.
+    setStage('checking')
+    const promised = drop ? unclaimedNim(drop) : null
+    let latest: DropPublic
+    try {
+      latest = await getDrop(publicId)
+    } catch (err) {
+      setNotice(closeFailureNotice(err))
+      setStage('confirm')
+      return
+    }
+    setDrop(latest)
+    if (latest.state !== 'live') {
+      setNotice(alreadyOverNotice(latest))
+      setStage('unreadable')
+      return
+    }
+    const current = unclaimedNim(latest)
+    if (current !== promised) {
+      setNotice(figureMovedNotice(promised, current))
+      setStage('confirm')
+      return
+    }
+
     setStage('signing')
     let challenge
     try {
@@ -154,7 +186,7 @@ export default function CloseDrop({ discoverBridge = resolveBridge }: CloseDropP
       setNotice(closeFailureNotice(err, true))
       setStage('confirm')
     }
-  }, [discoverBridge, publicId])
+  }, [discoverBridge, drop, publicId])
 
   const unclaimed = drop ? unclaimedNim(drop) : null
 
@@ -169,7 +201,7 @@ export default function CloseDrop({ discoverBridge = resolveBridge }: CloseDropP
           <Confirm
             drop={drop}
             unclaimed={unclaimed}
-            busy={stage === 'signing' || stage === 'closing'}
+            busy={stage === 'checking' || stage === 'signing' || stage === 'closing'}
             stage={stage}
             notice={notice}
             onClose={() => void close()}
@@ -179,6 +211,17 @@ export default function CloseDrop({ discoverBridge = resolveBridge }: CloseDropP
       </div>
     </Field>
   )
+}
+
+/** Names both numbers: "something changed" leaves a sponsor guessing which way. */
+function figureMovedNotice(promised: string | null, current: string | null): string {
+  if (current === null) {
+    return 'Every share has just been claimed. There is nothing left to send back, but you can still close the drop.'
+  }
+  if (promised === null) {
+    return `There is ${current} NIM unclaimed now. Check the amount and tap again to close.`
+  }
+  return `Someone claimed while this page was open, so ${current} NIM is unclaimed now, not ${promised}. Tap again to close and send that back.`
 }
 
 /** What to say about a drop that is already over by the time this page loads. */
@@ -269,19 +312,28 @@ function Confirm({
       ) : null}
 
       <button type="button" className="nd-action mt-5" onClick={onClose} disabled={busy || !drop}>
-        {stage === 'signing'
-          ? 'Waiting for your wallet…'
-          : stage === 'closing'
-            ? 'Closing…'
-            : unclaimed
-              ? `Close and send back ${unclaimed} NIM`
-              : 'Close this drop'}
+        {stage === 'checking'
+          ? 'Checking what is left…'
+          : stage === 'signing'
+            ? 'Waiting for your wallet…'
+            : stage === 'closing'
+              ? 'Closing…'
+              : unclaimed
+                ? `Close and send back ${unclaimed} NIM`
+                : 'Close this drop'}
       </button>
 
       <p className="nd-note">
         You will be asked to approve with the wallet that funded this drop. No other wallet can
         close it.
       </p>
+
+      {unclaimed ? (
+        <p className="nd-note mt-3">
+          The amount is checked again before your wallet opens. Anyone who claims after that is
+          still paid, so what comes back can be less than {unclaimed} NIM.
+        </p>
+      ) : null}
 
       <p className="nd-note mt-3">
         <Link to={`/drop/${publicId}`}>Leave it running</Link>

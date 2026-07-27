@@ -20,6 +20,30 @@ export function statusToken(claimId: string): string {
   return createHmac('sha256', requireSecret()).update(claimId, 'utf8').digest('base64url')
 }
 
+/** 22 base64url characters = 132 bits, the same width as a drop's public id. */
+const MEMO_TAG_CHARS = 22
+
+/**
+ * The on-chain half of an outgoing transfer's memo. Must be unique per
+ * transfer: a Nimiq basic transaction has no account nonce, so two payouts of
+ * the same amount to the same address in the same block window collide into one
+ * transaction unless their data differs.
+ *
+ * KEYED, not hashed, and that is the whole point. The memo sits on the chain
+ * beside the recipient and the amount, while the transfer id travels in logs
+ * and alert payloads — so a tag anyone holding the id could compute (the id
+ * itself, or `sha256` of it) is a join key from an internal id to a claimant's
+ * address. Only the operator, who has `STATUS_TOKEN_SECRET`, can go from one to
+ * the other. Domain-separated so it can never collide with {@link statusToken},
+ * which HMACs a bare claim id under the same key.
+ */
+export function transferMemoTag(transferId: string): string {
+  return createHmac('sha256', requireSecret())
+    .update(`nimdrop-memo:v1:${transferId}`, 'utf8')
+    .digest('base64url')
+    .slice(0, MEMO_TAG_CHARS)
+}
+
 /** What the DB stores for a bearer token: sha256 hex. Never reversible to the token. */
 export function hashToken(token: string): string {
   return createHash('sha256').update(token, 'utf8').digest('hex')

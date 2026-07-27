@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
+import { readFile, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import pg, { type Pool } from 'pg'
@@ -422,6 +422,208 @@ describe.skipIf(!hasDb)('schema invariants (real Postgres)', () => {
         writer.release()
         await scoped.end()
         await dropSchema()
+      }
+    })
+  })
+
+  describe('migrations 016 and 017 cannot stall the claim path', () => {
+    const CONSTRAINTS: ReadonlyArray<[string, string]> = [
+      ['drops', 'drops_expiry_hours_range'],
+      ['drops', 'drops_closing_reason_allowed'],
+      ['wallet_challenges', 'wallet_challenges_action_allowed'],
+    ]
+    const MIGRATIONS = fileURLToPath(new URL('../src/db/migrations/', import.meta.url))
+
+    async function sql(name: string): Promise<string> {
+      return readFile(join(MIGRATIONS, name), 'utf8')
+    }
+
+    it('bounds the wait AND the work, in both files', async () => {
+      for (const name of ['016_sponsor_chosen_expiry.sql', '017_sponsor_close.sql']) {
+        const text = await sql(name)
+        expect(text, `${name} must bound how long it waits for the lock`).toMatch(
+          /SET LOCAL lock_timeout/,
+        )
+        expect(text, `${name} must bound the work it does while holding it`).toMatch(
+          /SET LOCAL statement_timeout/,
+        )
+        // A validated ADD CONSTRAINT scans the table under ACCESS EXCLUSIVE.
+        const body = text
+          .split('\n')
+          .filter((line) => !line.trimStart().startsWith('--'))
+          .join('\n')
+        const added = body.match(/\bADD CONSTRAINT\b/g)?.length ?? 0
+        const deferred = body.match(/\bNOT VALID\b/g)?.length ?? 0
+        expect(added, `${name} should still add constraints`).toBeGreaterThan(0)
+        expect(deferred, `${name} must add every constraint NOT VALID`).toBe(added)
+      }
+    })
+
+    it('adds every constraint NOT VALID, and enforces all three anyway', async () => {
+      // `beforeAll` already ran 018 on this schema, so validity is asserted
+      // below against one where only 016 and 017 have. Here: still enforced.
+      for (const [table, conname] of CONSTRAINTS) {
+        const { rows } = await pool.query(
+          `SELECT 1 FROM pg_constraint WHERE conname = $1 AND conrelid = $2::regclass`,
+          [conname, table],
+        )
+        expect(rows, `${conname} must exist`).toHaveLength(1)
+      }
+
+      const d = await insertDrop(pool, ok())
+      await expect(
+        pool.query('UPDATE drops SET expiry_hours = 0 WHERE id = $1', [d.id]),
+      ).rejects.toThrow(/drops_expiry_hours_range/)
+      await expect(
+        pool.query('UPDATE drops SET expiry_hours = 337 WHERE id = $1', [d.id]),
+      ).rejects.toThrow(/drops_expiry_hours_range/)
+      await expect(
+        pool.query(`UPDATE drops SET closing_reason = 'because' WHERE id = $1`, [d.id]),
+      ).rejects.toThrow(/drops_closing_reason_allowed/)
+      await expect(
+        pool.query(
+          `INSERT INTO wallet_challenges (drop_id, action, nonce_hash, canonical_message, expires_at)
+           VALUES ($1, 'refund', $2, '{}', now() + interval '5 minutes')`,
+          [d.id, randomUUID()],
+        ),
+      ).rejects.toThrow(/wallet_challenges_action_allowed/)
+      await pool.query('DELETE FROM drops WHERE id = $1', [d.id])
+    })
+
+    /** A private schema at 001..015, so 016-018 can be run one at a time. */
+    const CUTOVER_SCHEMA = 'schema_cutover_test'
+
+    async function dropCutoverSchema(): Promise<void> {
+      const admin = new pg.Pool({ connectionString: process.env.DATABASE_URL })
+      await admin.query(`DROP SCHEMA IF EXISTS ${CUTOVER_SCHEMA} CASCADE`)
+      await admin.end()
+    }
+
+    async function migratedTo015(): Promise<pg.Pool> {
+      await dropCutoverSchema()
+      const admin = new pg.Pool({ connectionString: process.env.DATABASE_URL })
+      await admin.query(`CREATE SCHEMA ${CUTOVER_SCHEMA}`)
+      await admin.end()
+
+      const scoped = new pg.Pool({
+        connectionString: process.env.DATABASE_URL,
+        options: `-c search_path=${CUTOVER_SCHEMA},public`,
+      })
+      const names = (await readdir(MIGRATIONS)).filter((n) => n.endsWith('.sql')).sort()
+      for (const name of names) {
+        if (name >= '016') break
+        await scoped.query(await sql(name))
+      }
+      return scoped
+    }
+
+    async function validity(db: pg.Pool): Promise<Record<string, boolean>> {
+      const { rows } = await db.query<{ conname: string; convalidated: boolean }>(
+        `SELECT conname, convalidated FROM pg_constraint
+         WHERE conname = ANY($1) AND connamespace = $2::regnamespace`,
+        [CONSTRAINTS.map(([, c]) => c), CUTOVER_SCHEMA],
+      )
+      return Object.fromEntries(rows.map((r) => [r.conname, r.convalidated]))
+    }
+
+    it('leaves the constraints unvalidated until 018 says otherwise', async () => {
+      const scoped = await migratedTo015()
+      try {
+        await scoped.query(await sql('016_sponsor_chosen_expiry.sql'))
+        await scoped.query(await sql('017_sponsor_close.sql'))
+
+        // `false` here means no table was scanned under ACCESS EXCLUSIVE.
+        expect(await validity(scoped)).toEqual({
+          drops_expiry_hours_range: false,
+          drops_closing_reason_allowed: false,
+          wallet_challenges_action_allowed: false,
+        })
+
+        await scoped.query(await sql('018_validate_deferred_constraints.sql'))
+        expect(await validity(scoped)).toEqual({
+          drops_expiry_hours_range: true,
+          drops_closing_reason_allowed: true,
+          wallet_challenges_action_allowed: true,
+        })
+
+        // Re-runnable against an already-valid database.
+        await expect(
+          scoped.query(await sql('018_validate_deferred_constraints.sql')),
+        ).resolves.toBeDefined()
+      } finally {
+        await scoped.end()
+        await dropCutoverSchema()
+      }
+    })
+
+    it('aborts within its lock_timeout instead of queueing behind a held lock', async () => {
+      const scoped = await migratedTo015()
+      const blocker = await scoped.connect()
+      try {
+        await blocker.query('BEGIN')
+        await blocker.query('LOCK TABLE drops IN ACCESS EXCLUSIVE MODE')
+
+        const startedAt = Date.now()
+        await expect(scoped.query(await sql('016_sponsor_chosen_expiry.sql'))).rejects.toThrow(
+          /lock timeout|canceling statement due to lock timeout/i,
+        )
+        const waited = Date.now() - startedAt
+        // 3 s bound, with headroom for a loaded box. The blocker never yields
+        // on its own, so waiting for it would never return at all.
+        expect(waited, 'the migration must give up on its own bound').toBeLessThan(10_000)
+
+        await blocker.query('ROLLBACK')
+
+        // Nothing left behind: the runner's next start applies it cleanly.
+        await expect(
+          scoped.query(await sql('016_sponsor_chosen_expiry.sql')),
+        ).resolves.toBeDefined()
+      } finally {
+        blocker.release()
+        await scoped.end()
+        await dropCutoverSchema()
+      }
+    })
+
+    it('validates under a lock that a reader and a writer run straight through', async () => {
+      const scoped = await migratedTo015()
+      const validator = await scoped.connect()
+      const claimant = await scoped.connect()
+      try {
+        await scoped.query(await sql('016_sponsor_chosen_expiry.sql'))
+        await scoped.query(await sql('017_sponsor_close.sql'))
+
+        // A validation in progress: SHARE UPDATE EXCLUSIVE, held open.
+        await validator.query('BEGIN')
+        await validator.query('ALTER TABLE drops VALIDATE CONSTRAINT drops_expiry_hours_range')
+
+        // `statement_timeout` turns "this blocks" into a readable failure.
+        await claimant.query(`SET statement_timeout = '2s'`)
+        await expect(claimant.query('SELECT count(*) FROM drops')).resolves.toBeDefined()
+        await expect(
+          claimant.query(
+            `INSERT INTO drops (public_id, sponsor_label, claim_count, amount_each_luna,
+               expected_funding_luna, state)
+             VALUES ($1, 'Sponsor', 5, 100, 500, 'live')`,
+            [randomUUID()],
+          ),
+        ).resolves.toBeDefined()
+        await validator.query('ROLLBACK')
+
+        // The control: the shape 016 and 017 used to have blocks the same read.
+        await validator.query('BEGIN')
+        await validator.query(
+          `ALTER TABLE drops ADD CONSTRAINT drops_scan_control CHECK (claim_count >= 0)`,
+        )
+        await expect(claimant.query('SELECT count(*) FROM drops')).rejects.toThrow(
+          /statement timeout/i,
+        )
+        await validator.query('ROLLBACK')
+      } finally {
+        validator.release()
+        claimant.release()
+        await scoped.end()
+        await dropCutoverSchema()
       }
     })
   })

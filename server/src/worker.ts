@@ -10,6 +10,7 @@ import { gcDrafts, settleTerminal, sweepExpiry } from './services/expiry'
 import { assertFloatAttestationIntact, ensureChainBinding, reconcile } from './services/solvency'
 import {
   acquireWorkerLock,
+  assertMemoDerivable,
   reconcileOnStartup,
   releaseWorkerLock,
   runWorkerTick,
@@ -96,6 +97,11 @@ export async function runWorker(chain: ChainClient, alerts: Alerts): Promise<voi
     // spend. The database is the single authority both are checked against.
     const { network, custodyAddress } = await ensureChainBinding(pool, chain)
     log('chain_binding_verified', { network, custodyAddress })
+
+    // Cheap, local, and before any money moves: a worker that cannot derive a
+    // transfer memo cannot build a payout, and the failure would otherwise
+    // appear only as a repeating tick warning with no payments behind it.
+    assertMemoDerivable()
 
     // And the float attestation has to belong to that chain. A database carried
     // between networks would keep counting the other chain's deposits as

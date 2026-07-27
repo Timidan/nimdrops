@@ -32,6 +32,8 @@ NimDrops is a custodial NIM campaign-link app. It handles money, so it keeps rec
 
 Funding, payouts and refunds are ordinary Nimiq transactions. Anyone can look up the custody address on a block explorer and see who funded a drop, which addresses were paid and how much. The funding transaction also carries the drop's public ID in its memo (`ND1:<publicId>`), which links that transaction to that campaign for anyone who has the link.
 
+Outgoing payouts and refunds carry a memo too — `NimDrop` followed by a 22-character tag. The tag has to be different for every transfer, because a Nimiq transaction has no account nonce: two claimants paid the same amount, to the same address, in the same block window would otherwise produce one transaction instead of two. The tag is **not** the internal transfer ID. It is an HMAC of that ID under this deployment's secret, so it cannot be computed by anyone who merely knows the ID — from a log line or an alert payload — and it cannot be reversed back to one. Only the operator, who holds the secret, can go from a transfer ID to its transaction. The tag does not name the drop, the claimant or the campaign.
+
 This is a property of the blockchain, not of NimDrops. Deleting a record here would not remove anything from the chain, and nothing on the chain can be edited or withdrawn.
 
 ## Retention
@@ -50,9 +52,13 @@ If a retention or deletion policy is added, this file changes first.
 
 Logs are for diagnosis, so they are written to be dull. Application alerts and error logs carry internal database IDs, route names, error identities and on-chain transaction hashes — identifiers that are either meaningless outside the database or already public on the chain.
 
-They deliberately do not carry: private keys, signatures, public keys, raw serialized transactions, status bearer tokens, request bodies, request headers, or full claimant addresses. The operator's incident report (`recover.ts status`) omits recipient addresses for the same reason: the transfer IDs are what an operator needs, and the two commands that act on a transfer read the address themselves from the immutable row.
+Internal IDs are meaningless outside the database, and that sentence is load-bearing enough to be worth defending. For a while it was not quite true: payout memos carried the raw transfer ID on-chain, so anyone holding one from a log line or an alert payload could search the custody address for that memo and read off the claimant's address and amount. The memo now carries a keyed tag instead (see *On-chain data is public and permanent* above), which puts the ID back to being a handle for one database and nothing else.
 
-Honest caveat: this is enforced at the call sites, by choosing what to pass, rather than by a serializer that strips these fields structurally. A structural redactor is a planned hardening item and is not written yet. The reverse proxy also writes ordinary HTTP access logs, which include client IP addresses.
+Logs deliberately do not carry: private keys, signatures, public keys, raw serialized transactions, status bearer tokens, request bodies, request headers, or full claimant addresses. The operator's incident report (`recover.ts status`) omits recipient addresses for the same reason: the transfer IDs are what an operator needs, and the two commands that act on a transfer read the address themselves from the immutable row.
+
+This is enforced structurally rather than by call-site discipline. Every log line and every alert payload goes through one redactor (`server/src/http/redact.ts`), which masks by field name — anything named like a signature, a key, a raw transaction or a bearer token — and by value, so a wallet address or a long hex run is masked wherever it turns up, including inside a database driver's error text. Wallet addresses keep a nine-character prefix so an operator can tell two lines apart without learning whose wallet it is. Transaction hashes are the one deliberate exemption, and only when the field names itself one: they are already public and they are how a log line is tied to money on the chain.
+
+The reverse proxy separately writes ordinary HTTP access logs, which include client IP addresses.
 
 Client IP addresses are used in memory for rate limiting. The API reads no forwarding header directly: it buckets by the socket peer, unless the request carries an address nominated by our own reverse proxy and authenticated with a shared secret, which is how the real client is recovered when a CDN sits in front. Anything a client sends itself — `X-Forwarded-For`, `X-Real-IP`, `CF-Connecting-IP` — is ignored, and every misconfiguration collapses everyone into one shared bucket rather than letting anyone choose their own. Those buckets live in the API process's memory and are never written to the database. The reverse proxy separately writes ordinary HTTP access logs, which do include client IP addresses.
 

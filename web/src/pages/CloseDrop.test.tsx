@@ -257,8 +257,10 @@ describe('CloseDrop — closing', () => {
         return {
           ok: true,
           status: 200,
+          // Reads 1 and 2 are the mount and the check before signing; the drop
+          // only shows as closing on the read after the ambiguous reply.
           json: async () =>
-            dropReads === 1
+            dropReads <= 2
               ? dropBody()
               : dropBody({ state: 'closing', closingReason: 'closed_by_sponsor' }),
         }
@@ -272,6 +274,102 @@ describe('CloseDrop — closing', () => {
     await waitFor(() => expect(screen.getByTestId('close-unavailable')).toBeTruthy())
     expect(screen.getByText(/already closing/i)).toBeTruthy()
     expect(screen.queryByText(/nothing changed/i)).toBeNull()
-    expect(dropReads).toBe(2)
+    // Mount, the re-read before signing, and the one after the ambiguous reply.
+    expect(dropReads).toBe(3)
+  })
+})
+
+/**
+ * The signed challenge binds an action and a drop, never an amount, so a
+ * sponsor could approve "send back 6 NIM" against a page loaded minutes ago and
+ * get 2 NIM once three more shares were taken. The accounting was always right;
+ * the sentence they approved was not.
+ */
+describe('CloseDrop — the figure on the button', () => {
+  function scriptedDropReads(bodies: Array<Record<string, unknown>>) {
+    let reads = 0
+    const challengeSeen = { count: 0 }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: unknown) => {
+        const url = String(input)
+        if (url.endsWith('/close/challenge')) {
+          challengeSeen.count += 1
+          return { ok: true, status: 200, json: async () => CHALLENGE }
+        }
+        if (url.endsWith('/close')) {
+          return {
+            ok: true,
+            status: 202,
+            json: async () => ({
+              claimedShares: 2,
+              unclaimedShares: 3,
+              refund: '6',
+              refundLuna: '600000',
+            }),
+          }
+        }
+        const body = bodies[Math.min(reads, bodies.length - 1)]
+        reads += 1
+        return { ok: true, status: 200, json: async () => body }
+      }),
+    )
+    return challengeSeen
+  }
+
+  it('re-reads before the wallet opens and never signs a figure that moved', async () => {
+    const challenge = scriptedDropReads([dropBody(), dropBody({ remaining: 1 })])
+    mount()
+
+    const button = await screen.findByRole('button', { name: /send back 6 NIM/i })
+    button.click()
+
+    await waitFor(() => expect(screen.getByTestId('close-notice')).toBeTruthy())
+    expect(screen.getByTestId('close-notice').textContent).toMatch(/2 NIM is unclaimed now, not 6/i)
+    // The wallet was never opened on the stale figure.
+    expect(challenge.count).toBe(0)
+    // …and the button now names the number the sponsor was just shown.
+    expect(screen.getByRole('button', { name: /send back 2 NIM/i })).toBeTruthy()
+  })
+
+  it('goes through on the second tap, against the figure now on screen', async () => {
+    const challenge = scriptedDropReads([dropBody(), dropBody({ remaining: 1 })])
+    mount()
+
+    ;(await screen.findByRole('button', { name: /send back 6 NIM/i })).click()
+    const retry = await screen.findByRole('button', { name: /send back 2 NIM/i })
+    retry.click()
+
+    await waitFor(() => expect(screen.getByTestId('close-done')).toBeTruthy())
+    expect(challenge.count).toBe(1)
+  })
+
+  it('opens the wallet without a second tap when nothing moved', async () => {
+    const challenge = scriptedDropReads([dropBody()])
+    mount()
+
+    ;(await screen.findByRole('button', { name: /send back 6 NIM/i })).click()
+
+    await waitFor(() => expect(screen.getByTestId('close-done')).toBeTruthy())
+    expect(challenge.count).toBe(1)
+  })
+
+  it('says the amount can still fall, so the button promises nothing fixed', async () => {
+    installFetch({ drop: { status: 200, body: dropBody() } })
+    mount()
+
+    await screen.findByRole('button', { name: /send back 6 NIM/i })
+    expect(screen.getByText(/can be less than 6 NIM/i)).toBeTruthy()
+  })
+
+  it('stops offering a close when the drop ended during the re-read', async () => {
+    const challenge = scriptedDropReads([dropBody(), dropBody({ state: 'refunded' })])
+    mount()
+
+    ;(await screen.findByRole('button', { name: /send back 6 NIM/i })).click()
+
+    await waitFor(() => expect(screen.getByTestId('close-unavailable')).toBeTruthy())
+    expect(screen.getByText(/already closed/i)).toBeTruthy()
+    expect(challenge.count).toBe(0)
   })
 })

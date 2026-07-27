@@ -4,6 +4,7 @@ import { MEMO_MAX_BYTES, type ChainClient } from '../chain/types'
 import { errorMessage, validityWindowBlocks } from '../config'
 import type { Queryable } from '../db/pool'
 import { logInfo, logWarn } from '../http/redact'
+import { transferMemoTag } from '../ids'
 import type { AlertKind, Alerts } from './alerts'
 import {
   type Controls,
@@ -61,11 +62,20 @@ import {
 export const WORKER_LOCK_ID = 42
 
 export function transferMemo(transferId: string): string {
-  const memo = `NimDrop ${transferId}`
+  const memo = `NimDrop ${transferMemoTag(transferId)}`
   if (Buffer.byteLength(memo, 'utf8') > MEMO_MAX_BYTES) {
     throw new Error(`transfer memo exceeds ${MEMO_MAX_BYTES} UTF-8 bytes`)
   }
   return memo
+}
+
+/**
+ * Refuse to start a worker that could not write a memo. Without this a missing
+ * `STATUS_TOKEN_SECRET` surfaces only as a `tick_failed` warning every two
+ * seconds and no payments — a stalled money engine that reads as a quiet one.
+ */
+export function assertMemoDerivable(): void {
+  transferMemo('00000000-0000-0000-0000-000000000000')
 }
 
 /**
@@ -90,6 +100,21 @@ export interface WindowOptions {
    * than waiting ten seconds for the real bound.
    */
   chainTimeoutMs?: number
+}
+
+/** Options for resolving one open attempt, on top of {@link WindowOptions}. */
+export interface ProgressOptions extends WindowOptions {
+  /**
+   * Ignore the persisted rebroadcast cooldown.
+   *
+   * The cooldown holds back a second send while the first is still in flight.
+   * A restarted process holds no in-flight anything — whatever the previous one
+   * abandoned died with it — so the cooldown it left behind is stale, and
+   * honouring it would delay recovery for up to
+   * {@link REBROADCAST_COOLDOWN_MS} for no gain. Set by
+   * {@link reconcileOnStartup} and by nothing else.
+   */
+  afterRestart?: boolean
 }
 
 /** Options for one worker tick, on top of {@link WindowOptions}. */
@@ -127,9 +152,16 @@ export const ABSENCE_MIN_OBSERVATIONS = 2
 export const ABSENCE_MIN_SPAN_MS = 5 * 60_000
 
 /**
- * Do not rebroadcast the same bytes more often than this after an acknowledged
- * broadcast. The chain needs 5-40 s to include a transaction and cannot answer
- * `getTransaction` for it meanwhile; hammering it would add nothing.
+ * Do not rebroadcast the same bytes more often than this after a broadcast has
+ * been ATTEMPTED — acknowledged or timed out. A timed-out broadcast is still
+ * running: `withChainDeadline` abandons the call but nothing can cancel it, so
+ * without this the next tick starts another one two seconds later and in-flight
+ * sends accumulate for as long as the node stays silent.
+ *
+ * Bounded on both sides: longer than `CHAIN_CALL_TIMEOUT_MS`, so successive
+ * sends cannot stack, and negligible against the attempt's validity window
+ * (7200 blocks ≈ 2 h), so a genuinely lost first broadcast still has hundreds of
+ * chances left.
  */
 export const REBROADCAST_COOLDOWN_MS = 30_000
 
@@ -184,9 +216,13 @@ export const PROVEN_DEAD_RESCAN_GRACE_BLOCKS = 7_200
  * tick.
  *
  * `ATTEMPT_SCAN_BUDGET_MS` is 10 s = five tick intervals, and is checked before
- * each attempt rather than interrupting one, so a tick is bounded by the budget
- * plus at most one chain deadline (`CHAIN_CALL_TIMEOUT_MS`) — about twenty
- * seconds in the worst case, against unbounded before.
+ * each attempt rather than interrupting one, so a tick is bounded by a
+ * composition of chain deadlines rather than by the budget alone: head lookup
+ * (10 s) + budget (10 s) + the one attempt that started just inside it, which
+ * may make BOTH a `getTransaction` and a rebroadcast (10 s + 10 s) +
+ * `signNextQueued`'s head and broadcast (10 s + 10 s) — about sixty seconds in
+ * the worst case, against unbounded before. `worker.ts` runs ticks strictly one
+ * after another, so a long tick delays the next one and overlaps nothing.
  *
  * `ATTEMPT_SCAN_LIMIT` is 250. Steady state is far below it: finality is 64
  * blocks (~64 s) and the worker signs roughly one payout every two ticks, so
@@ -683,10 +719,23 @@ export async function broadcastStored(
       attempt.attemptId,
       errorMessage(err),
     ])
+    // The attempt stays `signed` and reconciliation still resolves it by hash;
+    // this holds back only the next identical send.
+    await applyBroadcastCooldown(pool, attempt)
     return 'unknown'
   }
   await markBroadcast(pool, attempt)
   return 'acknowledged'
+}
+
+/** The only writer of `next_attempt_at` on the broadcast path, so both callers move together. */
+async function applyBroadcastCooldown(db: Queryable, attempt: StoredAttempt): Promise<void> {
+  await db.query(
+    `UPDATE outgoing_transfers
+     SET next_attempt_at = now() + make_interval(secs => $2::float8 / 1000)
+     WHERE id = $1 AND state <> 'confirmed'`,
+    [attempt.transferId, REBROADCAST_COOLDOWN_MS],
+  )
 }
 
 /**
@@ -704,14 +753,7 @@ async function applyBroadcastMark(db: Queryable, attempt: StoredAttempt): Promis
      WHERE id = $1 AND state = 'signed'`,
     [attempt.attemptId],
   )
-  // Hold off the next rebroadcast: the chain needs time to include it and is
-  // mempool-blind until it does.
-  await db.query(
-    `UPDATE outgoing_transfers
-     SET next_attempt_at = now() + make_interval(secs => $2::float8 / 1000)
-     WHERE id = $1 AND state <> 'confirmed'`,
-    [attempt.transferId, REBROADCAST_COOLDOWN_MS],
-  )
+  await applyBroadcastCooldown(db, attempt)
   if (attempt.claimId) {
     // `manual_review` is in the list on purpose: once an operator's recovery
     // gets a payment broadcast, the claimant should see `confirming` again
@@ -843,7 +885,7 @@ export async function progressAttempt(
   alerts: Alerts,
   attempt: OpenAttempt,
   headHeight?: number,
-  opts?: WindowOptions,
+  opts?: ProgressOptions,
 ): Promise<Progress> {
   const head = headHeight ?? (await chainCall('headHeight', opts, () => chain.headHeight()))
 
@@ -892,7 +934,7 @@ async function progressLocked(
   chain: ChainClient,
   attempt: OpenAttempt,
   head: number,
-  opts?: WindowOptions,
+  opts?: ProgressOptions,
 ): Promise<AttemptOutcome> {
   const locked = await lockAttemptRow(client, attempt.attemptId)
   // The row cannot vanish (nothing deletes attempts), but if it ever did, doing
@@ -1049,7 +1091,11 @@ async function progressLocked(
   // Still includable and we cannot see it: rebroadcast the SAME bytes. This is
   // idempotent by hash, so it can never become a second payment, and it is the
   // only action that helps if the first broadcast never reached the network.
-  if (locked.nextAttemptAt !== null && locked.nextAttemptAt.getTime() > Date.now()) {
+  if (
+    !opts?.afterRestart &&
+    locked.nextAttemptAt !== null &&
+    locked.nextAttemptAt.getTime() > Date.now()
+  ) {
     return { progress: 'unchanged' }
   }
   return { progress: 'unchanged', rebroadcast: true }
@@ -1155,7 +1201,7 @@ export async function reconcileOnStartup(
   const attempts = [...open, ...(await loadRecentProvenDeadAttempts(pool, head, opts))]
   for (const attempt of attempts) {
     try {
-      await progressAttempt(pool, chain, alerts, attempt, head, opts)
+      await progressAttempt(pool, chain, alerts, attempt, head, { ...opts, afterRestart: true })
     } catch (err) {
       logWarn('reconcile_attempt_failed', {
         transferId: attempt.transferId,

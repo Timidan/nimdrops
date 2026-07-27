@@ -8,7 +8,14 @@ import { migrate } from '../src/db/migrate'
 import type { AlertKind, Alerts } from '../src/services/alerts'
 import { ClaimRejectedError, issueChallenge, reserveClaim } from '../src/services/claims'
 import { createDraft, submitFunding } from '../src/services/drops'
-import { DRAFT_GC_AFTER_HOURS, gcDrafts, settleTerminal, sweepExpiry } from '../src/services/expiry'
+import {
+  DRAFT_GC_AFTER_HOURS,
+  closeLiveDrop,
+  gcDrafts,
+  settleTerminal,
+  sweepExpiry,
+  type CloseLiveDropOptions,
+} from '../src/services/expiry'
 import { runWorkerTick } from '../src/services/transfers'
 // Side-effect import: installs the int8-as-string parser so BIGINT luna never
 // passes through a lossy JS number. This suite builds its own pool, so it still
@@ -710,5 +717,71 @@ describe.skipIf(!hasDb)('expiry, exact refunds, settlement and draft GC (real Po
 
     // Idempotent.
     expect(await gcDrafts(pool)).toBe(0)
+  })
+
+  describe('a close that is neither expired nor authorised', () => {
+    it('does not compile', () => {
+      const shape = {
+        dropId: 'any',
+        reason: 'closed_by_sponsor',
+        stage: 'test',
+        requireExpired: false,
+      }
+      // @ts-expect-error requireExpired: false demands an authorize hook.
+      const rejected: CloseLiveDropOptions = shape
+      expect(rejected.requireExpired).toBe(false)
+    })
+
+    it('is refused before anything is locked or written', async () => {
+      const publicId = await liveDrop()
+      const before = await readDrop(publicId)
+      const alerts = spyAlerts()
+      const client = await pool.connect()
+
+      try {
+        await expect(
+          closeLiveDrop(client, alerts, {
+            dropId: before.id,
+            reason: 'closed_by_sponsor',
+            stage: 'unauthorised_close_test',
+            requireExpired: false,
+          } as unknown as CloseLiveDropOptions),
+        ).rejects.toThrow(/authorize/i)
+      } finally {
+        client.release()
+      }
+
+      const after = await readDrop(publicId)
+      expect(after.state).toBe('live')
+      expect(after.closing_reason).toBeNull()
+      expect(await readRefunds(publicId)).toHaveLength(0)
+      expect(alerts.alertNames()).toEqual([])
+    })
+
+    it('still closes when the hook is supplied', async () => {
+      const publicId = await liveDrop()
+      const drop = await readDrop(publicId)
+      const alerts = spyAlerts()
+      const client = await pool.connect()
+      let sawLockedRow = false
+
+      try {
+        const result = await closeLiveDrop(client, alerts, {
+          dropId: drop.id,
+          reason: 'closed_by_sponsor',
+          stage: 'authorised_close_test',
+          requireExpired: false,
+          authorize: async (_tx, locked) => {
+            sawLockedRow = locked.refund_address === SPONSOR
+          },
+        })
+        expect(result.outcome).toBe('closed')
+      } finally {
+        client.release()
+      }
+
+      expect(sawLockedRow).toBe(true)
+      expect((await readDrop(publicId)).closing_reason).toBe('closed_by_sponsor')
+    })
   })
 })
