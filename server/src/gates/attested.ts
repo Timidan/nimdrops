@@ -41,6 +41,31 @@ export interface Attestation {
   nonce: string
 }
 
+/**
+ * What an integrator learns from a successful submission.
+ *
+ * `granted` alone was not enough, and the end-to-end test is what showed it. A
+ * wallet that has ALREADY claimed still gets `granted: true` — `issueGrant` hits
+ * its conflict clause, reads the existing row back and never looks at
+ * `consumed_claim_id` — so a partner retrying until "the grant took" would loop
+ * forever against success. `alreadyClaimed` is the missing bit.
+ *
+ * `slotsRemaining` is back-pressure. Nothing stops an attester minting more
+ * grants than a drop has slots, and without this the surplus wallets discover it
+ * only at claim time, as `exhausted`. It is a snapshot, not a reservation: a
+ * concurrent claim can consume the last slot immediately afterwards, so it tells
+ * an integrator when to stop rather than promising anyone a share.
+ */
+export interface AttestationResult {
+  granted: true
+  /** The wallet named in the signed message. Never one from a request body. */
+  walletAddress: string
+  /** This wallet already spent its grant on a claim. A further one is pointless. */
+  alreadyClaimed: boolean
+  /** Unreserved slots at the moment of this call. Advisory. */
+  slotsRemaining: number
+}
+
 export interface AttestedConfig {
   attesterPublicKey: string
   maxAgeSeconds: number
@@ -151,7 +176,7 @@ export function parseAttestedConfig(config: Record<string, unknown>): AttestedCo
 export async function submitAttestation(
   pool: Pool,
   o: { gate: GateRow; message: string; signatureHex: string },
-): Promise<{ granted: true; walletAddress: string }> {
+): Promise<AttestationResult> {
   if (o.gate.kind !== 'attested') {
     throw new GateRejectedError('wrong_kind', 'this drop does not accept attestations')
   }
@@ -177,6 +202,8 @@ export async function submitAttestation(
   if (attestation.issuedAt < now - config.maxAgeSeconds) bad('attestation is too old')
 
   const nonceHash = createHash('sha256').update(attestation.nonce).digest('hex')
+  let alreadyClaimed = false
+  let slotsRemaining = 0
 
   // Burning the nonce and issuing the grant are ONE transaction.
   //
@@ -213,6 +240,24 @@ export async function submitAttestation(
       walletAddress: attestation.wallet,
       kind: 'attested',
     })
+
+    // Read inside the same transaction, so neither figure can be from a moment
+    // that never coexisted with the grant just written.
+    const { rows: status } = await client.query<{
+      already_claimed: boolean
+      slots_remaining: number
+    }>(
+      `SELECT (g.consumed_claim_id IS NOT NULL) AS already_claimed,
+              d.claim_count - (SELECT count(*)::int FROM claims c WHERE c.drop_id = d.id)
+                AS slots_remaining
+       FROM gate_grants g
+       JOIN drops d ON d.id = g.drop_id
+       WHERE g.drop_id = $1 AND g.wallet_address = $2`,
+      [o.gate.dropId, attestation.wallet],
+    )
+    alreadyClaimed = status[0]?.already_claimed ?? false
+    slotsRemaining = status[0]?.slots_remaining ?? 0
+
     await client.query('COMMIT')
   } catch (err) {
     // A replay has already rolled back; rolling back twice is harmless and
@@ -223,5 +268,5 @@ export async function submitAttestation(
     client.release()
   }
 
-  return { granted: true, walletAddress: attestation.wallet }
+  return { granted: true, walletAddress: attestation.wallet, alreadyClaimed, slotsRemaining }
 }

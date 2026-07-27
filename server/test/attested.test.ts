@@ -285,8 +285,7 @@ describe.skipIf(!hasDb)('submitAttestation', () => {
     (await pool.query<{ count: string }>('SELECT count(*) FROM attestation_nonces')).rows[0].count
 
   it('grants to the wallet named in the attestation', async () => {
-    await expect(submit(attestation())).resolves.toEqual({
-      granted: true,
+    await expect(submit(attestation())).resolves.toMatchObject({ granted: true,
       walletAddress: beneficiary,
     })
     const { rows } = await pool.query<{ wallet_address: string; kind: string }>(
