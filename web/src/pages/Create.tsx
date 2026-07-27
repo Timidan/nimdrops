@@ -415,6 +415,19 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
           setPhase('unconfirmed')
           return
         }
+        // A 5xx is not a verdict on the transaction, and the money has already
+        // left the wallet. The server says so itself — a chain lookup that hit
+        // its deadline, a paused custody, a stale reconciliation all answer 503
+        // with `Retry-After` — and the poll below already treats a 5xx as "keep
+        // asking". Treating it as `failed` here put a "Try again" button in
+        // front of a sponsor who had paid, and that button re-opens the wallet
+        // and sends a SECOND transaction: the drop holds one funding hash for
+        // its whole life, so the second deposit becomes an operator
+        // reconciliation item rather than a refund.
+        if (err instanceof ApiError && err.status >= 500) {
+          setPhase('detecting')
+          return
+        }
         if (err instanceof ApiError) {
           setFailure(err.message)
           setPhase('failed')

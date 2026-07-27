@@ -1223,6 +1223,58 @@ describe('Create — funding', () => {
     await tick(3000)
     expect(screen.getByRole('heading', { name: /your drop is live/i })).toBeTruthy()
   })
+
+  /**
+   * The funding call is the one that decides whether the sponsor's money was
+   * seen, and it now runs under the money engine's chain deadline
+   * (`server/src/chain/deadline.ts`): a node that accepts the lookup and never
+   * answers ends as a 503 rather than as a browser waiting forever.
+   *
+   * What that must NOT become is a verdict. The transaction is already signed
+   * and broadcast by this point, so "That did not go through — Try again" would
+   * be false, and its button re-opens the wallet: a second transaction to a
+   * drop that holds one funding hash for its whole life is not a retry, it is a
+   * second payment the sponsor has to ask an operator to return.
+   */
+  it('keeps looking after a 5xx on the funding call, and never re-opens the wallet', async () => {
+    let sends = 0
+    const countingBridge: WalletBridge = {
+      ready: async () => {},
+      sign: async () => ({ publicKey: 'f'.repeat(64), signature: 'a'.repeat(128) }),
+      sendWithData: async () => {
+        sends += 1
+        return { txHash: 'd'.repeat(64) }
+      },
+    }
+    installFetch({
+      create: { status: 201, body: DRAFT },
+      funding: [
+        {
+          status: 503,
+          body: { error: { code: 'degraded', message: 'temporarily unavailable — try again shortly' } },
+          headers: { 'retry-after': '5' },
+        },
+        { status: 200, body: dropBody('live') },
+      ],
+    })
+    vi.useFakeTimers()
+
+    renderCreate({ discoverBridge: bridgeOf(countingBridge) })
+    fillForm()
+    const sheet = openReview()
+    fireEvent.click(within(sheet).getByRole('button', { name: /fund drop/i }))
+
+    await tick(1000)
+    expect(screen.getByRole('heading', { name: /detecting your transaction/i })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /try again/i })).toBeNull()
+    expect(document.body.textContent ?? '').not.toMatch(/did not go through/i)
+
+    // And the poll behind that screen resolves it without any further wallet
+    // prompt, by re-submitting the SAME hash.
+    await tick(3000)
+    expect(screen.getByRole('heading', { name: /your drop is live/i })).toBeTruthy()
+    expect(sends, 'the wallet was asked for exactly one transaction').toBe(1)
+  })
 })
 
 describe('Create — share screen', () => {

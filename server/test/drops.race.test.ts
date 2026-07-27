@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import pg from 'pg'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { ChainCallTimeoutError } from '../src/chain/deadline'
 import { FakeChain } from '../src/chain/fake'
 import type { ChainClient, ChainTx } from '../src/chain/types'
 import { migrate } from '../src/db/migrate'
@@ -640,6 +641,114 @@ describe.skipIf(!hasDb)('drop drafts and exact funding activation (real Postgres
 
     // An unverified hash is never recorded, so it can never squat the unique index.
     expect((await readDrop(d.publicId)).funding_tx_hash).toBeNull()
+  })
+
+  // ---- a node that never answers -------------------------------------------------
+
+  /**
+   * The worker got the money engine's chain deadline first; this is the same
+   * bound on the SPONSOR-facing call. A node that accepts the lookup and never
+   * answers used to park the HTTP request forever, on the one call that decides
+   * whether the money the sponsor has already sent was seen.
+   *
+   * The property that matters is not the ten seconds. It is that a timeout is
+   * "we could not ask" and never "the chain does not have it": absence here
+   * answers 200 with the drop unchanged, which tells a sponsor whose funding
+   * HAS landed that it has not been seen, and leaves the drop frozen with no
+   * error recorded anywhere for an operator to find.
+   */
+  it('bounds the funding lookup, and never reads the bound as "not found"', async () => {
+    const d = await draft()
+    const hash = fund(d.publicId)
+    finalize()
+
+    let release: (() => void) | undefined
+    const neverAnswers: ChainClient = {
+      network: () => chain.network(),
+      custodyAddress: () => chain.custodyAddress(),
+      headHeight: () => chain.headHeight(),
+      isFinal: (tx: ChainTx, head: number) => chain.isFinal(tx, head),
+      getTransaction: () =>
+        new Promise<ChainTx | null>((resolve) => {
+          release = () => resolve(null)
+        }),
+      confirmedBalanceLuna: (a: string) => chain.confirmedBalanceLuna(a),
+      buildSignedBasic: (o) => chain.buildSignedBasic(o),
+      broadcast: (raw: string) => chain.broadcast(raw),
+    }
+
+    const startedAt = Date.now()
+    const err = await submitFunding(pool, neverAnswers, {
+      publicId: d.publicId,
+      txHash: hash,
+      chainTimeoutMs: 50,
+    }).then(
+      (pub) => pub,
+      (e: unknown) => e,
+    )
+    const elapsedMs = Date.now() - startedAt
+    release?.()
+
+    // It RETURNED, on the order of the deadline rather than of the node's
+    // patience — and it returned a failure, not a drop. A resolved `DropPublic`
+    // here would BE the bug: that is the shape "not detected yet" has.
+    expect(elapsedMs).toBeLessThan(5_000)
+    expect(err, 'a hung lookup must not resolve as a drop').toBeInstanceOf(ChainCallTimeoutError)
+
+    const message = (err as Error).message
+    // Not by luck of wording: the timeout is re-thrown before any message is
+    // matched. These assertions are the belt — the phrase lists are the ones in
+    // `services/drops.ts` (`findTx`) and `chain/nimiq.ts` (`NOT_FOUND_PATTERNS`).
+    expect(/not found|unknown transaction|no such transaction/i.test(message)).toBe(false)
+    for (const phrase of ['not found', 'no transaction', 'unknown transaction', 'does not exist', 'transaction not yet']) {
+      expect(message.toLowerCase(), `a timeout must not read as "${phrase}"`).not.toContain(phrase)
+    }
+
+    // Nothing was concluded about the transaction: no hash recorded, no state
+    // moved, no capacity created. The sponsor's next poll asks again.
+    const row = await readDrop(d.publicId)
+    expect(row.state).toBe('awaiting_funding')
+    expect(row.funding_tx_hash).toBeNull()
+    expect(await outstandingPrincipalLuna(pool)).toBe(0n)
+
+    // And the same submission against a node that answers still activates.
+    const live = await submitFunding(pool, chain, { publicId: d.publicId, txHash: hash })
+    expect(live.state).toBe('live')
+  })
+
+  it('remembers a verified funding when the HEIGHT read is the call that hangs', async () => {
+    const d = await draft()
+    const hash = fund(d.publicId)
+    finalize()
+
+    let release: (() => void) | undefined
+    const headHangs: ChainClient = {
+      network: () => chain.network(),
+      custodyAddress: () => chain.custodyAddress(),
+      headHeight: () =>
+        new Promise<number>((resolve) => {
+          release = () => resolve(FUND_HEIGHT)
+        }),
+      isFinal: (tx: ChainTx, head: number) => chain.isFinal(tx, head),
+      getTransaction: (h: string) => chain.getTransaction(h),
+      confirmedBalanceLuna: (a: string) => chain.confirmedBalanceLuna(a),
+      buildSignedBasic: (o) => chain.buildSignedBasic(o),
+      broadcast: (raw: string) => chain.broadcast(raw),
+    }
+
+    await expect(
+      submitFunding(pool, headHangs, { publicId: d.publicId, txHash: hash, chainTimeoutMs: 50 }),
+    ).rejects.toBeInstanceOf(ChainCallTimeoutError)
+    release?.()
+
+    // Every §7 predicate had already passed, so the hash is on the drop before
+    // the height is asked for. That is what takes the row out of draft GC's
+    // reach and lets the money be counted while the node is unreachable.
+    const row = await readDrop(d.publicId)
+    expect(row.state).toBe('funding_pending')
+    expect(row.funding_tx_hash).toBe(hash)
+
+    expect((await submitFunding(pool, chain, { publicId: d.publicId, txHash: hash })).state).toBe('live')
   })
 
   // ---- activation -----------------------------------------------------------

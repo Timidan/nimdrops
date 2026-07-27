@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from 'pg'
+import { ChainCallTimeoutError, withChainDeadline } from '../chain/deadline'
 import { MEMO_MAX_BYTES, type ChainClient, type ChainTx } from '../chain/types'
 import { errorMessage, requireNetwork } from '../config'
 import type { Queryable } from '../db/pool'
@@ -233,6 +234,17 @@ export class FundingRejectedError extends DropError {
   }
 }
 
+/**
+ * Test-only control over the funding path's chain deadline.
+ *
+ * Production never passes it: the money engine's own
+ * {@link CHAIN_CALL_TIMEOUT_MS} is the number, and it is not an operator dial.
+ */
+export interface FundingChainOptions {
+  /** @internal TEST-ONLY override of `CHAIN_CALL_TIMEOUT_MS`. */
+  chainTimeoutMs?: number
+}
+
 /** Public-safe projection of a drop. Never carries claimant addresses or row ids. */
 export interface DropPublic {
   publicId: string
@@ -435,16 +447,48 @@ export async function getPublic(pool: Pool, publicId: string): Promise<DropPubli
 }
 
 /**
+ * Run one of the funding path's chain calls under the money engine's deadline
+ * (`chain/deadline.ts`).
+ *
+ * The worker got this bound first, on the reasoning that a hung call there
+ * stops every drop while a hung call here only parks one HTTP request. That
+ * undersold it. This is the sponsor-facing call that decides whether the money
+ * they have already sent was seen, it runs inside a request, and a node that
+ * accepts the lookup and never answers leaves the browser waiting on it with no
+ * end and no message — while the connection, the pool client behind it and the
+ * sponsor's own attention are all held open. Ten seconds and a retryable answer
+ * is strictly better than forever.
+ */
+function chainCall<T>(label: string, o: FundingChainOptions, call: () => Promise<T>): Promise<T> {
+  return o.chainTimeoutMs === undefined
+    ? withChainDeadline(label, call)
+    : withChainDeadline(label, call, o.chainTimeoutMs)
+}
+
+/**
  * The real `@nimiq/core` client REJECTS with "Transaction not found" where
  * `FakeChain` resolves `null`. Both mean the same thing to us — the chain has
  * not shown us this transaction — and neither is an error the sponsor can act
  * on. Any OTHER failure (RPC down, consensus lost) propagates, so a degraded
  * node can never be mistaken for a missing transaction.
+ *
+ * A DEADLINE IS NOT AN ABSENCE, and the guard for that is structural rather
+ * than lexical. `ChainCallTimeoutError` is re-thrown before the message is ever
+ * matched, so no future wording of the timeout — or of this pattern list — can
+ * turn "we could not ask" into "the chain does not have it". That distinction
+ * is load-bearing: `null` here makes the endpoint answer 200 with the drop
+ * unchanged, which tells a sponsor whose money HAS landed that it has not been
+ * seen, and leaves a `funding_pending` drop frozen with no error anywhere.
  */
-async function findTx(chain: ChainClient, txHash: string): Promise<ChainTx | null> {
+async function findTx(
+  chain: ChainClient,
+  txHash: string,
+  o: FundingChainOptions,
+): Promise<ChainTx | null> {
   try {
-    return await chain.getTransaction(txHash)
+    return await chainCall('submitFunding.getTransaction', o, () => chain.getTransaction(txHash))
   } catch (err) {
+    if (err instanceof ChainCallTimeoutError) throw err
     const message = errorMessage(err)
     if (/not found|unknown transaction|no such transaction/i.test(message)) return null
     throw err
@@ -514,7 +558,7 @@ async function assertHashUnusedElsewhere(
 export async function submitFunding(
   pool: Pool,
   chain: ChainClient,
-  o: { publicId: string; txHash: string },
+  o: { publicId: string; txHash: string } & FundingChainOptions,
 ): Promise<DropPublic> {
   const { publicId, txHash } = o
   const drop = await loadDrop(pool, publicId)
@@ -549,7 +593,7 @@ export async function submitFunding(
     )
   }
 
-  const tx = await findTx(chain, txHash)
+  const tx = await findTx(chain, txHash, o)
   if (tx === null) {
     // Not detected yet, or gone in a reorg before it ever finalized. Either way
     // the drop simply stays where it is: no error, no recorded hash, and a
@@ -599,7 +643,8 @@ export async function submitFunding(
   // custody lock, so nothing here is trusted by it.
   await recordPending(pool, publicId, txHash)
 
-  if (!chain.isFinal(tx, await chain.headHeight())) {
+  const head = await chainCall('submitFunding.headHeight', o, () => chain.headHeight())
+  if (!chain.isFinal(tx, head)) {
     return getPublic(pool, publicId)
   }
 

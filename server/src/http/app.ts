@@ -3,6 +3,7 @@ import { Hono, type Context, type MiddlewareHandler } from 'hono'
 import type { ContentfulStatusCode } from 'hono/utils/http-status'
 import type { Pool } from 'pg'
 import { addressFromPublicKey } from '../auth/verify'
+import { ChainCallTimeoutError } from '../chain/deadline'
 import type { ChainClient } from '../chain/types'
 import { DropShapeError, formatNim, lunaFromNim } from '../money'
 import { type Alerts, throttled } from '../services/alerts'
@@ -1026,6 +1027,17 @@ function mapError(err: unknown): HttpError {
     return new HttpError(503, 'paused', 'payouts are paused — try again shortly', DEGRADED_RETRY_SECONDS)
   }
   if (err instanceof StaleReconciliationError) {
+    return new HttpError(503, 'degraded', 'temporarily unavailable — try again shortly', DEGRADED_RETRY_SECONDS)
+  }
+  // A chain call that hit the money engine's deadline (`chain/deadline.ts`).
+  //
+  // 503 and not 500, because it is not a fault and it is not a verdict: the
+  // node did not answer in ten seconds, which says nothing at all about the
+  // sponsor's transaction. The client's own rule for a 5xx on the funding path
+  // is "keep asking", and `Retry-After` says so out loud. Reachable from
+  // `submitFunding`'s own lookups and from the `reconcile` it runs after
+  // finality, both of which used to land on the 500 below.
+  if (err instanceof ChainCallTimeoutError) {
     return new HttpError(503, 'degraded', 'temporarily unavailable — try again shortly', DEGRADED_RETRY_SECONDS)
   }
   // Its own code, NOT the shared `unavailable`: that one makes `onError` fire an
