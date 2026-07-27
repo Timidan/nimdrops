@@ -36,6 +36,7 @@ import {
   readCapacity,
   readControls,
 } from '../services/solvency'
+import { StatsCache, type StatsCacheOptions, StatsUnavailableError } from '../services/stats'
 import { SHARED_BUCKET, type ClientIpResolver } from './client-ip'
 import { type CustodyDisclosure, buildDisclosure } from './disclosure'
 import { ConflictError, bindIdem, idemKeyHash, lookupIdem } from './idempotency'
@@ -44,7 +45,9 @@ import { registerSsr } from './ssr'
 
 /**
  * The whole public HTTP surface (design §11), plus an unauthenticated
- * `GET /health` (amended contract: "six endpoints + /health").
+ * `GET /health` (amended contract: "six endpoints + /health") and an
+ * unauthenticated `GET /api/stats` (aggregate counts for the landing page;
+ * `services/stats.ts` owns what may appear in it).
  *
  * Three rules shape every line below.
  *
@@ -409,6 +412,12 @@ export interface AppDeps {
    * bucket without a secret proving which hop set it.
    */
   clientIp?: ClientIpResolver
+  /**
+   * Overrides for the `GET /api/stats` snapshot cache (`services/stats.ts`).
+   * Production leaves this alone and gets the module's defaults; tests shorten
+   * the TTL so they can observe a refresh without waiting a minute.
+   */
+  statsCache?: StatsCacheOptions
 }
 
 const CREATE_DROP_SCOPE = 'POST /api/drops'
@@ -420,6 +429,11 @@ export function makeApp(deps: AppDeps): Hono {
   const clientIp: ClientIpResolver = deps.clientIp ?? (() => SHARED_BUCKET)
   // Throttled so a hot claim path cannot turn one insolvency into a webhook flood.
   const alerts = throttled(deps.alerts)
+
+  // One per app, so its TTL and its single-flight guarantee are process-wide.
+  // Built with the injected clock: the tests that freeze `now` for the rate
+  // limiters freeze the stats TTL with it.
+  const statsCache = new StatsCache(pool, { now, ...deps.statsCache })
 
   const ipBucket = new TokenBuckets(limits.ipPerWindow, limits.windowMs, now)
   const dropClaimBucket = new TokenBuckets(limits.claimsPerDropPerWindow, limits.windowMs, now)
@@ -546,6 +560,34 @@ export function makeApp(deps: AppDeps): Hono {
   // screen can render it on first paint.
   app.get('/api/custody', async (c) => {
     return c.json(await currentDisclosure(pool, chain))
+  })
+
+  // ---- GET /api/stats ----------------------------------------------------------------
+  //
+  // Public aggregate statistics for the landing page. Everything about what may
+  // and may not appear here — and why the "paid out" predicate is the one it is
+  // — lives in `services/stats.ts`; this route only serialises and caches.
+  //
+  // Mounted under `/api` deliberately, so the per-IP limiter above covers it:
+  // an unauthenticated read on a money service gets the same 60-per-minute
+  // budget as every other API route, and `StatsCache` means even that budget
+  // costs at most one query a minute. `/health` is outside `/api` because a
+  // monitor must always be answered; a statistics page has no such claim.
+  app.get('/api/stats', async (c) => {
+    const stats = await statsCache.read()
+    // Let a browser or a proxy absorb the rest of the burst too. `public` is
+    // correct: the body is identical for every caller and depends on no header,
+    // no cookie and no bearer token.
+    //
+    // The lifetime is what is LEFT of this snapshot's own freshness, not a flat
+    // TTL. A snapshot served stale — because a refresh is running behind it, or
+    // failing — must not be handed to a proxy with a full minute of life ahead
+    // of it, or the numbers a visitor sees could outlive the window this
+    // process is willing to vouch for.
+    const ageMs = statsCache.ageMs(now()) ?? 0
+    const remainingMs = Math.max(0, statsCache.ttlMs - ageMs)
+    c.header('cache-control', `public, max-age=${Math.floor(remainingMs / 1000)}`)
+    return c.json(stats)
   })
 
   // ---- POST /api/drops/:publicId/funding ------------------------------------------
@@ -781,6 +823,18 @@ function mapError(err: unknown): HttpError {
   }
   if (err instanceof StaleReconciliationError) {
     return new HttpError(503, 'degraded', 'temporarily unavailable — try again shortly', DEGRADED_RETRY_SECONDS)
+  }
+  // Its own code, NOT the shared `unavailable`: that one makes `onError` fire an
+  // `insolvent` alert, and a landing-page statistic that could not be computed
+  // must never page an operator about custody. Nothing on a money path depends
+  // on this route, so its failure is exactly as serious as it looks.
+  if (err instanceof StatsUnavailableError) {
+    return new HttpError(
+      503,
+      'stats_unavailable',
+      'statistics are temporarily unavailable — try again shortly',
+      DEGRADED_RETRY_SECONDS,
+    )
   }
   if (err instanceof InsolventError || err instanceof CapExceededError) {
     return new HttpError(503, 'unavailable', 'temporarily unavailable — try again shortly', DEGRADED_RETRY_SECONDS)
