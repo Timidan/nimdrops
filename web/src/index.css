@@ -118,14 +118,17 @@
   --color-gold-deep: #7c5b04;
 
   /**
-   * The solid neutral. Chroma is near zero and what remains leans cool, toward
-   * the field's own violet rather than toward warmth-by-default.
+   * The solid neutral. Chroma is near zero and what remains leans very slightly
+   * cool.
    *
-   * This replaces `--color-paper: #fbf9f4`, which is deleted. `#fbf9f4` sat in
-   * the warm near-white band `PRODUCT.md` names as an anti-reference, and the
-   * token name `--paper` is on the same list. Warmth in this brand is carried
-   * by the gold light in the field and by the reveal, never by a tinted
-   * off-white background.
+   * That lean used to be justified as agreeing with the field's violet. The
+   * field is warm neutral now, and the plate deliberately does NOT follow it:
+   * `#fbf9f4` — the warm near-white this token replaced — sits in the band
+   * `PRODUCT.md` names as an anti-reference, and the old token name `--paper` is
+   * on the same list. So the reasoning inverts rather than disappears. Warmth in
+   * this brand is carried by the gold light and by the reveal, never by a tinted
+   * off-white background, and a cool-neutral plate is what keeps the gold
+   * reading as gold instead of as a slightly darker version of its backdrop.
    */
   --color-plate: #f4f3f7;
   /** Text on the plate, and on the gold action. 16.09:1 and 9.18:1. */
@@ -157,18 +160,31 @@
 :root {
   /* ---- the field ---------------------------------------------------------
    *
-   * Nimiq's signature background is `radial-gradient(100% 100% at bottom
-   * right, #260133, var(--nimiq-blue))`, anchored bottom right. That anchor is
-   * the reason this is not the 135deg indigo-to-blue tell: it is the host
-   * wallet's own token, pushed one step darker so the lights on top have
-   * somewhere to be bright.
+   * A warm neutral, and gold is the only hue on the screen.
+   *
+   * This used to be Nimiq's own signature background — `radial-gradient(100%
+   * 100% at bottom right, #260133, var(--nimiq-blue))` — pushed a step darker.
+   * Borrowing the host wallet's token was defensible and it is gone on purpose:
+   * the violet-into-blue field put two hues on screen competing with the gold,
+   * and the one thing this product needs a claimant to look at is an amount.
+   *
+   * What replaces it is charcoal into warm black. No violet, no blue. The warmth
+   * is very slight — enough that the gold reads as belonging to the surface
+   * rather than sitting on top of a cold one, not enough to be a colour in its
+   * own right. The bottom-right anchor stays, because it is what keeps this off
+   * the 135deg two-hue diagonal that every generated landing page uses.
    */
-  --nd-field-image: radial-gradient(120% 120% at bottom right, #260133 0%, #1b1b3d 52%, #12102a 100%);
+  --nd-field-image: radial-gradient(120% 120% at bottom right, #221c17 0%, #191510 52%, #100e0c 100%);
   /** The lightest stop of the image above. Every contrast floor starts here. */
-  --nd-field-base-max: #1b1b3d;
+  --nd-field-base-max: #221c17;
 
   /**
-   * Three lights, from Nimiq's own palette: light blue, purple, gold.
+   * Three lights: two neutral lifts and gold.
+   *
+   * Lights 1 and 2 were light blue and purple, from Nimiq's palette. They are
+   * now near-neutral warm greys — they still shape the field, they no longer
+   * tint it. Gold is untouched and is the only light carrying a hue, which is
+   * the whole point of the change: one accent, and it means something.
    *
    * Each is declared as a literal `rgb(… / α)` rather than assembled from a hex
    * with relative colour syntax. `rgb(from …)` is Chrome 119 / Safari 16.4 and
@@ -177,12 +193,12 @@
    * apart because `surface.contrast.test.ts` multiplies them to derive the
    * brightest pixel the field can reach.
    */
-  --nd-light-1-fill: rgb(5 130 202 / 0.58);
-  --nd-light-1-fade: rgb(5 130 202 / 0);
-  --nd-light-1-o: 0.42;
-  --nd-light-2-fill: rgb(95 75 139 / 0.66);
-  --nd-light-2-fade: rgb(95 75 139 / 0);
-  --nd-light-2-o: 0.34;
+  --nd-light-1-fill: rgb(122 112 100 / 0.34);
+  --nd-light-1-fade: rgb(122 112 100 / 0);
+  --nd-light-1-o: 0.38;
+  --nd-light-2-fill: rgb(96 84 72 / 0.4);
+  --nd-light-2-fade: rgb(96 84 72 / 0);
+  --nd-light-2-o: 0.3;
   --nd-light-3-fill: rgb(233 178 19 / 0.5);
   --nd-light-3-fade: rgb(233 178 19 / 0);
   --nd-light-3-o: 0.3;
@@ -194,8 +210,13 @@
    * three lights stacked at their peak, gold at its post-claim value. Derived,
    * not chosen — the test recomputes it from the eight tokens above and fails
    * if this constant no longer matches.
+   *
+   * Warmer and lighter than the `#515456` it replaces, because gold is now the
+   * only light with a hue and there is no blue left to pull the mix back toward
+   * neutral. Every contrast floor in `surface.contrast.test.ts` is computed
+   * against this value and all of them still hold.
    */
-  --nd-field-max: #515456;
+  --nd-field-max: #5b4a22;
 
   /**
    * A scrim over the lights and under the content, in the two bands where the
