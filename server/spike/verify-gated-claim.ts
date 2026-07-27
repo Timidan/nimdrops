@@ -41,7 +41,7 @@
  *   SIG_SCHEME       (default nimiq-signed-message)
  */
 import { KeyPair, PrivateKey } from '@nimiq/core'
-import { randomBytes, randomUUID } from 'node:crypto'
+import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { loadBank } from '../src/gates/trivia/bank'
 
 const ORIGIN = process.env.PUBLIC_ORIGIN ?? 'https://nimdrops.timidan.xyz'
@@ -63,11 +63,16 @@ function step(n: string, detail: string): void {
 
 async function api(
   path: string,
-  init?: { method?: string; body?: unknown },
+  init?: { method?: string; body?: unknown; idemKey?: string },
 ): Promise<{ status: number; body: Record<string, unknown> }> {
   const res = await fetch(`${ORIGIN}${path}`, {
     method: init?.method ?? 'GET',
-    headers: init?.body ? { 'content-type': 'application/json' } : {},
+    headers: {
+      ...(init?.body ? { 'content-type': 'application/json' } : {}),
+      // A HEADER, not a body field. `only()` refuses an unexpected body key
+      // outright, so putting it in the body is two errors rather than one.
+      ...(init?.idemKey ? { 'Idempotency-Key': init.idemKey } : {}),
+    },
     ...(init?.body ? { body: JSON.stringify(init.body) } : {}),
   })
   let body: Record<string, unknown> = {}
@@ -91,7 +96,33 @@ function newClaimant() {
   return {
     publicKeyHex: keyPair.publicKey.toHex(),
     address: keyPair.publicKey.toAddress().toUserFriendlyAddress(),
-    sign: (message: string) => keyPair.sign(new Uint8Array(Buffer.from(message, 'utf8'))).toHex(),
+    /**
+     * Signs the way a real Nimiq wallet signs, matching `SIG_SCHEME`.
+     *
+     * Signing the raw UTF-8 was the obvious thing and produced
+     * `invalid_signature` against the deployment, which runs
+     * `nimiq-signed-message` — the scheme a keyguard actually uses. It hashes
+     * `\x16Nimiq Signed Message:\n` + the DECIMAL BYTE LENGTH + the message,
+     * and signs that digest. Mirrors `signedBytes` in `src/auth/verify.ts`; a
+     * script that signed the wrong bytes would prove nothing about the claim
+     * path except that the signature check works.
+     */
+    sign: (message: string) => {
+      const body = Buffer.from(message, 'utf8')
+      if ((process.env.SIG_SCHEME ?? 'nimiq-signed-message') === 'raw') {
+        return keyPair.sign(new Uint8Array(body)).toHex()
+      }
+      const digest = createHash('sha256')
+        .update(
+          Buffer.concat([
+            Buffer.from('\x16Nimiq Signed Message:\n', 'utf8'),
+            Buffer.from(String(body.byteLength), 'utf8'),
+            body,
+          ]),
+        )
+        .digest()
+      return keyPair.sign(new Uint8Array(digest)).toHex()
+    },
   }
 }
 
@@ -181,11 +212,11 @@ async function run(): Promise<void> {
   if (challenge.status !== 200) fail(`POST challenge answered ${challenge.status}`)
   const claim = await api(`/api/drops/${PUBLIC_ID}/claims`, {
     method: 'POST',
+    idemKey: randomUUID(),
     body: {
       challengeId: challenge.body.challengeId,
-      publicKeyHex: claimant.publicKeyHex,
-      signatureHex: claimant.sign(String(challenge.body.message)),
-      idempotencyKey: randomUUID(),
+      publicKey: claimant.publicKeyHex,
+      signature: claimant.sign(String(challenge.body.message)),
     },
   })
   if (claim.status !== 200 && claim.status !== 201) {
@@ -197,16 +228,17 @@ async function run(): Promise<void> {
   //
   // A second claim by the SAME wallet must be refused. That is the check that
   // the grant was consumed rather than merely matched — one grant, one slot.
+  // ONE fresh challenge, used once. Issuing a challenge per field would sign a
+  // different message than the one submitted, and the refusal would then prove
+  // the signature check rather than the grant being spent.
+  const retry = await api(`/api/drops/${PUBLIC_ID}/challenge`, { method: 'POST' })
   const second = await api(`/api/drops/${PUBLIC_ID}/claims`, {
     method: 'POST',
+    idemKey: randomUUID(),
     body: {
-      challengeId: (await api(`/api/drops/${PUBLIC_ID}/challenge`, { method: 'POST' })).body
-        .challengeId,
-      publicKeyHex: claimant.publicKeyHex,
-      signatureHex: claimant.sign(
-        String((await api(`/api/drops/${PUBLIC_ID}/challenge`, { method: 'POST' })).body.message),
-      ),
-      idempotencyKey: randomUUID(),
+      challengeId: retry.body.challengeId,
+      publicKey: claimant.publicKeyHex,
+      signature: claimant.sign(String(retry.body.message)),
     },
   })
   if (second.status === 200 || second.status === 201) {

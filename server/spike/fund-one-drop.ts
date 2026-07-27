@@ -22,6 +22,38 @@
  * if the same money were ever attested. So custody SEEDS a throwaway sponsor
  * and the sponsor pays. The money round-trips out of custody and back in.
  *
+ * ── THE SEED LEAVES THE LEDGER BEHIND, AND THE FLOAT MUST BE CORRECTED ──────
+ * Learned on the mainnet pilot, 2026-07-27, by pausing it.
+ *
+ * The seed is a direct `custodySend`. It is not an `outgoing_transfers` row,
+ * because it is neither a payout nor a refund and the ledger has no other shape
+ * for money leaving custody — so the books never debit it. The same coins then
+ * come BACK as the drop's funding and are credited as principal, while the
+ * operator float still claims every luna it claimed before:
+ *
+ *     chain custody   15 NIM   (2 out as seed, 2 back as funding)
+ *     ledger          17 NIM   (15 float + 2 principal — the same 2 twice)
+ *
+ * `reconcile()` compares those, finds the books claiming more than custody
+ * holds, and pauses with `chain_below_ledger`. That is the solvency invariant
+ * working exactly as designed — it refused to pay a claim against money it
+ * could not account for — but the discrepancy is this script's doing rather
+ * than a real shortfall, and it blocks every claim on the drop just funded.
+ *
+ * There is no discrepancy in production, where a real sponsor funds from their
+ * own wallet and custody sends nothing.
+ *
+ * After a run, lower the attested float by the seed so the books match again:
+ *
+ *     pnpm tsx src/recover.ts float show           # the current figure
+ *     pnpm tsx src/recover.ts float set <luna>     # that, minus the seed
+ *     pnpm tsx src/recover.ts unpause
+ *
+ * That is a correction, not a workaround: the seeded NIM genuinely stopped
+ * being the operator's working capital and became a claimant's principal, so
+ * the lower number is the true one. Letting the drop expire squares the books
+ * by itself instead, in 24 hours, by refunding the sponsor.
+ *
  * ── the operator float, and why this script may have to attest one ──────────
  * `activate()` runs `assertSolvent(..., addLuna)`, which requires
  *
