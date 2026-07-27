@@ -667,6 +667,7 @@ export async function broadcastStored(
   pool: Pool,
   chain: ChainClient,
   attempt: StoredAttempt,
+  opts?: WindowOptions,
 ): Promise<'acknowledged' | 'unknown'> {
   await pool.query(
     `UPDATE transaction_attempts
@@ -675,7 +676,7 @@ export async function broadcastStored(
     [attempt.attemptId],
   )
   try {
-    await chain.broadcast(attempt.rawTxHex)
+    await chainCall('broadcast', opts, () => chain.broadcast(attempt.rawTxHex))
   } catch (err) {
     await pool.query('UPDATE transaction_attempts SET last_error = $2 WHERE id = $1', [
       attempt.attemptId,
@@ -877,7 +878,7 @@ export async function progressAttempt(
     // idempotent by hash and cannot become a second payment, so it does not
     // need the serialization the decision above does — and it must not hold a
     // row lock across a network write that may hang.
-    return (await broadcastStored(pool, chain, attempt)) === 'acknowledged'
+    return (await broadcastStored(pool, chain, attempt, opts)) === 'acknowledged'
       ? 'changed'
       : 'unchanged'
   }
@@ -1373,7 +1374,7 @@ async function signNextQueued(
   }
 
   // COMMITTED. Only now do the bytes leave the process.
-  await broadcastStored(pool, chain, stored)
+  await broadcastStored(pool, chain, stored, opts)
   return true
 }
 

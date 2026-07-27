@@ -530,6 +530,38 @@ describe.skipIf(!hasDb)('transfer worker crash windows (real Postgres)', () => {
     expect(custodyPayments()).toHaveLength(1)
   })
 
+  it('does not let a broadcast that never answers stall the worker', async () => {
+    const payout = await queuedPayout()
+    let release: (() => void) | undefined
+    const neverAcknowledges = chainWith(chain, {
+      broadcast: () =>
+        new Promise<void>((resolve) => {
+          release = resolve
+        }),
+    })
+
+    const startedAt = Date.now()
+    expect(
+      await runWorkerTick(pool, neverAcknowledges, alerts, { chainTimeoutMs: 50 }),
+    ).toBe('worked')
+    expect(Date.now() - startedAt).toBeLessThan(5_000)
+    release?.()
+
+    const [attempt] = await readAttempts(payout.transferId)
+    expect(attempt.state).toBe('signed')
+    expect(attempt.broadcast_attempted_at).not.toBeNull()
+    expect(attempt.last_error).toMatch(/chain call "broadcast" timed out/i)
+    expect(custodyPayments()).toHaveLength(0)
+
+    await reconcileOnStartup(pool, chain, alerts)
+
+    const [recovered] = await readAttempts(payout.transferId)
+    expect(recovered.tx_hash).toBe(attempt.tx_hash)
+    expect(recovered.raw_hex).toBe(attempt.raw_hex)
+    expect(recovered.state).toBe('broadcast')
+    expect(custodyPayments()).toHaveLength(1)
+  })
+
   // ---- MEMPOOL BLINDNESS (g0-evidence.md §5A) ---------------------------------
 
   it('not-found is never proven_dead until the validity window is provably past', async () => {

@@ -63,7 +63,7 @@ export class ChainCallTimeoutError extends Error {
     readonly label: string,
     readonly timeoutMs: number,
   ) {
-    super(`chain lookup "${label}" timed out after ${timeoutMs}ms`)
+    super(`chain call "${label}" timed out after ${timeoutMs}ms`)
     this.name = 'ChainCallTimeoutError'
   }
 }
