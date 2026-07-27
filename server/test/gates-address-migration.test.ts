@@ -76,6 +76,18 @@ describe.skipIf(!hasDb)('017_canonical_gate_addresses', () => {
     return rows[0].id
   }
 
+  /** One `in_progress` session for a wallet, spelled however the caller says. */
+  async function sessionRow(dropId: string, wallet: string): Promise<string> {
+    const { rows } = await pool.query<{ id: string }>(
+      `INSERT INTO trivia_sessions
+         (drop_id, wallet_address, state, bank_version, question_ids, expires_at)
+       VALUES ($1, $2, 'in_progress', 'v1', '["geo-1"]'::jsonb, now() + interval '10 minutes')
+       RETURNING id`,
+      [dropId, wallet],
+    )
+    return rows[0].id
+  }
+
   beforeEach(async () => {
     for (const table of [
       'trivia_seen',
@@ -149,27 +161,68 @@ describe.skipIf(!hasDb)('017_canonical_gate_addresses', () => {
   })
 
   it('merges a wallet’s seen questions instead of losing the earlier sighting', async () => {
-    await gatedDrop()
+    // The surviving row is identified by its session_id, not merely counted.
+    // Asserting the row COUNT alone would pass against a migration that kept the
+    // later sighting — the title's whole claim — which is what the review of this
+    // file caught.
+    const dropId = await gatedDrop()
     await rewind()
+    const early = await sessionRow(dropId, SPACED)
+    const late = await sessionRow(dropId, LOWER)
     await pool.query(
-      `INSERT INTO trivia_seen (wallet_address, question_id, seen_at)
-       VALUES ($1, 'geo-1', now() - interval '2 hours'),
-              ($2, 'geo-1', now()),
-              ($1, 'sci-1', now())`,
-      [SPACED, LOWER],
+      `INSERT INTO trivia_seen (wallet_address, question_id, session_id, seen_at)
+       VALUES ($1, 'geo-1', $3, now() - interval '2 hours'),
+              ($2, 'geo-1', $4, now()),
+              ($1, 'sci-1', $3, now())`,
+      [SPACED, LOWER, early, late],
     )
 
     await migrate(pool)
 
-    const { rows } = await pool.query<{ wallet_address: string; question_id: string }>(
-      'SELECT wallet_address, question_id FROM trivia_seen ORDER BY question_id',
+    const { rows } = await pool.query<{
+      wallet_address: string
+      question_id: string
+      session_id: string
+      age_hours: number
+    }>(
+      `SELECT wallet_address, question_id, session_id,
+              round(extract(epoch FROM now() - seen_at) / 3600)::int AS age_hours
+       FROM trivia_seen ORDER BY question_id`,
     )
     // Three rows under two spellings become two under one, and `geo-1` survives
     // exactly once — the answer to "has this wallet seen it" is yes either way.
-    expect(rows).toEqual([
-      { wallet_address: CANONICAL, question_id: 'geo-1' },
-      { wallet_address: CANONICAL, question_id: 'sci-1' },
+    expect(rows.map((r) => [r.wallet_address, r.question_id])).toEqual([
+      [CANONICAL, 'geo-1'],
+      [CANONICAL, 'sci-1'],
     ])
+    // ...and it is the EARLIER of the two: two hours old, and pointing at the
+    // session that actually showed it.
+    expect(rows[0].session_id).toBe(early)
+    expect(rows[0].age_hours).toBe(2)
+  })
+
+  it('rewrites trivia_sessions, which nothing else in this file would notice', async () => {
+    // Its own case because the cooldown and the resume lookup both read this
+    // table by wallet. Deleting the migration's UPDATE for it passed every other
+    // test in this file, so without this the statement was unprotected.
+    const dropId = await gatedDrop()
+    await rewind()
+    await sessionRow(dropId, SPACED)
+    await sessionRow(dropId, LOWER)
+
+    await migrate(pool)
+
+    const { rows } = await pool.query<{ spellings: string; sessions: string }>(
+      `SELECT count(DISTINCT wallet_address)::text AS spellings, count(*)::text AS sessions
+       FROM trivia_sessions`,
+    )
+    // Both survive — this table has no unique key to collide on, and two attempts
+    // by one wallet are two rows. They just stop being two different wallets.
+    expect(rows[0]).toEqual({ spellings: '1', sessions: '2' })
+    const { rows: spelled } = await pool.query<{ wallet_address: string }>(
+      'SELECT DISTINCT wallet_address FROM trivia_sessions',
+    )
+    expect(spelled[0].wallet_address).toBe(CANONICAL)
   })
 
   it('folds a wallet’s passphrase attempts together, so the cap is not reset', async () => {
