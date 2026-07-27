@@ -375,4 +375,22 @@ export function registerSsr(app: Hono, opts: SsrOptions = {}): void {
   app.get('/', () => spaShell())
   /** Client-routed pages that are not campaign links. */
   app.get('/create', () => spaShell())
+
+  /**
+   * The gate pages.
+   *
+   * They must be here, not only in the client router: a game link is shared and
+   * scanned exactly like a drop link, and a hard load of one the server does not
+   * know falls through to the catch-all and 404s. Client-side navigation would
+   * work and every pasted link would not, which is the failure mode nobody tests
+   * because the developer always arrives by navigation.
+   *
+   * Deliberately the plain shell rather than the rendered treatment `/d/:publicId`
+   * gets. A drop link's preview card carries the sponsor and the amount because
+   * that is what makes a stranger open it; a game link's does not, because the
+   * amount is only claimable after the condition and a card promising NIM for a
+   * tap would be the wrong promise.
+   */
+  app.get('/game/:publicId', () => spaShell())
+  app.get('/games', () => spaShell())
 }

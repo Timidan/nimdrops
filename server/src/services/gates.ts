@@ -77,6 +77,15 @@ export interface GameView {
   tier: string | null
   unlockRequiresTier: string | null
   hint: string | null
+  /**
+   * Seconds per question, for a kind that has them; null otherwise.
+   *
+   * Here rather than only on `POST /session` because the pre-play screen has to
+   * state it BEFORE the player commits — `PRODUCT.md` requires the product to say
+   * what will happen before it happens, and "each question is timed" without the
+   * number is the part of that promise that costs someone a question.
+   */
+  secondsPerQuestion: number | null
   amountEachLuna: string
   claimCount: number
   slotsRemaining: number
@@ -91,6 +100,7 @@ export async function loadGameView(pool: Pool, publicId: string): Promise<GameVi
     tier: string | null
     unlock_requires_tier: string | null
     hint: string | null
+    seconds_per_question: number | null
     amount_each_luna: string
     claim_count: number
     slots_remaining: number
@@ -101,6 +111,7 @@ export async function loadGameView(pool: Pool, publicId: string): Promise<GameVi
             g.config->>'tier'               AS tier,
             g.config->>'unlockRequiresTier' AS unlock_requires_tier,
             CASE WHEN g.kind = 'passphrase' THEN g.config->>'hint' END AS hint,
+            (g.config->>'secondsPerQuestion')::int AS seconds_per_question,
             d.amount_each_luna, d.claim_count,
             d.claim_count - (SELECT count(*)::int FROM claims c WHERE c.drop_id = d.id)
               AS slots_remaining,
@@ -118,6 +129,7 @@ export async function loadGameView(pool: Pool, publicId: string): Promise<GameVi
     tier: row.tier,
     unlockRequiresTier: row.unlock_requires_tier,
     hint: row.hint,
+    secondsPerQuestion: row.seconds_per_question,
     amountEachLuna: row.amount_each_luna,
     claimCount: row.claim_count,
     slotsRemaining: row.slots_remaining,
