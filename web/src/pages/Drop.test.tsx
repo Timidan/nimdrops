@@ -11,7 +11,7 @@
  *  - degradation disables the claim button, it does not delete it;
  *  - "Share the app" shares the app, not the drop the claimant just emptied.
  */
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BridgeError, type BridgeResult, type WalletBridge } from '../sdk/adapter'
@@ -450,6 +450,10 @@ describe('Drop — claiming', () => {
     const back = screen.getByRole('link', { name: /drop one back/i })
     expect(back.getAttribute('href')).toBe('/create?amount=2')
     expect(screen.getByTestId('share-app')).toBeTruthy()
+
+    const nextSteps = screen.getByTestId('post-claim-actions')
+    expect(within(nextSteps).getByRole('link', { name: /spend NIM/i })).toBeTruthy()
+    expect(within(nextSteps).getByRole('link', { name: /sell NIM/i })).toBeTruthy()
 
     // "Drop" is claimant vocabulary; "Campaign" is the sponsor's.
     expect(document.body.textContent ?? '').not.toMatch(/campaign/i)

@@ -139,8 +139,8 @@ export function GetNimiqPay({ platform, className }: GetNimiqPayProps) {
         ))}
       </ul>
       <p className="nd-note nd-getapp-note">
-        Nimiq Pay is Nimiq&rsquo;s own wallet, and it is free. NimDrops runs inside it, so there is
-        nothing else to install.
+        Install Nimiq Pay, then return to this page and tap Open in Nimiq Pay. The wallet is free,
+        and opening the app does not sign or send anything.
       </p>
     </div>
   )

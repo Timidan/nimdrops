@@ -76,6 +76,9 @@ describe('the way out, on every device', () => {
       expect(store.getAttribute('rel')).toMatch(/noopener/)
       expect(store.getAttribute('rel')).toMatch(/noreferrer/)
     }
+    expect(screen.getByTestId('get-nimiq-pay').textContent).toMatch(
+      /install Nimiq Pay, then return to this page/i,
+    )
   })
 
   it('shows the QR when the surface has one, and the typed link when it breaks', () => {

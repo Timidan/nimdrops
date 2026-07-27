@@ -17,6 +17,7 @@ import {
 } from '../ui/icons'
 import { Amount, Pips } from '../ui/Nim'
 import { GetNimiqPay } from '../ui/OpenInApp'
+import PostClaimActions from '../ui/PostClaimActions'
 import SealedEnvelope from '../ui/SealedEnvelope'
 import Sheet from '../ui/Sheet'
 import StatusPill from '../ui/StatusPill'
@@ -517,6 +518,7 @@ function Face({ publicId, state, drop, serverState, txHash, amount, sponsor, onC
           <Link to={`/create?amount=${encodeURIComponent(amount)}`} className="nd-action mt-5">
             Drop one back
           </Link>
+          <PostClaimActions />
           <p className="nd-note mt-4 text-center">
             One share per wallet. The transaction above is the whole story.
           </p>
