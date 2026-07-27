@@ -1,0 +1,50 @@
+{
+  "version": "example-v1",
+  "questions": [
+    {
+      "id": "geo-001",
+      "tier": "novice",
+      "category": "geography",
+      "prompt": "Which ocean lies between Africa and Australia?",
+      "options": ["Atlantic Ocean", "Indian Ocean", "Pacific Ocean", "Arctic Ocean"],
+      "answerIndex": 1,
+      "source": "https://www.britannica.com/place/Indian-Ocean"
+    },
+    {
+      "id": "sci-001",
+      "tier": "novice",
+      "category": "science",
+      "prompt": "What gas do plants absorb from the air during photosynthesis?",
+      "options": ["Oxygen", "Nitrogen", "Carbon dioxide", "Hydrogen"],
+      "answerIndex": 2,
+      "source": "https://www.britannica.com/science/photosynthesis"
+    },
+    {
+      "id": "his-001",
+      "tier": "easy",
+      "category": "history",
+      "prompt": "Which wall divided a European capital until 1989?",
+      "options": ["Hadrian's Wall", "The Berlin Wall", "The Great Wall", "The Western Wall"],
+      "answerIndex": 1,
+      "source": "https://www.britannica.com/topic/Berlin-Wall"
+    },
+    {
+      "id": "mus-001",
+      "tier": "medium",
+      "category": "music",
+      "prompt": "How many strings does a standard violin have?",
+      "options": ["Four", "Five", "Six", "Seven"],
+      "answerIndex": 0,
+      "source": "https://www.britannica.com/art/violin"
+    },
+    {
+      "id": "lan-001",
+      "tier": "hard",
+      "category": "language",
+      "prompt": "Which language contributed the word 'algebra' to English?",
+      "options": ["Greek", "Latin", "Arabic", "Persian"],
+      "answerIndex": 2,
+      "source": "https://www.etymonline.com/word/algebra"
+    }
+  ]
+}

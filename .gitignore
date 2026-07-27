@@ -5,3 +5,8 @@ server/spike/.dev-key
 server/spike/*.json
 server/spike/g0-evidence.md
 server/spike/g1-local-evidence.md
+
+# Trivia question banks are operator content, never repository content.
+# `server/src/gates/trivia/questions.example.json` is the only committed bank.
+questions.v*.json
+!server/src/gates/trivia/questions.example.json

@@ -1,7 +1,7 @@
 import { serve } from '@hono/node-server'
 import { getConnInfo } from '@hono/node-server/conninfo'
 import { readOnlyNimiqChainFromEnv } from './chain/nimiq'
-import { caddyAppSharedSecret, errorMessage, requireNetwork } from './config'
+import { caddyAppSharedSecret, errorMessage, requireNetwork, requireSigScheme } from './config'
 import { closePool, getPool } from './db/pool'
 import { exitAfterFlush, exitAfterTeardown } from './exit'
 import { makeApp } from './http/app'
@@ -67,11 +67,7 @@ function requireEnv(): void {
   if (missing.length > 0) throw new Error(`missing required environment: ${missing.join(', ')}`)
 
   requireNetwork()
-
-  const scheme = process.env.SIG_SCHEME
-  if (scheme !== 'raw' && scheme !== 'nimiq-signed-message') {
-    throw new Error(`SIG_SCHEME must be raw or nimiq-signed-message (got ${scheme ?? 'unset'})`)
-  }
+  requireSigScheme()
 
   // Optional, so it is not in REQUIRED_ENV — but if it is set it is checked
   // HERE, before the socket, not at the first request the limiter has to judge.

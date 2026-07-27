@@ -9,7 +9,14 @@
  *
  * This module must stay dependency-free (no `pg`, no `@nimiq/core`) so any
  * layer can import it without dragging a driver or the WASM bundle along.
+ *
+ * The one import below is `import type`, which the compiler erases: it names a
+ * union declared in `auth/verify.ts` without pulling that module — or the WASM
+ * bundle behind it — into anything that imports this file at runtime. Naming the
+ * union rather than restating it is the point; two copies of a scheme union is
+ * how the copies start drifting.
  */
+import type { SigScheme } from './auth/verify'
 
 /** The only two networks this system is allowed to run against. */
 export type NetworkName = 'TestAlbatross' | 'MainAlbatross'
@@ -29,6 +36,24 @@ export function requireNetwork(): NetworkName {
     )
   }
   return network
+}
+
+/**
+ * Which bytes the wallet signs. An unset or unknown value fails closed rather
+ * than guessing, since guessing wrong rejects every real claimant.
+ *
+ * A deployment serving Nimiq Pay wants `WALLET_SIG_SCHEME`; see `auth/verify.ts`
+ * for where that is established. It stays configurable so a non-wallet signer
+ * can be verified too, and because a wrong value must be *detectable* —
+ * `reserveClaim` says so out loud when the signature it just refused would have
+ * verified under the other scheme.
+ */
+export function requireSigScheme(): SigScheme {
+  const scheme = process.env.SIG_SCHEME
+  if (scheme !== 'raw' && scheme !== 'nimiq-signed-message') {
+    throw new Error(`SIG_SCHEME must be raw or nimiq-signed-message (got ${scheme ?? 'unset'})`)
+  }
+  return scheme
 }
 
 // ---- protocol floors ---------------------------------------------------------
@@ -129,4 +154,39 @@ export function caddyAppSharedSecret(): string | undefined {
 /** Uniform message extraction for the `catch (err: unknown)` sites. */
 export function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
+}
+
+// ---- trivia gate -------------------------------------------------------------
+//
+// Both fail closed and neither has a default. A missing salt would otherwise
+// make question selection predictable from the bank alone; a missing bank path
+// would otherwise silently serve no questions, which reads to a player as a
+// broken game rather than a disabled one. `http/app.ts` mounts the trivia routes
+// only when both are present, so ordinary drops keep working without either.
+
+/**
+ * HMAC key for deterministic question selection.
+ *
+ * Treat as STABLE for a campaign's duration: rotating it reshuffles every
+ * future session's questions, which is harmless for a new session and
+ * confusing for a player who has already failed one and expects the same set.
+ */
+export function requireTriviaSalt(): string {
+  const salt = process.env.TRIVIA_SELECTION_SALT
+  if (!salt || salt.length < 32) {
+    throw new Error('TRIVIA_SELECTION_SALT must be set to at least 32 characters')
+  }
+  return salt
+}
+
+/** Filesystem path to the operator's question bank. Never inside the repo. */
+export function requireTriviaBankPath(): string {
+  const path = process.env.TRIVIA_BANK_PATH
+  if (!path) throw new Error('TRIVIA_BANK_PATH must be set to the question bank file')
+  return path
+}
+
+/** Whether trivia is configured at all. Absent config disables the feature. */
+export function triviaConfigured(): boolean {
+  return Boolean(process.env.TRIVIA_SELECTION_SALT && process.env.TRIVIA_BANK_PATH)
 }

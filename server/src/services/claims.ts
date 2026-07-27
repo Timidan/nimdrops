@@ -12,9 +12,8 @@ import {
   checkWalletSignature,
   otherScheme,
   WALLET_SIG_SCHEME,
-  type SigScheme,
 } from '../auth/verify'
-import { requireNetwork } from '../config'
+import { requireNetwork, requireSigScheme } from '../config'
 import type { Queryable } from '../db/pool'
 import { ConflictError, bindIdem, idemKeyHash, lookupIdem } from '../http/idempotency'
 import { statusToken, hashToken } from '../ids'
@@ -173,25 +172,11 @@ function requireOrigin(): string {
   return origin
 }
 
-/**
- * Which bytes the wallet signs. An unset or unknown value fails closed rather
- * than guessing, since guessing wrong rejects every real claimant.
- *
- * A deployment serving Nimiq Pay wants {@link WALLET_SIG_SCHEME}; see
- * `auth/verify.ts` for where that is established. It stays configurable so a
- * non-wallet signer can be verified too, and because a wrong value must be
- * *detectable* — {@link reserveClaim} says so out loud when the signature it
- * just refused would have verified under the other scheme.
- */
-function requireSigScheme(): SigScheme {
-  const scheme = process.env.SIG_SCHEME
-  if (scheme !== 'raw' && scheme !== 'nimiq-signed-message') {
-    throw new ClaimError(
-      `SIG_SCHEME must be raw or nimiq-signed-message (got ${scheme ?? 'unset'})`,
-    )
-  }
-  return scheme
-}
+// `requireSigScheme` used to live here as a private function. It now sits in
+// `config.ts` beside `requireNetwork`, because `gates/attested.ts` needs the same
+// reader and a second copy of a scheme reader is the bug that file's header
+// describes: the network validator once had four copies and one of them silently
+// defaulted to `TestAlbatross`.
 
 // ---- challenge issuance ------------------------------------------------------
 
