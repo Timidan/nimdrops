@@ -265,7 +265,14 @@ export default function Preview() {
   return (
     <div className={PREVIEW_SENTINEL} style={{ background: '#0f1230', minHeight: '100vh' }}>
       <style>{`
-        .${PREVIEW_SENTINEL} { color: #e7e4dc; font: 13px/1.4 system-ui, sans-serif; }
+        /* The board's own chrome, but the \`font\` shorthand cascades into the
+           cells, so \`system-ui\` here silently re-imposed itself on every claim
+           screen under review — and \`system-ui\` resolves to a MONOSPACE face on
+           at least one machine this project is reviewed on. The app was right
+           and the instrument was lying: the surface was judged as "basic" on a
+           render the shipped page never produces. The board has to be held to
+           the product's own stack. */
+        .${PREVIEW_SENTINEL} { color: #e7e4dc; font: 13px/1.4 var(--font-sans); }
         .${PREVIEW_SENTINEL} .bar { position: sticky; top: 0; z-index: 10; display: flex;
           flex-wrap: wrap; gap: 12px; align-items: center; padding: 12px 16px;
           background: #0f1230; border-bottom: 1px solid #2a2f5c; }
