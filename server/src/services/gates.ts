@@ -62,6 +62,70 @@ export async function loadGate(pool: Pool, publicId: string): Promise<GateRow> {
   }
 }
 
+/**
+ * One game's public view.
+ *
+ * Its own query rather than `getPublic`, on purpose: `DropPublic.amountEach` is a
+ * decimal NIM string, while the list emits `amountEachLuna`. Reusing it would put
+ * two different units behind two similar names on one wire, which is the kind of
+ * mismatch a client eventually gets wrong by a factor of 100,000. Both endpoints
+ * speak luna here and the web layer formats.
+ */
+export interface GameView {
+  publicId: string
+  kind: GateKind
+  tier: string | null
+  unlockRequiresTier: string | null
+  hint: string | null
+  amountEachLuna: string
+  claimCount: number
+  slotsRemaining: number
+  expiresAt: string | null
+  state: string
+}
+
+export async function loadGameView(pool: Pool, publicId: string): Promise<GameView> {
+  const { rows } = await pool.query<{
+    public_id: string
+    kind: GateKind
+    tier: string | null
+    unlock_requires_tier: string | null
+    hint: string | null
+    amount_each_luna: string
+    claim_count: number
+    slots_remaining: number
+    expires_at: Date | null
+    state: string
+  }>(
+    `SELECT d.public_id, g.kind,
+            g.config->>'tier'               AS tier,
+            g.config->>'unlockRequiresTier' AS unlock_requires_tier,
+            CASE WHEN g.kind = 'passphrase' THEN g.config->>'hint' END AS hint,
+            d.amount_each_luna, d.claim_count,
+            d.claim_count - (SELECT count(*)::int FROM claims c WHERE c.drop_id = d.id)
+              AS slots_remaining,
+            d.expires_at, d.state
+     FROM drop_gates g
+     JOIN drops d ON d.id = g.drop_id
+     WHERE d.public_id = $1`,
+    [publicId],
+  )
+  const row = rows[0]
+  if (!row) throw new GateRejectedError('not_a_game', 'this drop carries no condition')
+  return {
+    publicId: row.public_id,
+    kind: row.kind,
+    tier: row.tier,
+    unlockRequiresTier: row.unlock_requires_tier,
+    hint: row.hint,
+    amountEachLuna: row.amount_each_luna,
+    claimCount: row.claim_count,
+    slotsRemaining: row.slots_remaining,
+    expiresAt: row.expires_at?.toISOString() ?? null,
+    state: row.state,
+  }
+}
+
 /** Whether a wallet has already satisfied this drop's condition. */
 export async function hasGrant(
   pool: Pool,

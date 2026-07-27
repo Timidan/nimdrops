@@ -1,7 +1,17 @@
 import { serve } from '@hono/node-server'
 import { getConnInfo } from '@hono/node-server/conninfo'
 import { readOnlyNimiqChainFromEnv } from './chain/nimiq'
-import { caddyAppSharedSecret, errorMessage, requireNetwork, requireSigScheme } from './config'
+import {
+  caddyAppSharedSecret,
+  errorMessage,
+  requireNetwork,
+  requireSigScheme,
+  requireTriviaBankPath,
+  requireTriviaSalt,
+  triviaConfigured,
+} from './config'
+import { loadBank } from './gates/trivia/bank'
+import { makeTrivia } from './gates/trivia/sessions'
 import { closePool, getPool } from './db/pool'
 import { exitAfterFlush, exitAfterTeardown } from './exit'
 import { makeApp } from './http/app'
@@ -126,7 +136,24 @@ async function main(): Promise<void> {
     peerAddress: (c) => getConnInfo(c).remote.address,
   })
 
-  const app = makeApp({ pool, chain, alerts, clientIp })
+  // Absent trivia configuration is NOT an error: the deployment simply serves no
+  // question games, while passphrase, attested and every ordinary drop path carry
+  // on. A bank that IS configured but unreadable or invalid is an error, and
+  // `loadBank` throws here so a broken bank stops boot instead of silently
+  // disabling the feature on a process that then reports itself healthy.
+  const triviaOn = triviaConfigured()
+  const gates = {
+    trivia: triviaOn
+      ? makeTrivia({ pool, bank: await loadBank(requireTriviaBankPath()), salt: requireTriviaSalt() })
+      : null,
+    // The same secret keys passphrase hashing. One value rather than two, so an
+    // operator cannot rotate half of it and leave the other half verifying
+    // against what it used to be.
+    passphraseSalt: triviaOn ? requireTriviaSalt() : null,
+  }
+  logInfo('gates_configured', { trivia: triviaOn, passphrase: triviaOn })
+
+  const app = makeApp({ pool, chain, alerts, clientIp, gates })
 
   const server = serve({ fetch: app.fetch, port: port(), hostname: '0.0.0.0' }, (info) => {
     log('api_listening', {
