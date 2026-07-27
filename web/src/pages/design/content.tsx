@@ -72,8 +72,8 @@ export const CUSTODY = [
     v: 'Wallet. A signature proves a wallet, not a person, so anyone holding several can take several.',
   },
   {
-    k: 'After 24 hours',
-    v: 'The drop closes and every unclaimed share goes back to the wallet that funded it.',
+    k: 'When the window closes',
+    v: 'The drop closes and every unclaimed share goes back to the wallet that funded it. The sponsor sets how long it runs.',
   },
 ] as const
 

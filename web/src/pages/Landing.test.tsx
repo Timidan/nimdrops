@@ -86,7 +86,11 @@ describe('what a stranger is told', () => {
     const text = document.body.textContent ?? ''
     expect(text).toMatch(/fixed share of NIM for everyone who opens it/i)
     expect(text).toMatch(/one share per wallet, first come, first served/i)
-    expect(text).toMatch(/24 hours/)
+    // The refund is stated as a window the sponsor sets, with the default
+    // named. Asserting "24 hours" as the rule would be asserting something the
+    // product stopped doing when the window became a choice.
+    expect(text).toMatch(/goes back to the sponsor when the claim window closes/i)
+    expect(text).toMatch(/24 hours unless they change it/i)
     // The uncomfortable fact is on the page, not one tap behind it.
     expect(text).toMatch(/custody: not a smart contract, and not your wallet/i)
     await waitFor(() => expect(screen.getByTestId('stats')).toBeTruthy())

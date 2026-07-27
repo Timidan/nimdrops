@@ -18,16 +18,26 @@
  * all public by construction; the hash is on a public chain.
  */
 import type { Draft } from '../api'
+import { MAX_EXPIRY_HOURS } from '../money'
 
 /** One in-flight or live drop per browser. A sponsor funds one at a time. */
 export const FUNDING_STORAGE_KEY = 'nimdrops.funding'
 
 /**
- * How long a record is worth acting on. A drop expires 24 hours after it goes
- * live, so 48 hours covers the slowest funding plus the whole live window and
- * still lets a forgotten record fall off on its own.
+ * How long a record is worth acting on.
+ *
+ * It used to be 48 hours, on the reasoning that a drop expires 24 hours after
+ * it goes live. The claim window is the sponsor's choice now and can be as long
+ * as 14 days (`MAX_EXPIRY_HOURS`), which made 48 hours a bug rather than a
+ * margin: a sponsor who funded a week-long drop and closed the app would come
+ * back on day three to find the record gone, and the share link with it —
+ * this browser holds the only copy, because the link is withheld until `live`.
+ *
+ * So it is the longest possible window plus a day for the slowest funding. A
+ * forgotten record still falls off on its own, just after the last drop it
+ * could possibly point at has closed.
  */
-export const FUNDING_TTL_MS = 48 * 60 * 60 * 1000
+export const FUNDING_TTL_MS = (MAX_EXPIRY_HOURS + 24) * 60 * 60 * 1000
 
 export interface FundedDraft {
   draft: Draft

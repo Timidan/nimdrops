@@ -110,7 +110,7 @@ function disclosure(over: Partial<CustodyDisclosure> = {}): CustodyDisclosure {
       },
       {
         id: 'expiry_clock',
-        text: 'The 24 hour claim window starts when the network confirms your funding, not when you tap send.',
+        text: 'The 24 hour claim window starts when the network confirms your funding, not when you tap send. The operator holds your NIM for the whole window, and no one can end a drop early.',
       },
       {
         id: 'refunds',
@@ -267,6 +267,16 @@ function queueOf(value: Reply | Reply[] | undefined, fallback: Reply[]): Reply[]
   return value ? [value] : fallback
 }
 
+/**
+ * `/api/custody`, with or without the `?expiryHours=` the screen appends when
+ * the sponsor picks a window other than the default. Matching on the path and
+ * not on the whole string is what stops a query parameter from reading as an
+ * unscripted call.
+ */
+function isCustody(url: string): boolean {
+  return url.split('?')[0].endsWith('/api/custody')
+}
+
 function installFetch(script: FetchScript) {
   const calls: { url: string; method: string; init: RequestInit | undefined }[] = []
   const drops = [...(script.drops ?? [])]
@@ -277,7 +287,7 @@ function installFetch(script: FetchScript) {
     const method = (init?.method ?? 'GET').toUpperCase()
     calls.push({ url, method, init })
     let reply: Reply | undefined
-    if (url.endsWith('/api/custody')) reply = next(custody)
+    if (isCustody(url)) reply = next(custody)
     else if (method === 'POST' && url.endsWith('/funding')) reply = next(funding)
     else if (method === 'POST') reply = script.create
     else reply = next(drops)
@@ -296,7 +306,7 @@ function installFetch(script: FetchScript) {
 
 /** How many times the screen has asked the server for the live disclosure. */
 function custodyCalls(calls: { url: string }[]) {
-  return calls.filter((call) => call.url.endsWith('/api/custody')).length
+  return calls.filter((call) => isCustody(call.url)).length
 }
 
 /** The record `state/funding.ts` writes once the wallet has answered. */
@@ -562,11 +572,178 @@ describe('Create — review sheet', () => {
     const sheet = openReview()
 
     expect(within(sheet).getByRole('heading', { name: /before you fund/i })).toBeTruthy()
-    for (const label of ['Each person gets', 'People', 'You send', 'Expires']) {
+    for (const label of ['Each person gets', 'People', 'You send', 'Claim window']) {
       expect(within(sheet).getByText(label)).toBeTruthy()
     }
     expect(within(sheet).getByText('10 NIM')).toBeTruthy()
+    // The window the sponsor picked, not a constant. It is the default here
+    // because nothing on the form touched it.
+    expect(within(sheet).getByText('24 hours after it goes live')).toBeTruthy()
     expect(sheet.querySelector('.nd-wax')).toBeNull()
+  })
+})
+
+/**
+ * The claim window is the sponsor's choice, and the two things that make that
+ * safe on this side are asserted here: the default costs no interaction, and
+ * nothing on screen ever names a window other than the one selected.
+ *
+ * The bound is NOT tested here, because it is not enforced here. The chips can
+ * only express valid windows; the server refuses everything else and
+ * `server/test/api.test.ts` is where that is proved.
+ */
+describe('Create — the claim window', () => {
+  function chips() {
+    return within(screen.getByTestId('expiry-choice')).getAllByRole('radio')
+  }
+
+  function chipFor(hours: number) {
+    return screen.getByTestId('expiry-choice').querySelector(`[data-hours="${hours}"]`)!
+  }
+
+  it('opens on 24 hours, so a sponsor who does not care is already finished', async () => {
+    await renderLoaded({ discoverBridge: bridgeOf(new MockBridge()) })
+
+    const labels = chips().map((chip) => chip.textContent)
+    expect(labels).toEqual(['1 hour', '6 hours', '24 hours', '3 days', '7 days', '14 days'])
+    const checked = chips().filter((chip) => chip.getAttribute('aria-checked') === 'true')
+    expect(checked).toHaveLength(1)
+    expect(checked[0].textContent).toBe('24 hours')
+  })
+
+  it('states the consequence of a longer window, not just its length', async () => {
+    await renderLoaded({ discoverBridge: bridgeOf(new MockBridge()) })
+    const group = screen.getByTestId('expiry-choice').parentElement!
+
+    expect(group.textContent).toMatch(/goes back to you 24 hours after the drop goes live/i)
+    expect(group.textContent).toMatch(/holds it for the whole window/i)
+    expect(group.textContent).toMatch(/no one can end a drop early/i)
+
+    fireEvent.click(chipFor(168))
+    expect(group.textContent).toMatch(/goes back to you 7 days after the drop goes live/i)
+  })
+
+  it('sends the chosen window, and omits the field entirely at the default', async () => {
+    const script = installFetch({ create: { status: 201, body: { ...DRAFT, expiryHours: 72 } } })
+    renderCreate({ discoverBridge: bridgeOf(new MockBridge()) })
+    await waitFor(() => screen.getByTestId('live-limits'))
+
+    fillForm()
+    fireEvent.click(chipFor(72))
+    await waitFor(() => expect(chipFor(72).getAttribute('aria-checked')).toBe('true'))
+    fireEvent.click(screen.getByRole('button', { name: /review drop/i }))
+    fireEvent.click(screen.getByRole('button', { name: /fund drop/i }))
+
+    await waitFor(() => {
+      const create = script.calls.find((c) => c.method === 'POST' && c.url.endsWith('/api/drops'))
+      expect(create).toBeTruthy()
+      expect(JSON.parse(String(create!.init!.body))).toMatchObject({ expiryHours: 72 })
+    })
+  })
+
+  it('omits the window from the request when the sponsor leaves it alone', async () => {
+    const script = installFetch({ create: { status: 201, body: DRAFT } })
+    renderCreate({ discoverBridge: bridgeOf(new MockBridge()) })
+    await waitFor(() => screen.getByTestId('live-limits'))
+
+    fillForm()
+    fireEvent.click(screen.getByRole('button', { name: /review drop/i }))
+    fireEvent.click(screen.getByRole('button', { name: /fund drop/i }))
+
+    await waitFor(() => {
+      const create = script.calls.find((c) => c.method === 'POST' && c.url.endsWith('/api/drops'))
+      expect(create).toBeTruthy()
+      // The default is the server's to define, so the untouched form makes the
+      // request it always made.
+      expect(Object.keys(JSON.parse(String(create!.init!.body)))).not.toContain('expiryHours')
+    })
+  })
+
+  it('asks the server to describe the window it is showing, and shows what comes back', async () => {
+    const week = disclosure({
+      expiryHours: 168,
+      points: disclosure().points.map((p) =>
+        p.id === 'expiry_clock'
+          ? {
+              ...p,
+              text: 'The 7 day claim window starts when the network confirms your funding, not when you tap send. The operator holds your NIM for the whole window, and no one can end a drop early.',
+            }
+          : p,
+      ),
+    })
+    const script = installFetch({
+      custody: [
+        { status: 200, body: disclosure() },
+        { status: 200, body: week },
+      ],
+    })
+    renderCreate({ discoverBridge: bridgeOf(new MockBridge()) })
+    await waitFor(() => screen.getByTestId('live-limits'))
+
+    fireEvent.click(chipFor(168))
+
+    // The default asks for nothing; a chosen window asks for itself.
+    await waitFor(() => {
+      const custody = script.calls.filter((c) => isCustody(c.url)).map((c) => c.url)
+      expect(custody[0]).not.toContain('expiryHours')
+      expect(custody[1]).toContain('expiryHours=168')
+    })
+
+    fillForm()
+    const sheet = openReview()
+    expect(within(sheet).getByText('7 days after it goes live')).toBeTruthy()
+    expect(within(sheet).getByText(/The 7 day claim window starts/)).toBeTruthy()
+  })
+
+  /**
+   * The disclosure is the server's sentence about the sponsor's own money. A
+   * sentence naming the wrong window is worse than no sentence, so while the
+   * refresh for a new selection is in flight — or after one has failed — the
+   * server's points come off screen and the shipped fallback takes their place,
+   * naming the selection.
+   */
+  it('never shows a disclosure that describes a different window', async () => {
+    installFetch({
+      custody: [
+        { status: 200, body: disclosure() },
+        { status: 503, body: { error: { code: 'degraded', message: 'no' } } },
+      ],
+    })
+    renderCreate({ discoverBridge: bridgeOf(new MockBridge()) })
+    await waitFor(() => screen.getByTestId('live-limits'))
+
+    fillForm()
+    fireEvent.click(chipFor(336))
+
+    const sheet = await waitFor(() => {
+      fireEvent.click(screen.getByRole('button', { name: /review drop/i }))
+      const dialog = screen.getByRole('dialog')
+      within(dialog).getByTestId('custody-fallback')
+      return dialog
+    })
+    // The stale sentence about 24 hours is gone, and what replaces it names the
+    // window the sponsor actually picked.
+    expect(within(sheet).queryByText(/The 24 hour claim window starts/)).toBeNull()
+    expect(within(sheet).getByText(/stops accepting claims 14 days after it goes live/i)).toBeTruthy()
+    expect(within(sheet).getByText('14 days after it goes live')).toBeTruthy()
+  })
+
+  it('tells the sponsor when their funded drop goes back, using that drop own window', async () => {
+    installFetch({
+      create: { status: 201, body: { ...DRAFT, expiryHours: 72 } },
+      funding: { status: 200, body: dropBody('live') },
+      drops: [{ status: 200, body: { ...dropBody('live'), expiryHours: 72 } }],
+    })
+    renderCreate({ discoverBridge: bridgeOf(new MockBridge()) })
+    await waitFor(() => screen.getByTestId('live-limits'))
+
+    fillForm()
+    fireEvent.click(chipFor(72))
+    fireEvent.click(screen.getByRole('button', { name: /review drop/i }))
+    fireEvent.click(screen.getByRole('button', { name: /fund drop/i }))
+
+    await screen.findByTestId('share-block')
+    expect(screen.getByText(/refunded to the wallet that funded this drop, 3 days after/i)).toBeTruthy()
   })
 })
 

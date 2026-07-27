@@ -39,6 +39,9 @@ function dropBody(over: Record<string, unknown> = {}) {
     claimCount: 5,
     remaining: 3,
     state: 'live',
+    // The window the sponsor chose. Every real server sends it; a claim screen
+    // that has it names this drop's own deadline rather than a constant.
+    expiryHours: 24,
     expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
     ...over,
   }
@@ -164,6 +167,34 @@ describe('Drop — the drop card', () => {
     // The deadline is a labelled tile in the open field now, not a sentence.
     expect(screen.getByText(/closes in/i)).toBeTruthy()
     expect(screen.getByTestId('countdown').textContent).toMatch(/\d+h/)
+  })
+
+  /**
+   * The claim window is the sponsor's choice, so `expiresAt` can now be a
+   * fortnight out. The countdown reads it per drop and needs no other change —
+   * except its units: `335h 12m` is a number nobody converts, and it is wider
+   * than the tabular figures beside it are laid out for.
+   */
+  it('counts a multi-day window down in days, and this drop own window in the sheet', async () => {
+    installFetch({
+      drop: {
+        status: 200,
+        body: dropBody({
+          expiryHours: 336,
+          expiresAt: new Date(Date.now() + 200 * 3600_000 + 30 * 60_000).toISOString(),
+        }),
+      },
+    })
+    mount()
+    await unseal()
+
+    // 200 hours is 8 days and 8 hours. Not "200h 30m".
+    expect(screen.getByTestId('countdown').textContent).toBe('8d 8h')
+
+    fireEvent.click(await screen.findByTestId('custody-disclosure'))
+    const sheet = await screen.findByRole('dialog')
+    expect(sheet.textContent).toMatch(/stops accepting claims\s*14 days\s*after it went live/i)
+    expect(sheet.textContent, 'never a constant').not.toMatch(/24 hours/i)
   })
 
   /**

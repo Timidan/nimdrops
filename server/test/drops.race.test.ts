@@ -9,7 +9,10 @@ import { migrate } from '../src/db/migrate'
 import { DropShapeError } from '../src/money'
 import {
   DropNotFoundError,
+  ExpiryWindowError,
   FundingRejectedError,
+  MAX_EXPIRY_HOURS,
+  MIN_EXPIRY_HOURS,
   createDraft,
   getPublic,
   submitFunding,
@@ -73,12 +76,20 @@ function newChain(o: { network?: 'TestAlbatross' | 'MainAlbatross' } = {}): Fake
   return c
 }
 
-async function draft(o: { amountEachLuna?: bigint; claimCount?: number; message?: string } = {}) {
+async function draft(
+  o: {
+    amountEachLuna?: bigint
+    claimCount?: number
+    message?: string
+    expiryHours?: number
+  } = {},
+) {
   return createDraft(pool, chain, {
     sponsorLabel: 'Sponsor',
     amountEachLuna: o.amountEachLuna ?? AMOUNT_EACH,
     claimCount: o.claimCount ?? CLAIM_COUNT,
     ...(o.message === undefined ? {} : { message: o.message }),
+    ...(o.expiryHours === undefined ? {} : { expiryHours: o.expiryHours }),
   })
 }
 
@@ -121,9 +132,11 @@ async function readDrop(publicId: string) {
     refund_address: string | null
     funding_tx_hash: string | null
     activated_height: string | null
+    expiry_hours: number
     expires_at: Date | null
   }>(
-    `SELECT state, creator_address, refund_address, funding_tx_hash, activated_height, expires_at
+    `SELECT state, creator_address, refund_address, funding_tx_hash, activated_height,
+            expiry_hours, expires_at
      FROM drops WHERE public_id = $1`,
     [publicId],
   )
@@ -658,6 +671,69 @@ describe.skipIf(!hasDb)('drop drafts and exact funding activation (real Postgres
     expect(await outstandingPrincipalLuna(pool)).toBe(PRINCIPAL)
   })
 
+  // ---- the sponsor's claim window -----------------------------------------------
+
+  it('stamps the sponsor-chosen window at activation, measured from activation', async () => {
+    const d = await draft({ expiryHours: 168 })
+    expect(d.expiryHours).toBe(168)
+    // The draft carries the window but no deadline: the clock has not started.
+    expect((await readDrop(d.publicId)).expires_at).toBeNull()
+    expect((await readDrop(d.publicId)).expiry_hours).toBe(168)
+
+    const hash = fund(d.publicId)
+    finalize()
+    const before = Date.now()
+    await submitFunding(pool, chain, { publicId: d.publicId, txHash: hash })
+    const after = Date.now()
+
+    const row = await readDrop(d.publicId)
+    const expires = row.expires_at!.getTime()
+    expect(expires).toBeGreaterThanOrEqual(before + 168 * 3600_000 - 5_000)
+    expect(expires).toBeLessThanOrEqual(after + 168 * 3600_000 + 5_000)
+  })
+
+  it('defaults to 24 hours when the caller does not choose', async () => {
+    const d = await draft()
+    expect(d.expiryHours).toBe(24)
+    expect((await readDrop(d.publicId)).expiry_hours).toBe(24)
+    expect((await getPublic(pool, d.publicId)).expiryHours).toBe(24)
+  })
+
+  it('refuses a window outside the bounds, in the service and in the schema', async () => {
+    for (const expiryHours of [0, -3, MAX_EXPIRY_HOURS + 1, 2.5, Number.NaN]) {
+      await expect(draft({ expiryHours }), `expiryHours=${expiryHours}`).rejects.toBeInstanceOf(
+        ExpiryWindowError,
+      )
+    }
+    // Both ends of the range are real, so the refusals above bound a range
+    // rather than rejecting everything.
+    expect((await draft({ expiryHours: MIN_EXPIRY_HOURS })).expiryHours).toBe(1)
+    expect((await draft({ expiryHours: MAX_EXPIRY_HOURS })).expiryHours).toBe(336)
+
+    // And the schema is the backstop: a write that bypassed the service still
+    // cannot store a window outside the bounds.
+    const d = await draft()
+    await expect(
+      pool.query('UPDATE drops SET expiry_hours = 1000 WHERE public_id = $1', [d.publicId]),
+    ).rejects.toMatchObject({ constraint: 'drops_expiry_hours_range' })
+  })
+
+  it('never recomputes the deadline once a drop is live', async () => {
+    const d = await draft({ expiryHours: 6 })
+    const hash = fund(d.publicId)
+    finalize()
+    await submitFunding(pool, chain, { publicId: d.publicId, txHash: hash })
+    const stamped = (await readDrop(d.publicId)).expires_at!.getTime()
+
+    // The idempotent replay re-enters `activate()` — the ONLY writer of
+    // `expires_at` — so if the deadline could drift, it would drift here.
+    await new Promise((resolve) => setTimeout(resolve, 25))
+    const again = await submitFunding(pool, chain, { publicId: d.publicId, txHash: hash })
+    expect(again.state).toBe('live')
+    expect((await readDrop(d.publicId)).expires_at!.getTime()).toBe(stamped)
+    expect(again.expiresAt!.getTime()).toBe(stamped)
+  })
+
   // ---- GC / activation race (G1 review finding 7) ------------------------------
 
   it('activates a draft that draft GC cancelled while its funding was being verified', async () => {
@@ -982,11 +1058,15 @@ describe.skipIf(!hasDb)('drop drafts and exact funding activation (real Postgres
     const serialized = JSON.stringify(pub)
     expect(serialized).not.toContain('CLAIMANT')
     expect(serialized).not.toContain(rows[0].id)
+    // `expiryHours` is on this list deliberately: it is the sponsor's own
+    // published choice, already derivable from `expiresAt`, and it says nothing
+    // about any claimant. Every other addition has to be argued for here too.
     expect(Object.keys(pub).sort()).toEqual(
       [
         'amountEach',
         'claimCount',
         'expiresAt',
+        'expiryHours',
         'fundingTxHash',
         'message',
         'publicId',

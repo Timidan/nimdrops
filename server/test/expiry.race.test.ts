@@ -141,12 +141,13 @@ function newChain(): FakeChain {
  * Funds at the CURRENT head so a test that already advanced the chain (by
  * draining the worker) can still activate a second drop.
  */
-async function liveDrop(o: { claimCount?: number } = {}): Promise<string> {
+async function liveDrop(o: { claimCount?: number; expiryHours?: number } = {}): Promise<string> {
   const claimCount = o.claimCount ?? CLAIM_COUNT
   const draft = await createDraft(pool, chain, {
     sponsorLabel: 'Sponsor',
     amountEachLuna: AMOUNT_EACH,
     claimCount,
+    ...(o.expiryHours === undefined ? {} : { expiryHours: o.expiryHours }),
   })
   const hash = `tx-${draft.publicId}`
   const height = Math.max(await chain.headHeight(), FUND_HEIGHT)
@@ -357,6 +358,58 @@ describe.skipIf(!hasDb)('expiry, exact refunds, settlement and draft GC (real Po
     // Every luna is accounted for exactly once: 3 payouts + 1 refund = principal.
     const total = (await readTransfers(publicId)).reduce((sum, t) => sum + BigInt(t.amount_luna), 0n)
     expect(total).toBe(AMOUNT_EACH * BigInt(CLAIM_COUNT))
+  })
+
+  /**
+   * A non-default window, end to end, and the point is what does NOT change.
+   *
+   * `sweepExpiry` already selects on `expires_at <= now()` per drop and never
+   * reads a window length, so a variable window should need no sweeper change.
+   * This asserts that rather than assuming it: a seven-day drop is not swept
+   * while it is live, is swept the moment its own deadline passes, honours the
+   * claims already reserved against it, and produces exactly one refund for the
+   * unallocated value to the funding sender and to nobody else.
+   */
+  it('sweeps a seven-day drop on its own deadline, and refunds exactly the same way', async () => {
+    const publicId = await liveDrop({ expiryHours: 168 })
+    await reserveOne(publicId)
+    await reserveOne(publicId)
+
+    // Not due yet, and a 24-hour-shaped sweeper would already have taken it.
+    await pool.query(
+      `UPDATE drops SET expires_at = now() + interval '167 hours' WHERE public_id = $1`,
+      [publicId],
+    )
+    expect(await sweepExpiry(pool, alerts)).toBe(0)
+    expect((await readDrop(publicId)).state).toBe('live')
+
+    await expireNow(publicId)
+    expect(await sweepExpiry(pool, alerts)).toBe(1)
+
+    const drop = await readDrop(publicId)
+    expect(drop).toMatchObject({ state: 'closing', closing_reason: 'expired' })
+
+    const refunds = await readRefunds(publicId)
+    expect(refunds).toHaveLength(1)
+    expect(refunds[0]).toMatchObject({
+      idempotency_key: `refund:${drop.id}`,
+      purpose: 'refund',
+      claim_id: null,
+      amount_luna: (AMOUNT_EACH * 3n).toString(),
+      recipient_address: SPONSOR,
+    })
+
+    // The two reserved claims are still honoured, and the whole principal is
+    // accounted for exactly once.
+    const transfers = await readTransfers(publicId)
+    expect(transfers.filter((t) => t.purpose === 'payout')).toHaveLength(2)
+    expect(transfers.reduce((sum, t) => sum + BigInt(t.amount_luna), 0n)).toBe(
+      AMOUNT_EACH * BigInt(CLAIM_COUNT),
+    )
+
+    await drainWorker()
+    expect(await settleTerminal(pool)).toBe(1)
+    expect((await readDrop(publicId)).state).toBe('refunded')
   })
 
   it('creates no refund when every slot was claimed, and settles after payouts confirm', async () => {

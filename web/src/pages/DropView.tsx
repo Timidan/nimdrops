@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import type { ClaimServerState, DropPublic } from '../api'
+import { expiryWindowAdjective, expiryWindowLabel } from '../money'
 import { nimiqPayDeeplink } from '../sdk/adapter'
 import { CLAIM_STORAGE_PREFIX, type ClaimUiState } from '../state/claim'
 import Field from '../ui/Field'
@@ -203,7 +204,13 @@ export default function DropView({
           caption={<Caption state={state} amount={amount} />}
         >
           {outcome ? (
-            <Outcome state={state} amount={amount} notice={notice} onRetry={onRetry} />
+            <Outcome
+              state={state}
+              amount={amount}
+              notice={notice}
+              onRetry={onRetry}
+              expiryHours={drop?.expiryHours}
+            />
           ) : (
             <Face
               publicId={publicId}
@@ -216,7 +223,9 @@ export default function DropView({
               onClaim={onClaim}
             />
           )}
-          {state === 'awaiting-funding' ? null : <CustodyDisclosure />}
+          {state === 'awaiting-funding' ? null : (
+            <CustodyDisclosure expiryHours={drop?.expiryHours} />
+          )}
         </GlassSheet>
       </SealedEnvelope>
       {/*
@@ -393,9 +402,20 @@ function Countdown({ expiresAt }: { expiresAt: string }) {
   )
 }
 
+/**
+ * The remaining window, in the coarsest unit that still says something.
+ *
+ * Days appear once there are two of them, and they appear because the claim
+ * window is the sponsor's choice now: a fortnight-long drop read `335h 12m`
+ * before this, which is a number nobody converts and which pushed the countdown
+ * past the width its tabular figures are laid out for. Below two days the
+ * hour-and-minute form is kept exactly as it was, because that is the range in
+ * which a claimant is actually deciding whether to hurry.
+ */
 function humanize(ms: number): string {
   const minutes = Math.floor(ms / 60_000)
   const hours = Math.floor(minutes / 60)
+  if (hours >= 48) return `${Math.floor(hours / 24)}d ${hours % 24}h`
   if (hours >= 1) return `${hours}h ${minutes % 60}m`
   if (minutes >= 1) return `${minutes}m`
   return 'under a minute'
@@ -578,7 +598,7 @@ function Face({ publicId, state, drop, serverState, txHash, amount, sponsor, onC
  * `PRIVACY.md`; it is lifted rather than rewritten so the two audiences are
  * told the same thing.
  */
-function CustodyDisclosure() {
+function CustodyDisclosure({ expiryHours }: { expiryHours?: number }) {
   const [open, setOpen] = useState(false)
   return (
     <>
@@ -616,10 +636,24 @@ function CustodyDisclosure() {
             control of one wallet. It does not prove one person, so anyone holding several wallets
             can take several shares.
           </p>
+          {/* The window is the sponsor's choice, so it is read off THIS drop.
+              Where the server has not said — an older build, or a body that
+              did not parse — the sentence keeps the fact and drops the number,
+              because a claimant told the wrong deadline is worse off than one
+              told to look at the countdown. */}
           <p className="mt-3">
-            A drop stops accepting claims{' '}
-            <strong className="font-semibold text-plate">24 hours</strong> after it goes live. Every
-            unclaimed share is then refunded to the wallet that funded it.
+            {expiryHours === undefined ? (
+              <>This drop stops accepting claims when its claim window ends.</>
+            ) : (
+              <>
+                This drop stops accepting claims{' '}
+                <strong className="font-semibold text-plate">
+                  {expiryWindowLabel(expiryHours)}
+                </strong>{' '}
+                after it went live.
+              </>
+            )}{' '}
+            Every unclaimed share is then refunded to the wallet that funded it.
           </p>
           <p className="mt-3">
             Payouts wait for the network to confirm them, and can go to a person for review during
@@ -724,11 +758,14 @@ function Outcome({
   amount,
   notice,
   onRetry,
+  expiryHours,
 }: {
   state: ClaimUiState
   amount: string
   notice: string
   onRetry: () => void
+  /** This drop's own claim window, when the server has said what it was. */
+  expiryHours?: number
 }) {
   return (
     <div>
@@ -744,7 +781,11 @@ function Outcome({
 
       {state === 'expired' ? (
         <>
-          <Line>Its 24 hours are up, so it is no longer accepting claims.</Line>
+          <Line>
+            {expiryHours === undefined
+              ? 'Its claim window is up, so it is no longer accepting claims.'
+              : `Its ${expiryWindowAdjective(expiryHours)} claim window is up, so it is no longer accepting claims.`}
+          </Line>
           <Line>Anything unclaimed is refunded to the wallet that funded it.</Line>
           <DropOneBack amount={amount} />
         </>

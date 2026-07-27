@@ -1970,6 +1970,67 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* ---- the claim window ----------------------------------------------------
+ *
+ * Six choices, wrapping, on the same recess the fields use. It is a set of
+ * chips rather than a select or a typed hour count for a reason a thumb can
+ * feel: the whole range is legible at once, the current value is visible
+ * without opening anything, and no invalid window can be expressed.
+ *
+ * Two rows of three, at every width this screen is measured at. `flex-wrap`
+ * and not a grid, because the labels are not the same width — "1 hour" against
+ * "14 days" — and a grid would either clip the long one or pad the short one
+ * into a target the size of a button nobody meant to press. The 28% basis is
+ * what fixes the wrap at three: a fourth chip cannot fit beside three of them
+ * on any phone width, so the two rows do not rearrange between 320 and 414 the
+ * way `flex-basis: auto` did.
+ *
+ * The 10px gap is the stepper's number, for the stepper's reason: a thumb
+ * aiming at one 44px target must not be able to land on its neighbour.
+ *
+ * The selected chip LIFTS rather than colouring: vermilion at this size is the
+ * field's own bloom, and a second source of it beside the money would read as
+ * light rather than as a choice. The near-white fill is the same move the
+ * stepper's buttons make.
+ */
+.nd-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.625rem;
+}
+
+.nd-chip {
+  /* 44px, the same floor every other target on this screen is held to. */
+  min-height: 2.75rem;
+  padding: 0 0.875rem;
+  flex: 1 1 28%;
+  border: 1px solid var(--nd-rule-strong);
+  border-radius: 0.875rem;
+  background-color: rgb(12 7 6 / 0.32);
+  color: var(--nd-on-surface-muted);
+  font: inherit;
+  font-size: 0.9375rem;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color var(--nd-t-press) ease-out,
+    border-color var(--nd-t-press) ease-out,
+    color var(--nd-t-press) ease-out;
+}
+
+.nd-chip:hover {
+  border-color: rgb(245 240 238 / 0.4);
+  color: var(--nd-on-surface);
+}
+
+.nd-chip[aria-checked='true'] {
+  border-color: rgb(245 240 238 / 0.55);
+  background-color: rgb(245 240 238 / 0.13);
+  color: var(--nd-on-surface);
+  font-weight: 700;
+}
+
 /* ---- the custody control ------------------------------------------------- */
 
 /**

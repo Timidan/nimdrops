@@ -35,6 +35,7 @@ const knownDrop: DropPublic = {
   claimCount: 5,
   remaining: 3,
   state: 'live',
+  expiryHours: 24,
   expiresAt: new Date('2026-07-26T12:00:00.000Z'),
   fundingTxHash: 'a'.repeat(64),
 }

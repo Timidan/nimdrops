@@ -42,8 +42,70 @@ import {
 
 /** Versioned funding memo prefix. The `1` is the memo format version. */
 export const MEMO_PREFIX = 'ND1:'
-/** Expiry is measured from finalized activation, never from draft creation. */
-export const EXPIRY_HOURS = 24
+
+/**
+ * The claim window a sponsor gets when they do not choose one.
+ *
+ * Expiry is measured from finalized activation, never from draft creation: the
+ * window begins when the network confirms the funding, not when the sponsor
+ * taps send. Every caller that omits `expiryHours` lands here, which is what
+ * makes the parameter additive rather than a change to existing behaviour.
+ */
+export const DEFAULT_EXPIRY_HOURS = 24
+
+/**
+ * The shortest window a sponsor may choose, and it exists to protect CLAIMANTS.
+ *
+ * A drop that expires before anyone realistically opens the link refunds every
+ * unclaimed share to the sponsor, at no cost to them, having advertised money
+ * nobody had a real chance to take. That is indistinguishable from a scam even
+ * when it is not one, and the floor is what stops the product from being able
+ * to express it. An hour is the shortest window in which a link posted into a
+ * group chat can plausibly be opened by the people in it — and because the
+ * clock starts at finalized activation, none of that hour is spent waiting on
+ * the chain.
+ */
+export const MIN_EXPIRY_HOURS = 1
+
+/**
+ * The longest window a sponsor may choose. It bounds CUSTODY DURATION.
+ *
+ * There is no on-chain escrow: the operator's hot key can move a drop's
+ * principal for as long as the drop is live, and since migration 015 there is
+ * no ceiling on how large a drop is. "Any amount for any length of time" is a
+ * materially different risk from the one this product carried before, so the
+ * time half of it is bounded here.
+ *
+ * Fourteen days rather than a month, for three reasons that agree:
+ *
+ *  - **Nothing can end a drop early.** There is no sponsor cancel and no
+ *    operator close; `sweepExpiry` at `expires_at` is the only exit. So this
+ *    number is not "the longest claim window" but "the longest a sponsor can
+ *    lock their own money with no way out".
+ *  - **Every campaign shape fits inside it**: an evening, a weekend, a
+ *    week-long conference, a fortnight's push. A month is not a longer
+ *    campaign, it is a deposit, and this is not a deposit product.
+ *  - **The operator has to be there for all of it.** The signer and the sweeper
+ *    must stay alive for the whole window of every outstanding drop. A ceiling
+ *    nobody can credibly commit to is a promise the deployment has not earned.
+ *
+ * It can be raised later against evidence. It cannot be lowered without
+ * stranding drops that were funded under the old number.
+ */
+export const MAX_EXPIRY_HOURS = 24 * 14
+
+/**
+ * A window in the units a person would say it in: `"24 hour"`, `"3 day"`.
+ *
+ * Days only once there is more than one of them AND the window is a whole
+ * number of them, so nothing ever reads "1.5 day" or "1 day" where the sponsor
+ * picked twenty-four hours. Returns the bare quantity so callers can put their
+ * own noun after it.
+ */
+export function formatExpiryWindow(hours: number): string {
+  if (hours >= 48 && hours % 24 === 0) return `${hours / 24} day`
+  return `${hours} hour`
+}
 
 /**
  * How long funding instructions hold aggregate cap headroom (migration 014).
@@ -114,6 +176,25 @@ const ACTIVATABLE_STATES: readonly DropState[] = [...FUNDABLE_STATES, 'cancelled
 
 export class DropError extends Error {}
 
+/** A claim window outside {@link MIN_EXPIRY_HOURS}..{@link MAX_EXPIRY_HOURS}. */
+export class ExpiryWindowError extends DropError {}
+
+/**
+ * The server-side bound, and the only one that decides anything.
+ *
+ * `web/` mirrors these numbers so a form can refuse before a round trip, but a
+ * mirror is a convenience: this function is what a drop's window is actually
+ * held to, and `drops_expiry_hours_range` (migration 016) is the backstop that
+ * holds even if this is wrong.
+ */
+export function assertExpiryHours(hours: number): void {
+  if (!Number.isInteger(hours) || hours < MIN_EXPIRY_HOURS || hours > MAX_EXPIRY_HOURS) {
+    throw new ExpiryWindowError(
+      `a claim window must be a whole number of hours between ${MIN_EXPIRY_HOURS} and ${MAX_EXPIRY_HOURS}`,
+    )
+  }
+}
+
 export class DropNotFoundError extends DropError {
   constructor(publicId: string) {
     // Deliberately does not echo the id: callers turn this into a uniform 404.
@@ -158,6 +239,12 @@ export interface DropPublic {
   /** Slots not yet reserved. */
   remaining: number
   state: DropState
+  /**
+   * The window this drop was created with, in hours. Present on every drop,
+   * funded or not — a claimant reading an unfunded drop can still be told how
+   * long it will run once it goes live, which `expiresAt` cannot say yet.
+   */
+  expiryHours: number
   expiresAt: Date | null
   fundingTxHash?: string
 }
@@ -167,6 +254,12 @@ export interface CreateDraftInput {
   message?: string
   amountEachLuna: bigint
   claimCount: number
+  /**
+   * How long the drop stays claimable once funding is final. Omitted means
+   * {@link DEFAULT_EXPIRY_HOURS}, so every caller written before this existed
+   * gets exactly the behaviour it had.
+   */
+  expiryHours?: number
 }
 
 export interface Draft {
@@ -174,6 +267,8 @@ export interface Draft {
   fundingAddress: string
   fundingMemo: string
   expectedFundingLuna: bigint
+  /** The window this drop will have. Fixed here; nothing can change it later. */
+  expiryHours: number
   /** When this draft stops holding aggregate cap headroom. */
   reservationExpiresAt: Date
   /** The capacity picture AFTER this reservation, for the sponsor's disclosure. */
@@ -223,6 +318,11 @@ export async function createDraft(
   o: CreateDraftInput,
 ): Promise<Draft> {
   assertDropShape(o.amountEachLuna, o.claimCount)
+  // The window is decided HERE and nowhere else. `activate()` reads it back out
+  // of the row rather than off anything a later request carried, so this INSERT
+  // is the one and only write of it in the system.
+  const expiryHours = o.expiryHours ?? DEFAULT_EXPIRY_HOURS
+  assertExpiryHours(expiryHours)
   const expectedFundingLuna = o.amountEachLuna * BigInt(o.claimCount)
   const publicId = newPublicId()
   const fundingMemo = fundingMemoFor(publicId)
@@ -236,9 +336,9 @@ export async function createDraft(
     const { rows } = await client.query<{ funding_reservation_expires_at: Date }>(
       `INSERT INTO drops (
          public_id, sponsor_label, message, claim_count, amount_each_luna,
-         expected_funding_luna, state, funding_reservation_expires_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, 'awaiting_funding',
-                 now() + make_interval(mins => $7))
+         expected_funding_luna, expiry_hours, state, funding_reservation_expires_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'awaiting_funding',
+                 now() + make_interval(mins => $8))
        RETURNING funding_reservation_expires_at`,
       [
         publicId,
@@ -247,6 +347,7 @@ export async function createDraft(
         o.claimCount,
         o.amountEachLuna.toString(),
         expectedFundingLuna.toString(),
+        expiryHours,
         FUNDING_RESERVATION_MINUTES,
       ],
     )
@@ -263,6 +364,7 @@ export async function createDraft(
       fundingAddress: chain.custodyAddress(),
       fundingMemo,
       expectedFundingLuna,
+      expiryHours,
       reservationExpiresAt: rows[0].funding_reservation_expires_at,
       capacity,
     }
@@ -285,6 +387,7 @@ interface DropRow {
   state: DropState
   funding_tx_hash: string | null
   activated_height: string | null
+  expiry_hours: number
   expires_at: Date | null
   claims_reserved: string
 }
@@ -292,7 +395,7 @@ interface DropRow {
 const SELECT_DROP = `
   SELECT d.id, d.public_id, d.sponsor_label, d.message, d.claim_count,
          d.amount_each_luna, d.expected_funding_luna, d.state, d.funding_tx_hash,
-         d.activated_height, d.expires_at,
+         d.activated_height, d.expiry_hours, d.expires_at,
          (SELECT count(*) FROM claims c WHERE c.drop_id = d.id)::text AS claims_reserved
   FROM drops d
   WHERE d.public_id = $1
@@ -315,6 +418,7 @@ function toPublic(row: DropRow): DropPublic {
     claimCount: row.claim_count,
     remaining: Math.max(0, row.claim_count - reserved),
     state: row.state,
+    expiryHours: row.expiry_hours,
     expiresAt: row.expires_at,
     ...(row.funding_tx_hash === null ? {} : { fundingTxHash: row.funding_tx_hash }),
   }
@@ -574,16 +678,24 @@ async function activate(
       // row out of `reservedPrincipalLuna`, so this changes no arithmetic; it
       // stops the column from reading as a live promise on a drop that has
       // already been paid for.
+      //
+      // `expires_at` is computed from `expiry_hours` ON THE ROW, inside the
+      // same statement, under the row lock taken above. That is what makes the
+      // window immutable rather than merely un-updated: there is no parameter
+      // here for a request body to reach, so no request — a second funding
+      // submit, a replay, an operator command — can move the deadline a
+      // claimant has already been shown. The only write of `expiry_hours` in
+      // the system is `createDraft`'s INSERT.
       `UPDATE drops
        SET state = 'live',
            creator_address = $2,
            refund_address = $2,
            funding_tx_hash = $3,
            activated_height = $4,
-           expires_at = now() + make_interval(hours => $5),
+           expires_at = now() + make_interval(hours => expiry_hours),
            funding_reservation_expires_at = NULL
        WHERE id = $1`,
-      [dropId, tx.sender, txHash, tx.includedHeight.toString(), EXPIRY_HOURS],
+      [dropId, tx.sender, txHash, tx.includedHeight.toString()],
     )
     await client.query('COMMIT')
   } catch (err) {

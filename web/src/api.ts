@@ -11,6 +11,8 @@
  *     carrying that code. Screens branch on the code, never on a message string.
  */
 
+import { DEFAULT_EXPIRY_HOURS } from './money'
+
 /** Same-origin: the API, the SSR campaign pages and the SPA share one host. */
 const BASE = '/api'
 
@@ -93,6 +95,14 @@ export interface Draft {
   expectedFundingLuna: string
   shareUrl: string
   /**
+   * The claim window this drop will have, in hours. Fixed when the draft was
+   * created; nothing after that can change it.
+   *
+   * Optional in the type because a record stored by an older build will not
+   * carry it — `state/funding.ts` resumes drafts across deploys.
+   */
+  expiryHours?: number
+  /**
    * When this draft stops holding room in the aggregate cap, or `null` when it
    * holds none. Optional in the type because a record stored by an older build
    * will not carry it.
@@ -114,6 +124,15 @@ export interface DropPublic {
   claimCount: number
   remaining: number
   state: DropState
+  /**
+   * The window the sponsor chose, in hours. Present on every drop, funded or
+   * not, so a claimant reading an unfunded drop can still be told how long it
+   * runs — which `expiresAt` cannot say until activation.
+   *
+   * Optional in the type only so a build talking to an older server degrades to
+   * saying nothing rather than to saying 24.
+   */
+  expiryHours?: number
   expiresAt: string | null
   fundingTxHash?: string
 }
@@ -193,6 +212,12 @@ export interface CreateDropInput {
   /** Decimal NIM per person, e.g. `"2.5"`. */
   amountEach: string
   claimCount: number
+  /**
+   * How long the drop stays claimable once funding is final. Omitted means the
+   * server's default, which is 24 hours. The server enforces the bounds; this
+   * field only carries the sponsor's choice to it.
+   */
+  expiryHours?: number
 }
 
 export class ApiError extends Error {
@@ -309,8 +334,23 @@ export function asDisclosure(value: unknown): CustodyDisclosure | null {
  * What the sponsor must read before their wallet asks them to approve anything.
  * Unauthenticated and cheap, so the create screen asks for it on first paint.
  */
-export async function getCustody(): Promise<CustodyDisclosure> {
-  const parsed = asDisclosure(await request<unknown>('/custody'))
+/**
+ * `expiryHours` asks the server to describe the window the screen is currently
+ * showing. The disclosure NAMES the claim window, and the window is now the
+ * sponsor's choice, so a client that kept the default's sentence beside a
+ * different selection would be showing a lie. Rewriting the sentence here is
+ * the other way to be wrong: the server enforces the rule, so it owns the
+ * words. Omitted asks for the default, which is what a sponsor who has not
+ * chosen is looking at.
+ */
+export async function getCustody(expiryHours?: number): Promise<CustodyDisclosure> {
+  // The default is asked for by asking for nothing. The server's default and
+  // this client's are one number rather than two that could drift, and the
+  // request a sponsor who touched nothing makes is byte for byte the one this
+  // screen has always made.
+  const plain = expiryHours === undefined || expiryHours === DEFAULT_EXPIRY_HOURS
+  const query = plain ? '' : `?expiryHours=${encodeURIComponent(expiryHours)}`
+  const parsed = asDisclosure(await request<unknown>(`/custody${query}`))
   if (!parsed) throw new ApiError(200, 'unreadable_disclosure', 'the custody disclosure could not be read')
   return parsed
 }
@@ -394,7 +434,16 @@ const IDEM_PREFIX = 'nimdrops.idem.create:'
 function idempotencyKey(input: CreateDropInput): string {
   const scope =
     IDEM_PREFIX +
-    JSON.stringify([input.sponsorLabel, input.message ?? '', input.amountEach, input.claimCount])
+    JSON.stringify([
+      input.sponsorLabel,
+      input.message ?? '',
+      input.amountEach,
+      input.claimCount,
+      // The window is part of what makes a draft the draft it is. Without it,
+      // changing the window and funding again would reuse the key bound to the
+      // old draft and earn a 409 the sponsor could do nothing about.
+      input.expiryHours ?? '',
+    ])
   try {
     const existing = sessionStorage.getItem(scope)
     if (existing) return existing
@@ -445,6 +494,7 @@ export async function createDrop(input: CreateDropInput): Promise<Draft> {
       ...(input.message ? { message: input.message } : {}),
       amountEach: input.amountEach,
       claimCount: input.claimCount,
+      ...(input.expiryHours === undefined ? {} : { expiryHours: input.expiryHours }),
     }),
   })
   // The draft's own disclosure and reservation are held to the same standard as

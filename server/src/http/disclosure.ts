@@ -1,7 +1,11 @@
 import type { NetworkName } from '../config'
 import { finalityDepthBlocks } from '../config'
 import { formatNim } from '../money'
-import { EXPIRY_HOURS, FUNDING_RESERVATION_MINUTES } from '../services/drops'
+import {
+  DEFAULT_EXPIRY_HOURS,
+  FUNDING_RESERVATION_MINUTES,
+  formatExpiryWindow,
+} from '../services/drops'
 import type { CapacitySnapshot } from '../services/solvency'
 
 /**
@@ -69,7 +73,16 @@ export interface CustodyDisclosure {
   mainnetPilot: boolean
   /** Funding is closed while this is true. */
   paused: boolean
-  /** Hours a drop stays claimable, counted from finalized activation. */
+  /**
+   * Hours a drop stays claimable, counted from finalized activation.
+   *
+   * This is the window the points below DESCRIBE, which since the window became
+   * the sponsor's choice is not a constant. On `GET /api/custody` it is the
+   * window that was asked about (the default when none was), and on the
+   * `POST /api/drops` 201 it is the window that drop was created with. A client
+   * that shows these sentences against a different number is showing a lie, so
+   * the number travels with them.
+   */
   expiryHours: number
   /** Minutes a funding request holds its room. */
   fundingWindowMinutes: number
@@ -118,8 +131,14 @@ export function buildDisclosure(o: {
   custodyAddress: string
   paused: boolean
   capacity: CapacitySnapshot
+  /**
+   * The claim window these sentences must describe. Omitted means the default,
+   * which is what a sponsor who has not chosen yet is looking at.
+   */
+  expiryHours?: number
 }): CustodyDisclosure {
   const { network, custodyAddress, paused, capacity } = o
+  const expiryHours = o.expiryHours ?? DEFAULT_EXPIRY_HOURS
   const mainnetPilot = network === 'MainAlbatross'
   const aggregate =
     capacity.maxLivePrincipalLuna === null ? null : formatNim(capacity.maxLivePrincipalLuna)
@@ -168,7 +187,16 @@ export function buildDisclosure(o: {
         },
     {
       id: 'expiry_clock',
-      text: `The ${EXPIRY_HOURS} hour claim window starts when the network confirms your funding, not when you tap send.`,
+      // Two sentences, because the window is now a decision and a decision
+      // needs its consequence next to it. The first says when the clock starts,
+      // which is the thing sponsors got wrong before this control existed. The
+      // second says what choosing a long one costs: the operator holds the NIM
+      // for all of it, and neither side can cut it short — there is no sponsor
+      // cancel and no operator close, only the sweep at `expires_at`.
+      text:
+        `The ${formatExpiryWindow(expiryHours)} claim window starts when the network confirms your ` +
+        `funding, not when you tap send. The operator holds your NIM for the whole window, and no ` +
+        `one can end a drop early.`,
     },
     {
       id: 'refunds',
@@ -200,7 +228,7 @@ export function buildDisclosure(o: {
     custodyAddress,
     mainnetPilot,
     paused,
-    expiryHours: EXPIRY_HOURS,
+    expiryHours,
     fundingWindowMinutes: FUNDING_RESERVATION_MINUTES,
     limits: {
       aggregateMax: aggregate,

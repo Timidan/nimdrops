@@ -13,7 +13,16 @@ import {
   type DropState,
   type PilotLimits,
 } from '../api'
-import { formatNim, lunaFromNim, MAX_CLAIM_COUNT, MIN_CLAIMS, shapeProblem } from '../money'
+import {
+  DEFAULT_EXPIRY_HOURS,
+  EXPIRY_CHOICES,
+  expiryWindowLabel,
+  formatNim,
+  lunaFromNim,
+  MAX_CLAIM_COUNT,
+  MIN_CLAIMS,
+  shapeProblem,
+} from '../money'
 import { nimiqPayDeeplink, resolveBridge, type BridgeResult } from '../sdk/adapter'
 import { clearFunding, readFunding, writeFunding } from '../state/funding'
 import AmountInput from '../ui/AmountInput'
@@ -196,6 +205,14 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
   const [searchParams] = useSearchParams()
   const [amountEach, setAmountEach] = useState(() => prefillAmount(searchParams.get('amount')))
   const [claimCount, setClaimCount] = useState(DEFAULT_CLAIM_COUNT)
+  /**
+   * How long the drop stays claimable. Starts on the default, so a sponsor who
+   * never touches the control gets exactly the drop this screen made before it
+   * existed — and the request omits the field entirely in that case, which is
+   * what keeps the server's default and this screen's default one number
+   * rather than two that could drift apart.
+   */
+  const [expiryHours, setExpiryHours] = useState(DEFAULT_EXPIRY_HOURS)
   const [sponsorLabel, setSponsorLabel] = useState('')
   const [message, setMessage] = useState('')
 
@@ -221,9 +238,9 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
    * old are closer to the truth than no numbers, and the server re-checks the
    * cap when the drop is created anyway.
    */
-  const loadCustody = useCallback(async (): Promise<CustodyDisclosure | null> => {
+  const loadCustody = useCallback(async (hours: number): Promise<CustodyDisclosure | null> => {
     try {
-      const next = await getCustody()
+      const next = await getCustody(hours)
       setCustody(next)
       setCustodyState('ready')
       return next
@@ -234,12 +251,25 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
   }, [])
 
   const refreshCustody = useCallback(() => {
-    void loadCustody()
-  }, [loadCustody])
+    void loadCustody(expiryHours)
+  }, [loadCustody, expiryHours])
 
+  /**
+   * Read the disclosure for the window that is selected right now.
+   *
+   * One of the server's points NAMES the claim window, and the sponsor reads it
+   * before they fund. So the fetch is keyed on the selection: change the
+   * window, and the sentences change with it. The first run asks for the
+   * default, which is what is selected on arrival, so the common path costs
+   * exactly the one request it always did.
+   *
+   * While a refresh is in flight — or after one failed — the disclosure on hand
+   * describes a DIFFERENT window from the one selected, and `disclosureFits`
+   * below is what stops those sentences from being shown against it.
+   */
   useEffect(() => {
-    void loadCustody()
-  }, [loadCustody])
+    void loadCustody(expiryHours)
+  }, [loadCustody, expiryHours])
 
   /**
    * Can this device fund a drop at all? Asked on arrival, not at the fund button.
@@ -306,6 +336,21 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
   const freeLuna = custody?.limits.remainingLuna == null ? null : lunaOf(custody.limits.remainingLuna)
   const overCapacity = totalLuna !== null && freeLuna !== null && totalLuna > freeLuna
   const ready = problem === null && sponsorLabel.trim().length > 0 && !overCapacity && !paused
+
+  /**
+   * Whether the disclosure on hand describes the window that is selected.
+   *
+   * The server's points are shown verbatim or not at all, and one of them names
+   * the window. A point naming 24 hours beside a 7 day selection would be a
+   * false statement about this sponsor's own money, so when the two disagree —
+   * a refresh still in flight, or one that failed — the fallback prose is shown
+   * instead, and it names the selection rather than a constant.
+   *
+   * Only the WORDS are gated. `paused` and the live limits do not depend on the
+   * window, so they keep reading from whatever disclosure is on hand.
+   */
+  const disclosureFits = custody !== null && custody.expiryHours === expiryHours
+  const custodyWords = disclosureFits ? custody : null
 
   // A draft that has already been created is reused on retry: the sponsor is
   // approving THE SAME funding request, not a new one.
@@ -403,6 +448,10 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
         ...(message.trim() ? { message: message.trim() } : {}),
         amountEach,
         claimCount,
+        // Sent only when the sponsor chose something other than the default, so
+        // the untouched form makes byte for byte the request it always made and
+        // the default stays the server's to define.
+        ...(expiryHours === DEFAULT_EXPIRY_HOURS ? {} : { expiryHours }),
       })
     } catch (err) {
       /**
@@ -441,7 +490,7 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
     draftRef.current = created
     setDraft(created)
     await approve(created)
-  }, [amountEach, approve, claimCount, message, paused, refreshCustody, sponsorLabel])
+  }, [amountEach, approve, claimCount, expiryHours, message, paused, refreshCustody, sponsorLabel])
 
   /**
    * Ask again whether funding has reopened. Only the closed screen calls it, and
@@ -449,9 +498,9 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
    * the sponsor where they are rather than walking them into a refusal.
    */
   const recheckFunding = useCallback(async () => {
-    const next = await loadCustody()
+    const next = await loadCustody(expiryHours)
     if (next && !next.paused) setPhase('form')
-  }, [loadCustody])
+  }, [loadCustody, expiryHours])
 
   /**
    * Come back to a drop this browser funded.
@@ -566,6 +615,7 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
     setRetryAfter(null)
     setAmountEach('')
     setClaimCount(DEFAULT_CLAIM_COUNT)
+    setExpiryHours(DEFAULT_EXPIRY_HOURS)
     setSponsorLabel('')
     setMessage('')
     setPhase('form')
@@ -726,9 +776,10 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
             onClose={() => setSheet('none')}
           >
             <CustodyBody
-              custody={custody}
+              custody={custodyWords}
               custodyState={custodyState}
               onRetry={refreshCustody}
+              expiryHours={expiryHours}
               heading={false}
             />
             <ShareRules />
@@ -752,13 +803,22 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
               <Row label="Each person gets">{`${amountEach || '0'} NIM`}</Row>
               <Row label="People">{String(claimCount)}</Row>
               <Row label="You send">{totalText}</Row>
-              <Row label="Expires">24 hours after it goes live</Row>
+              <Row label="Claim window">
+                {expiryWindowLabel(expiryHours)} after it goes live
+              </Row>
             </dl>
 
             {/* Every point, in the server's order, above the button that opens
                 the wallet. The sheet scrolls, so reaching the button means
-                scrolling past them. */}
-            <CustodyBody custody={custody} custodyState={custodyState} onRetry={refreshCustody} />
+                scrolling past them. One of those points names the claim window,
+                and `custodyWords` is what keeps it from naming a window other
+                than the one in the row above. */}
+            <CustodyBody
+              custody={custodyWords}
+              custodyState={custodyState}
+              onRetry={refreshCustody}
+              expiryHours={expiryHours}
+            />
             <ShareRules />
 
             {custody ? (
@@ -815,6 +875,8 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
           />
 
           <PeopleStepper value={claimCount} onChange={setClaimCount} />
+
+          <ExpiryChoice value={expiryHours} onChange={setExpiryHours} />
 
           <TextField
             label="From"
@@ -1079,12 +1141,21 @@ function CustodyBody({
   custody,
   custodyState,
   onRetry,
+  expiryHours,
   /** Off in the sheet whose dialog title already says it. */
   heading = true,
 }: {
+  /**
+   * The server's disclosure, or `null` when there is none to show that
+   * describes the window currently selected. Not the same thing as "the fetch
+   * failed": a disclosure about a different window is worse than none, because
+   * it would tell the sponsor a false thing about their own money.
+   */
   custody: CustodyDisclosure | null
   custodyState: CustodyState
   onRetry: () => void
+  /** The selected window, for the fallback's own sentence about it. */
+  expiryHours: number
   heading?: boolean
 }) {
   return (
@@ -1099,8 +1170,8 @@ function CustodyBody({
             operator holds the only key and can move everything in it.
           </p>
           <p>
-            A drop stops accepting claims 24 hours after it goes live. Whatever nobody claims goes
-            back to the wallet you fund from.
+            A drop stops accepting claims {expiryWindowLabel(expiryHours)} after it goes live.
+            Whatever nobody claims goes back to the wallet you fund from.
           </p>
           {custodyState === 'unavailable' ? (
             <>
@@ -1278,6 +1349,57 @@ function PeopleStepper({ value, onChange }: { value: number; onChange: (n: numbe
         </StepButton>
         <p className="nd-range">{MIN_CLAIMS} or more</p>
       </div>
+    </div>
+  )
+}
+
+/**
+ * How long the drop stays claimable.
+ *
+ * **Discrete, not a typed hour count.** A number field would ask a sponsor on a
+ * phone to convert "over the weekend" into 72, then discover the bounds by
+ * being refused, then convert the refusal back into hours. Six chips show the
+ * whole range at once, cannot express an invalid window, and put the shortest
+ * and longest this deployment allows on screen without anyone having to be told
+ * no. The set spans hours to a fortnight because those are the shapes sponsors
+ * described: a room, an evening, a day, a weekend, a conference, a campaign.
+ *
+ * **The default costs no interaction.** `24 hours` is pressed on arrival, so
+ * the sponsor who does not care about this is finished with it before they read
+ * it, and the one who does can see what they are changing from.
+ *
+ * The consequence sits under the chips rather than behind the disclosure sheet,
+ * because it is the fact that should decide the choice: a longer window is a
+ * longer time somebody else is holding the money, and there is no way to cut it
+ * short afterwards. `role="radiogroup"` and not a set of buttons, so a screen
+ * reader hears one control with six options and its current value.
+ */
+function ExpiryChoice({ value, onChange }: { value: number; onChange: (hours: number) => void }) {
+  const labelId = useId()
+  return (
+    <div>
+      <span id={labelId} className="nd-lab">
+        Claim window
+      </span>
+      <div role="radiogroup" aria-labelledby={labelId} className="nd-chips" data-testid="expiry-choice">
+        {EXPIRY_CHOICES.map((hours) => (
+          <button
+            key={hours}
+            type="button"
+            role="radio"
+            aria-checked={hours === value}
+            data-hours={hours}
+            onClick={() => onChange(hours)}
+            className="nd-chip"
+          >
+            {expiryWindowLabel(hours)}
+          </button>
+        ))}
+      </div>
+      <p className="nd-hint">
+        Unclaimed NIM goes back to you {expiryWindowLabel(value)} after the drop goes live. NimDrops
+        holds it for the whole window, and no one can end a drop early.
+      </p>
     </div>
   )
 }
@@ -1547,6 +1669,14 @@ function NoWallet() {
  * animation, so `prefers-reduced-motion` lands it fully formed on the first
  * frame instead of skipping it.
  */
+/** What happens to whatever nobody takes, and when — or just what, if the window is unknown. */
+function refundLine(hours: number | undefined): string {
+  const base = 'Unclaimed shares are refunded to the wallet that funded this drop'
+  return hours === undefined
+    ? `${base} when the claim window ends.`
+    : `${base}, ${expiryWindowLabel(hours)} after it went live.`
+}
+
 function Live({
   draft,
   drop,
@@ -1631,10 +1761,12 @@ function Live({
           </div>
         </div>
 
-        <p className="nd-note">
-          Unclaimed shares are refunded to the wallet that funded this drop, 24 hours after it went
-          live.
-        </p>
+        {/* The window comes off the drop, never off a constant. The server's
+            record wins; the draft covers the frame before the first poll
+            answers; a record stored by a build older than this feature carries
+            neither, and then the sentence names no number rather than the
+            wrong one. */}
+        <p className="nd-note">{refundLine(drop?.expiryHours ?? draft.expiryHours)}</p>
         <p className="nd-note">Reopen NimDrops on this device to come back to this link.</p>
 
         <button

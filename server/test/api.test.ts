@@ -203,6 +203,7 @@ interface DraftBody {
   expectedFunding: string
   expectedFundingLuna: string
   shareUrl: string
+  expiryHours: number
   reservationExpiresAt: string | null
   disclosure: DisclosureBody
 }
@@ -226,16 +227,17 @@ function fundingHashFor(publicId: string): string {
 }
 
 /** Create, deposit exact funding, finalize, and activate through the API. */
-async function liveDrop(o: { claimCount?: number } = {}): Promise<DraftBody> {
+async function liveDrop(o: { claimCount?: number; expiryHours?: number } = {}): Promise<DraftBody> {
   const draft =
-    o.claimCount === undefined
+    o.claimCount === undefined && o.expiryHours === undefined
       ? await createDrop()
       : await createDrop({
           body: {
             sponsorLabel: 'Nimiq Community',
             message: 'thanks for shipping',
             amountEach: AMOUNT_EACH_NIM,
-            claimCount: o.claimCount,
+            claimCount: o.claimCount ?? CLAIM_COUNT,
+            ...(o.expiryHours === undefined ? {} : { expiryHours: o.expiryHours }),
           },
         })
   const txHash = fundingHashFor(draft.publicId)
@@ -621,6 +623,176 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
     )
   })
 
+  // ---- the sponsor's claim window ------------------------------------------------
+  //
+  // The window is a decision now, and the two things that make it safe are both
+  // asserted here: the bound is the SERVER'S (a client mirror is a convenience,
+  // never the authority), and the disclosure the sponsor reads before funding
+  // names the window this drop will actually have rather than a constant.
+
+  async function readExpiry(publicId: string): Promise<{ hours: number; at: string | null }> {
+    const body = await json<{ expiryHours: number; expiresAt: string | null }>(
+      await get(`/api/drops/${publicId}`),
+    )
+    return { hours: body.expiryHours, at: body.expiresAt }
+  }
+
+  it('applies the 24 hour default when the field is absent, exactly as before', async () => {
+    const draft = await createDrop()
+    expect(draft.expiryHours).toBe(24)
+    expect(draft.disclosure.expiryHours).toBe(24)
+    expect(draft.disclosure.points.find((p) => p.id === 'expiry_clock')?.text).toMatch(
+      /^The 24 hour claim window starts when the network confirms your funding/,
+    )
+    expect((await readExpiry(draft.publicId)).hours).toBe(24)
+  })
+
+  it('honours a non-default window from the draft through to the stamped deadline', async () => {
+    const draft = await liveDrop({ expiryHours: 72 })
+    expect(draft.expiryHours).toBe(72)
+
+    const { hours, at } = await readExpiry(draft.publicId)
+    expect(hours).toBe(72)
+    // Three days from activation, not one. The clock still starts at
+    // activation: the deadline is measured from now, not from draft creation.
+    const ahead = Date.parse(at!) - Date.now()
+    expect(ahead).toBeGreaterThan(71.9 * 3600_000)
+    expect(ahead).toBeLessThan(72.1 * 3600_000)
+  })
+
+  it('refuses a window outside the bounds, server side, whatever the client believes', async () => {
+    for (const expiryHours of [0, -1, 337, 720, 1.5, 24.0001]) {
+      const res = await post('/api/drops', {
+        idemKey: randomUUID(),
+        body: {
+          sponsorLabel: 'S',
+          amountEach: AMOUNT_EACH_NIM,
+          claimCount: CLAIM_COUNT,
+          expiryHours,
+        },
+      })
+      // A whole-number check is a shape refusal; a range check is a window
+      // refusal. Both are 400, and neither creates a drop.
+      expect([400], `expiryHours=${expiryHours} must be refused`).toContain(res.status)
+      const body = await json(res)
+      const code = (body.error as { code: string }).code
+      expect(['invalid_request', 'invalid_expiry_window']).toContain(code)
+    }
+    // Both ends of the range ARE accepted, so the refusals above are the bound
+    // and not an accident of validation order.
+    expect((await createDrop({ body: { sponsorLabel: 'S', amountEach: AMOUNT_EACH_NIM, claimCount: CLAIM_COUNT, expiryHours: 1 } })).expiryHours).toBe(1)
+    expect((await createDrop({ body: { sponsorLabel: 'S', amountEach: AMOUNT_EACH_NIM, claimCount: CLAIM_COUNT, expiryHours: 336 } })).expiryHours).toBe(336)
+  })
+
+  it('refuses a window that is not a number at all', async () => {
+    const res = await post('/api/drops', {
+      idemKey: randomUUID(),
+      body: {
+        sponsorLabel: 'S',
+        amountEach: AMOUNT_EACH_NIM,
+        claimCount: CLAIM_COUNT,
+        expiryHours: '72',
+      },
+    })
+    await expectEnvelope(res, 400, 'invalid_request')
+  })
+
+  /**
+   * The security property, stated as a test.
+   *
+   * A sponsor who could shorten the window after people started claiming would
+   * strand the remaining claimants and take their shares back as a refund. So
+   * the value is fixed at draft creation and NO request body may move it. Every
+   * request that could plausibly try is tried here.
+   */
+  it('does not let any request body change the window after activation', async () => {
+    const draft = await liveDrop({ expiryHours: 168 })
+    const before = await readExpiry(draft.publicId)
+    expect(before.hours).toBe(168)
+
+    const txHash = fundingHashFor(draft.publicId)
+
+    // 1. The funding endpoint, carrying a window. Unknown properties are
+    //    rejected outright rather than ignored, which is why this is a 400 and
+    //    not a silent no-op.
+    await expectEnvelope(
+      await post(`/api/drops/${draft.publicId}/funding`, { body: { txHash, expiryHours: 1 } }),
+      400,
+      'invalid_request',
+    )
+
+    // 2. The funding endpoint's ordinary idempotent replay. It re-runs the
+    //    whole §7 predicate and re-enters `activate()`, which is the one place
+    //    that ever writes `expires_at` — so if the deadline could be recomputed
+    //    at all, it would move here.
+    const replay = await post(`/api/drops/${draft.publicId}/funding`, { body: { txHash } })
+    expect(replay.status).toBe(200)
+
+    // 3. Creating "the same" drop again with a different window on the same
+    //    idempotency key. The key is bound to a request hash that includes the
+    //    window, so this is a conflict, not a quiet overwrite.
+    const key = randomUUID()
+    const body = {
+      sponsorLabel: 'Nimiq Community',
+      amountEach: AMOUNT_EACH_NIM,
+      claimCount: CLAIM_COUNT,
+      expiryHours: 24,
+    }
+    expect((await post('/api/drops', { idemKey: key, body })).status).toBe(201)
+    await expectEnvelope(
+      await post('/api/drops', { idemKey: key, body: { ...body, expiryHours: 336 } }),
+      409,
+      'idempotency_key_reused',
+    )
+
+    const after = await readExpiry(draft.publicId)
+    expect(after.hours).toBe(168)
+    expect(after.at, 'the deadline a claimant was shown must be the deadline').toBe(before.at)
+  })
+
+  it('states the window this drop will have in the disclosure, in the units a person says', async () => {
+    const cases: [number, RegExp][] = [
+      [1, /^The 1 hour claim window /],
+      [6, /^The 6 hour claim window /],
+      [24, /^The 24 hour claim window /],
+      [72, /^The 3 day claim window /],
+      [336, /^The 14 day claim window /],
+    ]
+    for (const [expiryHours, phrase] of cases) {
+      const draft = await createDrop({
+        body: {
+          sponsorLabel: 'S',
+          amountEach: AMOUNT_EACH_NIM,
+          claimCount: CLAIM_COUNT,
+          expiryHours,
+        },
+      })
+      const point = draft.disclosure.points.find((p) => p.id === 'expiry_clock')?.text ?? ''
+      expect(point, `expiryHours=${expiryHours}`).toMatch(phrase)
+      // The consequence, stated rather than implied: a longer window is a
+      // longer time the operator is holding the money.
+      expect(point).toMatch(/operator holds your NIM for the whole window/)
+      expect(point).toMatch(/no one can end a drop early/)
+      expect(draft.disclosure.expiryHours).toBe(expiryHours)
+    }
+  })
+
+  it('describes the window the sponsor is considering on GET /api/custody', async () => {
+    const chosen = await json<DisclosureBody>(await get('/api/custody?expiryHours=168'))
+    expect(chosen.expiryHours).toBe(168)
+    expect(chosen.points.find((p) => p.id === 'expiry_clock')?.text).toMatch(/The 7 day claim window/)
+
+    // Omitted is the default, which is what a sponsor who has not chosen sees.
+    const plain = await json<DisclosureBody>(await get('/api/custody'))
+    expect(plain.expiryHours).toBe(24)
+
+    // And the read endpoint refuses what the create endpoint would refuse: it
+    // must never describe a window that could not actually be created.
+    await expectEnvelope(await get('/api/custody?expiryHours=337'), 400, 'invalid_expiry_window')
+    await expectEnvelope(await get('/api/custody?expiryHours=0'), 400, 'invalid_expiry_window')
+    await expectEnvelope(await get('/api/custody?expiryHours=abc'), 400, 'invalid_request')
+  })
+
   // ---- idempotency -----------------------------------------------------------
 
   it('requires an Idempotency-Key on POST /api/drops and on claims', async () => {
@@ -764,10 +936,15 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
     expect(text).not.toContain(wallet.publicKeyHex)
 
     const pub = JSON.parse(text) as Record<string, unknown>
+    // The exact key set, so a field added later has to be argued for here
+    // rather than appearing on a public read by accident. `expiryHours` is the
+    // sponsor's own published choice and is already derivable from
+    // `expiresAt`; it says nothing about any claimant.
     expect(Object.keys(pub).sort()).toEqual([
       'amountEach',
       'claimCount',
       'expiresAt',
+      'expiryHours',
       'fundingTxHash',
       'message',
       'publicId',

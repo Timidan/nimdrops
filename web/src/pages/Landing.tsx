@@ -29,7 +29,10 @@ import './Landing.css'
  *
  * One job: explain the product to a stranger. One sponsor funds a drop, N people
  * each claim one fixed, equal share of NIM through a shared link, and whatever
- * nobody claims goes back to the sponsor after 24 hours. The positioning is
+ * nobody claims goes back to the sponsor when the claim window closes. The
+ * sponsor sets that window, from an hour to two weeks, and 24 hours is the
+ * default; the page names the default rather than asserting it is the only one.
+ * The positioning is
  * `docs/submission/description.md` and `PRODUCT.md`; the words below are theirs,
  * tightened, not reinvented.
  *
@@ -327,7 +330,9 @@ export default function Landing() {
             <p className="nd-land-lede">
               A sponsor funds a drop once in Nimiq Pay and gets a single link. Everyone who opens it
               signs once and receives the same amount — one share per wallet, first come, first
-              served. Whatever nobody claims goes back to the sponsor after 24 hours.
+              served. Whatever nobody claims goes back to the sponsor when the claim window closes.
+              The sponsor picks that window when they fund, and it is 24 hours unless they change
+              it.
             </p>
             <div className="nd-land-cta">
               <Link to="/create" className="nd-action">
@@ -384,10 +389,11 @@ export default function Landing() {
               <span className="nd-flow-mark" aria-hidden="true">
                 <RefundReturnIcon size={20} />
               </span>
-              <h3>Then, 24 hours later</h3>
+              <h3>Then, when the window closes</h3>
               <p>
                 The drop stops accepting claims and every unclaimed share is refunded to the wallet
-                that funded it. The sponsor does not have to come back for it.
+                that funded it. The sponsor picks how long that takes, from an hour to two weeks,
+                and does not have to come back for the refund.
               </p>
             </div>
           </div>
