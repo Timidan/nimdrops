@@ -994,14 +994,15 @@ async function run(): Promise<void> {
   const thin = wanted.filter((t) => (catsByTier.get(t)?.size ?? 0) < QUESTIONS_PER_SESSION)
   if (thin.length > 0) {
     console.log(
-      `\n${'!'.repeat(74)}\n` +
+      `\n${'!'.repeat(78)}\n` +
         `!! TIER TOO THIN: ${thin.join(', ')} — fewer than ${QUESTIONS_PER_SESSION} distinct ` +
-        'categories.\n' +
-        `!! \`selectQuestionIds\` draws one question from each of ${QUESTIONS_PER_SESSION} distinct\n` +
-        '!! categories and raises SelectionError below that, so NO SESSION CAN BE DEALT from\n' +
-        '!! these tiers. A drop pinned to one would answer `misconfigured` at the first tap.\n' +
-        '!! Raise --max, or --tiers only the tiers you can fill.\n' +
-        `${'!'.repeat(74)}`,
+        'categories.\n!!\n' +
+        `!! \`selectQuestionIds\` draws one question from each of ${QUESTIONS_PER_SESSION} distinct ` +
+        'categories and\n' +
+        '!! raises SelectionError below that, so NO SESSION CAN BE DEALT from these tiers. A\n' +
+        '!! drop pinned to one would answer `misconfigured` at a stranger\'s first tap.\n' +
+        '!!\n!! Raise --max, or pass --tiers only for the tiers you can fill.\n' +
+        `${'!'.repeat(78)}`,
     )
   }
   const zeroSessions = wanted.filter(
