@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
+import { useCallback, useEffect, useState, type CSSProperties } from 'react'
 import { getStats, type PublicStats, type StatKey } from '../api'
 import {
   AnswerReviewIcon,
@@ -17,13 +17,7 @@ import NimDropsPhotograph from '../ui/NimDropsPhotograph'
 import { GetNimiqPay } from '../ui/OpenInApp'
 import AppDoor from '../ui/AppDoor'
 import './Landing.css'
-import {
-  useHeroEntrance,
-  useHeroParallax,
-  useMagneticDoors,
-  useSectionReveals,
-  useSmoothScroll,
-} from './Landing.motion'
+import { useSmoothScroll } from './Landing.motion'
 
 interface Row {
   key: StatKey
@@ -291,21 +285,23 @@ const STEPS: { icon: IconComponent; title: string; body: string }[] = [
 
 export default function Landing() {
   const { load, retry } = useStats()
-  const page = useRef<HTMLElement>(null)
-  const hero = useRef<HTMLElement>(null)
 
-  // Every one of these is a no-op under `prefers-reduced-motion: reduce`, and
-  // every one leaves its element visible if it cannot run. Landing.css remains
-  // the floor: with the module absent or throwing, the page still animates
-  // itself through the cascade.
+  // ONLY Lenis. The entrance and the section reveals are deliberately not
+  // wired, and this is the second time that lesson has been paid for.
+  //
+  // `Landing.css` already animates this page: `.nd-arrive` has its own keyframes
+  // and `.nd-rise` runs on `animation-timeline: view()`. Pointing GSAP at the
+  // same two class names put two systems on one element, and a running CSS
+  // animation outranks an inline transform — so the hero overlapped itself, the
+  // reveals stopped reading as reveals, and at one point the entrance left the
+  // page with no visible call to action at all.
+  //
+  // The hooks are kept and tested for a surface that has no CSS animation of its
+  // own. Adding motion to a page that already has some is not additive.
   useSmoothScroll()
-  useHeroEntrance(page)
-  useHeroParallax(hero)
-  useSectionReveals(page)
-  useMagneticDoors(page)
 
   return (
-    <main className="nd-land" ref={page}>
+    <main className="nd-land">
       <div className="nd-land-sky" aria-hidden="true">
         <span className="nd-land-bloom" />
         <span className="nd-land-counter" />
@@ -326,7 +322,7 @@ export default function Landing() {
         </div>
       </header>
 
-      <section className="nd-land-hero" ref={hero}>
+      <section className="nd-land-hero">
         <div className="nd-land-wrap nd-land-hero-in">
           <div className="nd-land-hero-copy">
             <h1 className="nd-land-h1">
