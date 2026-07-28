@@ -130,7 +130,9 @@ type Difficulty = (typeof SOURCE_DIFFICULTIES)[number]
 const TIER_NOTE =
   'Our `novice` tier has no Open Trivia DB equivalent: their easiest label is `easy`, and ' +
   'demoting some of it to `novice` would be inventing a difficulty judgement this script is ' +
-  'not in a position to make. This import emits NOTHING for `novice`.'
+  'not in a position to make. By default this import emits NOTHING for `novice`. The one ' +
+  'exception is `--novice-from`, where the OPERATOR names the categories whose easy questions ' +
+  'become novice — the judgement is then theirs, stated on the command line, not invented here.'
 
 /** The longest a prompt or an option may be, in characters. */
 const MAX_TEXT_CHARS = 200
@@ -185,6 +187,40 @@ const QUESTIONS_PER_SESSION = 5
  * `food` and `language` are in our vocabulary and have no source category at
  * all, so nothing here produces them.
  */
+/**
+ * Their full category list, as published. Held here ONLY so `--novice-from`
+ * can refuse a typo'd category before the first request goes out, listing what
+ * would have been valid; the fetch itself never filters by category. If they
+ * add a category this list will lag, which costs an operator one error message
+ * and one edit here — the safe direction to be wrong in.
+ */
+const SOURCE_CATEGORY_NAMES = [
+  'General Knowledge',
+  'Entertainment: Books',
+  'Entertainment: Film',
+  'Entertainment: Music',
+  'Entertainment: Musicals & Theatres',
+  'Entertainment: Television',
+  'Entertainment: Video Games',
+  'Entertainment: Board Games',
+  'Entertainment: Comics',
+  'Entertainment: Japanese Anime & Manga',
+  'Entertainment: Cartoon & Animations',
+  'Science & Nature',
+  'Science: Computers',
+  'Science: Mathematics',
+  'Science: Gadgets',
+  'Mythology',
+  'Sports',
+  'Geography',
+  'History',
+  'Politics',
+  'Art',
+  'Celebrities',
+  'Animals',
+  'Vehicles',
+] as const
+
 const CATEGORY_SLUGS = new Map<string, string>([
   ['Geography', 'geography'],
   ['History', 'history'],
@@ -264,6 +300,12 @@ import the Open Trivia Database into a local trivia bank file.
                      a share, not a count: ${(CATEGORY_SHARE * 100).toFixed(0)}% of the tier's target, i.e.
                      ceil(${CATEGORY_SHARE} × --max ÷ tiers). Questions past the cap are
                      fetched and then dropped as \`category-full\`.
+  --novice-from <list>
+                     comma-separated category slugs (e.g. general-knowledge,geography)
+                     whose \`easy\` questions are written as tier \`novice\`. At
+                     least 5, because a session needs 5 distinct categories.
+                     Requires \`easy\` among --tiers. Without this flag, novice
+                     stays empty — see the note the report prints.
   --dry-run          fetch, filter and validate, but write nothing
   --help             print this and exit 0
 
@@ -271,7 +313,7 @@ Their API allows ONE request every 5 seconds, so a full --max ${DEFAULT_MAX} run
 takes roughly ${Math.ceil((DEFAULT_MAX / BATCH) * (MIN_REQUEST_GAP_MS / 1000) / 60)} minutes at best. Leave it running.
 `.trimStart()
 
-const VALUE_FLAGS = new Set(['--out', '--max', '--tiers', '--max-per-category'])
+const VALUE_FLAGS = new Set(['--out', '--max', '--tiers', '--max-per-category', '--novice-from'])
 const SWITCH_FLAGS = new Set(['--dry-run', '--help'])
 
 // ---------------------------------------------------------------------------
@@ -650,10 +692,17 @@ function matches(patterns: readonly RegExp[], texts: readonly string[]): boolean
 /** Read-only view of what has been kept so far, for the two "already have it" filters. */
 interface ConvertContext {
   seen: Set<string>
-  /** tier -> category -> kept so far. Mutated by the CALLER, on success only. */
-  byTierCategory: Map<Difficulty, Map<string, number>>
+  /**
+   * OUTPUT tier -> category -> kept so far. Mutated by the CALLER, on success
+   * only. Keyed by the tier the question is WRITTEN as, not the difficulty it
+   * was fetched as, so `--novice-from` demotions fill novice under novice's own
+   * cap instead of competing with `easy` for the same category budget.
+   */
+  byTierCategory: Map<string, Map<string, number>>
   /** Most one category may hold in one tier. */
   capPerCategory: number
+  /** Category slugs whose `easy` questions are demoted to `novice`. */
+  noviceFrom: Set<string>
 }
 
 /**
@@ -689,7 +738,14 @@ function convert(item: RawItem, ctx: ConvertContext): { question: Question } | {
   if (ctx.seen.has(id)) return { drop: 'duplicate-id' }
 
   const category = categoryFor(item.category)
-  const held = ctx.byTierCategory.get(item.difficulty as Difficulty)?.get(category) ?? 0
+  // The OUTPUT tier: `--novice-from` demotes an easy question whose category
+  // the operator named. Decided before the cap check so novice fills under its
+  // own category budget.
+  const tier: Tier =
+    item.difficulty === 'easy' && ctx.noviceFrom.has(category)
+      ? 'novice'
+      : (item.difficulty as Tier)
+  const held = ctx.byTierCategory.get(tier)?.get(category) ?? 0
   if (held >= ctx.capPerCategory) return { drop: 'category-full' }
 
   // Sorted, THEN permuted: byte-identical output for the same question, whatever
@@ -705,7 +761,7 @@ function convert(item: RawItem, ctx: ConvertContext): { question: Question } | {
   return {
     question: {
       id,
-      tier: item.difficulty as Tier,
+      tier,
       category,
       prompt,
       options: shuffled as [string, string, string, string],
@@ -817,6 +873,40 @@ async function run(): Promise<void> {
   // is true on every run: 15% of a tier always needs seven categories to fill it.
   const categoriesNeeded = Math.ceil(tierTarget / capPerCategory)
 
+  // `--novice-from`: refused before the first request goes out, like --out.
+  // A typo burning thirty minutes of rate limit to import nothing into novice
+  // is exactly the silent failure strict parsing exists to prevent.
+  const noviceFromRaw = flags.get('--novice-from')?.trim()
+  const noviceFrom = new Set(
+    (noviceFromRaw ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => s !== ''),
+  )
+  if (noviceFromRaw !== undefined) {
+    const validSlugs = new Set(SOURCE_CATEGORY_NAMES.map((name) => categoryFor(name)))
+    assert(noviceFrom.size > 0, '--novice-from is empty')
+    for (const slug of noviceFrom) {
+      if (!validSlugs.has(slug)) {
+        fail(
+          `--novice-from ${JSON.stringify(slug)} is not a category this source produces.\n` +
+            `  Valid slugs: ${[...validSlugs].sort().join(', ')}`,
+        )
+      }
+    }
+    // A session needs five DISTINCT categories, and novice is fed ONLY from
+    // this list, so fewer than five can never deal a session from the tier.
+    assert(
+      noviceFrom.size >= QUESTIONS_PER_SESSION,
+      `--novice-from names ${noviceFrom.size} categories; novice needs at least ` +
+        `${QUESTIONS_PER_SESSION} distinct categories to deal a single session`,
+    )
+    assert(
+      tiers.includes('easy'),
+      '--novice-from demotes easy questions, so --tiers must include easy',
+    )
+  }
+
   const dryRun = flags.get('--dry-run') === 'true'
   const version = `otdb-${new Date().toISOString().slice(0, 10)}`
 
@@ -838,6 +928,9 @@ async function run(): Promise<void> {
         '!! has about 19 after mapping. Expect the tiers to fall short of their target.',
     )
   }
+  if (noviceFrom.size > 0) {
+    field('novice from', [...noviceFrom].sort().join(', '))
+  }
   field('version', version)
   field('pacing', `1 request / ${(MIN_REQUEST_GAP_MS / 1000).toFixed(1)}s (their limit is 5s/IP)`)
   console.log('')
@@ -855,8 +948,13 @@ async function run(): Promise<void> {
   // roughly twenty of each, which is what passing three tiers asked for.
   const kept: Question[] = []
   const keptByTier = new Map<Difficulty, number>(wanted.map((t) => [t, 0]))
-  const byTierCategory = new Map<Difficulty, Map<string, number>>(
-    wanted.map((t) => [t, new Map<string, number>()]),
+  // Keyed by OUTPUT tier: `novice` gets its own category budget when
+  // `--novice-from` is in play, instead of sharing `easy`'s.
+  const byTierCategory = new Map<string, Map<string, number>>(
+    [...(noviceFrom.size > 0 ? ['novice'] : []), ...wanted].map((t) => [
+      t,
+      new Map<string, number>(),
+    ]),
   )
   const seen = new Set<string>()
   const drops = new Map<DropReason, number>(DROP_REASONS.map((r) => [r, 0]))
@@ -922,7 +1020,7 @@ async function run(): Promise<void> {
         item.difficulty === tier,
         `asked opentdb for difficulty=${tier} and got ${item.difficulty}`,
       )
-      const result = convert(item, { seen, byTierCategory, capPerCategory })
+      const result = convert(item, { seen, byTierCategory, capPerCategory, noviceFrom })
       if ('drop' in result) {
         drops.set(result.drop, (drops.get(result.drop) as number) + 1)
         continue
@@ -931,12 +1029,13 @@ async function run(): Promise<void> {
       kept.push(result.question)
       keptHere += 1
       // Recorded HERE, not in `convert`, so a question rejected by a later filter
-      // never consumes a slot in its category.
-      const counts = byTierCategory.get(tier) as Map<string, number>
+      // never consumes a slot in its category. Against the question's OUTPUT
+      // tier, which under `--novice-from` is not always the tier fetched.
+      const counts = byTierCategory.get(result.question.tier) as Map<string, number>
       const held = (counts.get(result.question.category) ?? 0) + 1
       counts.set(result.question.category, held)
       if (held === capPerCategory) {
-        log(`${tier}/${result.question.category}: at its cap of ${capPerCategory}`)
+        log(`${result.question.tier}/${result.question.category}: at its cap of ${capPerCategory}`)
       }
     }
     keptByTier.set(tier, (keptByTier.get(tier) as number) + keptHere)
@@ -1022,7 +1121,10 @@ async function run(): Promise<void> {
   // `SelectionError` below five categories and `create-gated-drop.ts` refuses to
   // create a drop on such a tier — but a bank written now and pinned later would
   // surface that only when a stranger tapped Start.
-  const thin = wanted.filter((t) => (catsByTier.get(t)?.size ?? 0) < QUESTIONS_PER_SESSION)
+  // Under `--novice-from`, novice is a tier this run PROMISED to fill, so it is
+  // held to the same dealability checks as the tiers that were fetched.
+  const promised = [...(noviceFrom.size > 0 ? ['novice'] : []), ...wanted]
+  const thin = promised.filter((t) => (catsByTier.get(t)?.size ?? 0) < QUESTIONS_PER_SESSION)
   if (thin.length > 0) {
     console.log(
       `\n${'!'.repeat(78)}\n` +
@@ -1036,7 +1138,7 @@ async function run(): Promise<void> {
         `${'!'.repeat(78)}`,
     )
   }
-  const zeroSessions = wanted.filter(
+  const zeroSessions = promised.filter(
     (t) => (catsByTier.get(t)?.size ?? 0) >= QUESTIONS_PER_SESSION && sessionsByTier.get(t) === 0,
   )
   if (zeroSessions.length > 0) {
