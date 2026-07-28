@@ -61,10 +61,10 @@ does not use the source photograph's festival subject.
 | `red-packet-photo-213.webp` | Composite: [Pixabay 4048800](https://pixabay.com/photos/red-new-year-spring-festival-4048800/) + [Unsplash Em96eDRJPD8](https://unsplash.com/photos/gold-metallic-foil-texture-background-Em96eDRJPD8) | ida20150101 + Katie Harp | Pixabay Content License + Unsplash License / 2026-07-27 | 213 × 320 | 2,288 | WebP fallback |
 | `red-packet-photo-426.avif` | Composite: [Pixabay 4048800](https://pixabay.com/photos/red-new-year-spring-festival-4048800/) + [Unsplash Em96eDRJPD8](https://unsplash.com/photos/gold-metallic-foil-texture-background-Em96eDRJPD8) | ida20150101 + Katie Harp | Pixabay Content License + Unsplash License / 2026-07-27 | 426 × 640 | 4,539 | Landing hero candidate |
 | `red-packet-photo-426.webp` | Composite: [Pixabay 4048800](https://pixabay.com/photos/red-new-year-spring-festival-4048800/) + [Unsplash Em96eDRJPD8](https://unsplash.com/photos/gold-metallic-foil-texture-background-Em96eDRJPD8) | ida20150101 + Katie Harp | Pixabay Content License + Unsplash License / 2026-07-27 | 426 × 640 | 5,034 | WebP fallback |
-| `red-packet-cutout-256.avif` | Composite: [Pixabay 4048800](https://pixabay.com/photos/red-new-year-spring-festival-4048800/) + [Unsplash Em96eDRJPD8](https://unsplash.com/photos/gold-metallic-foil-texture-background-Em96eDRJPD8) | ida20150101 + Katie Harp | Pixabay Content License + Unsplash License / 2026-07-27 | 256 × 252 | 3,803 | Mobile plain-envelope cutout, transparent |
-| `red-packet-cutout-256.webp` | Composite: [Pixabay 4048800](https://pixabay.com/photos/red-new-year-spring-festival-4048800/) + [Unsplash Em96eDRJPD8](https://unsplash.com/photos/gold-metallic-foil-texture-background-Em96eDRJPD8) | ida20150101 + Katie Harp | Pixabay Content License + Unsplash License / 2026-07-27 | 256 × 252 | 8,356 | WebP fallback, transparent |
-| `red-packet-cutout-426.avif` | Composite: [Pixabay 4048800](https://pixabay.com/photos/red-new-year-spring-festival-4048800/) + [Unsplash Em96eDRJPD8](https://unsplash.com/photos/gold-metallic-foil-texture-background-Em96eDRJPD8) | ida20150101 + Katie Harp | Pixabay Content License + Unsplash License / 2026-07-27 | 426 × 420 | 15,148 | Large plain-envelope cutout, transparent |
-| `red-packet-cutout-426.webp` | Composite: [Pixabay 4048800](https://pixabay.com/photos/red-new-year-spring-festival-4048800/) + [Unsplash Em96eDRJPD8](https://unsplash.com/photos/gold-metallic-foil-texture-background-Em96eDRJPD8) | ida20150101 + Katie Harp | Pixabay Content License + Unsplash License / 2026-07-27 | 426 × 420 | 13,778 | WebP fallback, transparent |
+| `red-packet-cutout-256.avif` | Composite: [Pixabay 4048800](https://pixabay.com/photos/red-new-year-spring-festival-4048800/) + [Unsplash Em96eDRJPD8](https://unsplash.com/photos/gold-metallic-foil-texture-background-Em96eDRJPD8) | ida20150101 + Katie Harp | Pixabay Content License + Unsplash License / 2026-07-27 | 256 × 252 | 5,821 | Mobile plain-envelope cutout, transparent |
+| `red-packet-cutout-256.webp` | Composite: [Pixabay 4048800](https://pixabay.com/photos/red-new-year-spring-festival-4048800/) + [Unsplash Em96eDRJPD8](https://unsplash.com/photos/gold-metallic-foil-texture-background-Em96eDRJPD8) | ida20150101 + Katie Harp | Pixabay Content License + Unsplash License / 2026-07-27 | 256 × 252 | 7,602 | WebP fallback, transparent |
+| `red-packet-cutout-426.avif` | Composite: [Pixabay 4048800](https://pixabay.com/photos/red-new-year-spring-festival-4048800/) + [Unsplash Em96eDRJPD8](https://unsplash.com/photos/gold-metallic-foil-texture-background-Em96eDRJPD8) | ida20150101 + Katie Harp | Pixabay Content License + Unsplash License / 2026-07-27 | 426 × 420 | 10,836 | Large plain-envelope cutout, transparent |
+| `red-packet-cutout-426.webp` | Composite: [Pixabay 4048800](https://pixabay.com/photos/red-new-year-spring-festival-4048800/) + [Unsplash Em96eDRJPD8](https://unsplash.com/photos/gold-metallic-foil-texture-background-Em96eDRJPD8) | ida20150101 + Katie Harp | Pixabay Content License + Unsplash License / 2026-07-27 | 426 × 420 | 16,046 | WebP fallback, transparent |
 | `foil-seal-128.avif` | [Unsplash Em96eDRJPD8](https://unsplash.com/photos/gold-metallic-foil-texture-background-Em96eDRJPD8) | Katie Harp | Unsplash License / 2026-07-27 | 128 × 128 | 3,604 | Mobile physical foil seal |
 | `foil-seal-128.webp` | [Unsplash Em96eDRJPD8](https://unsplash.com/photos/gold-metallic-foil-texture-background-Em96eDRJPD8) | Katie Harp | Unsplash License / 2026-07-27 | 128 × 128 | 3,430 | WebP fallback, transparent |
 | `foil-seal-256.avif` | [Unsplash Em96eDRJPD8](https://unsplash.com/photos/gold-metallic-foil-texture-background-Em96eDRJPD8) | Katie Harp | Unsplash License / 2026-07-27 | 256 × 256 | 9,146 | Large physical foil seal |
@@ -100,3 +100,24 @@ a black silhouette of the envelope on every phone. Re-encoded from
 -s 4`. The decoded mean now matches the WebP exactly. No other emitted file was
 affected; all twenty were re-checked by decoding each one and comparing its mean
 RGBA against its WebP counterpart.
+
+**2026-07-28 — `red-packet-cutout-*` re-composited for material.** The shipped
+cutout carried the red-paper source's colour but none of its surface: measured
+against a 5x5 median, a flat patch of the envelope body held 0.55/255 of
+high-frequency detail, and the 512px red-paper derivative it came from holds
+0.53 — the fibre did not survive the downscale from the 4000 x 6000 original, so
+there was none in the source to carry. It read as a lit vector shape.
+
+Two things were added, both from material already licensed in this manifest and
+already credited on these four rows. The high-frequency layer of the Unsplash
+gold-foil macro (16.6/255 of detail, real photographed crumple) is overlaid on
+the paper at 14% as grain, so the surface structure is photographed rather than
+synthesised. The `foil-seal` derivative of the same macro is composited at the
+flap apex at 96 x 84, rotated -5 degrees onto the envelope's plane. A warm key
+at the upper right and a fall-off at the lower left were then applied to agree
+with the bloom's position in the hero. Encoded `avifenc -q 74 -s 4`; WebP at
+quality 84, alpha 94, method 6. Decoded means: AVIF 68.3, WebP 67.1, alpha 124.0
+— checked against the black-plane failure recorded above.
+
+The `alt` text on this variant already read "a gold foil seal". It is now true.
+

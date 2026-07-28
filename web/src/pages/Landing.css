@@ -122,7 +122,8 @@
   white-space: nowrap;
   transition:
     border-color var(--nd-t-state) var(--nd-ease),
-    background-color var(--nd-t-state) var(--nd-ease);
+    background-color var(--nd-t-state) var(--nd-ease),
+    transform var(--nd-t-press) var(--nd-ease-exit);
 }
 
 .nd-land-topcta:hover {
@@ -175,6 +176,32 @@
 .nd-land-cta {
   margin-top: 1.875rem;
   max-width: 22rem;
+}
+
+/* Out-specified past `.nd-action:not(:disabled):active` in index.css, which is
+   a flat 0.99 and reads as nothing on a button this size. */
+.nd-land .nd-land-cta .nd-action {
+  transition:
+    transform var(--nd-t-state) var(--nd-ease),
+    opacity var(--nd-t-press) var(--nd-ease-exit);
+}
+
+.nd-land .nd-land-cta .nd-action:hover {
+  transform: translate3d(0, -3px, 0) scale(1.015);
+}
+
+.nd-land .nd-land-cta .nd-action:active {
+  transform: translate3d(0, 2px, 0) scale(0.955);
+  transition-duration: var(--nd-t-press);
+}
+
+.nd-land-topcta:active,
+.nd-land-foot-cta:active {
+  transform: scale(0.96);
+}
+
+.nd-land-foot-cta {
+  transition: transform var(--nd-t-press) var(--nd-ease-exit);
 }
 
 .nd-land-ctanote {
@@ -321,6 +348,32 @@
   color: var(--nd-on-surface-muted);
 }
 
+/* The row itself carries the reveal animation, so its own transform is spoken
+   for. The children are what move under the pointer. */
+.nd-flow-mark,
+.nd-flow > li > h3,
+.nd-flow > li > p {
+  transition: transform var(--nd-t-state) var(--nd-ease);
+}
+
+.nd-flow-mark {
+  transition:
+    transform var(--nd-t-state) var(--nd-ease),
+    border-color var(--nd-t-state) var(--nd-ease),
+    color var(--nd-t-state) var(--nd-ease);
+}
+
+.nd-flow > li:hover > h3,
+.nd-flow > li:hover > p {
+  transform: translate3d(7px, 0, 0);
+}
+
+.nd-flow > li:hover > .nd-flow-mark {
+  transform: scale(1.14);
+  border-color: var(--nd-accent);
+  color: var(--nd-accent);
+}
+
 .nd-flow-after {
   margin-top: 0.25rem;
   padding-top: 1.625rem;
@@ -417,6 +470,26 @@
   line-height: 1.5;
   color: var(--nd-on-surface-muted);
   text-align: left;
+}
+
+/* Right-aligned, so it grows leftwards into the row instead of past its edge. */
+.nd-ledger dd > .nd-settle {
+  transform-origin: 100% 50%;
+}
+
+.nd-ledger dd > .nd-settle,
+.nd-ledger dt svg {
+  transition: transform var(--nd-t-state) var(--nd-ease);
+}
+
+.nd-ledger-lead:hover dd > .nd-settle,
+.nd-ledger-row:hover dd > .nd-settle {
+  transform: scale(1.07);
+}
+
+.nd-ledger-lead:hover dt svg,
+.nd-ledger-row:hover dt svg {
+  transform: scale(1.18) rotate(-6deg);
 }
 
 .nd-ledger-lead dt svg {
@@ -652,6 +725,20 @@
   color: var(--nd-on-surface-muted);
 }
 
+.nd-land-gate-head > .nd-land-gate-flag {
+  display: inline-flex;
+  align-items: center;
+  margin: 0 0 0.875rem;
+  padding: 0.3125rem 0.625rem;
+  border: 1px dashed var(--nd-rule-strong);
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--nd-on-surface-muted);
+}
+
 .nd-land-gate-facts {
   display: grid;
   gap: 0;
@@ -679,6 +766,11 @@
 .nd-land-gate-facts dt svg {
   flex: 0 0 auto;
   color: var(--nd-accent);
+  transition: transform var(--nd-t-state) var(--nd-ease);
+}
+
+.nd-land-gate-facts > div:hover dt svg {
+  transform: scale(1.24) rotate(8deg);
 }
 
 .nd-land-gate-facts dd {
@@ -699,10 +791,19 @@
   }
 }
 
+/* ---- motion --------------------------------------------------------------
+ *
+ * `backwards`, not `both`, on every finite entrance. The fill is what holds
+ * the pre-start frame; once the entrance has run, dropping the fill hands the
+ * element back to the cascade so a hover or a press can transform it. `both`
+ * left the finished animation permanently outranking every later transform,
+ * which is why the page could only be watched and never touched.
+ */
+
 @keyframes nd-land-arrive {
   from {
     opacity: 0;
-    transform: translate3d(0, 12px, 0);
+    transform: translate3d(0, 34px, 0) scale(0.965);
   }
   to {
     opacity: 1;
@@ -710,10 +811,21 @@
   }
 }
 
+/* The packet is the subject, so it is thrown rather than faded: in from above
+   the fold, past its resting place, and back up onto it. */
 @keyframes nd-land-packet-in {
   from {
     opacity: 0;
-    transform: translate3d(0, 26px, 0) scale(0.965);
+    transform: translate3d(0, -110px, 0) scale(0.7) rotate(-11deg);
+  }
+  34% {
+    opacity: 1;
+  }
+  60% {
+    transform: translate3d(0, 20px, 0) scale(1.045) rotate(3.2deg);
+  }
+  80% {
+    transform: translate3d(0, -9px, 0) scale(0.99) rotate(-1.4deg);
   }
   to {
     opacity: 1;
@@ -728,7 +840,8 @@
    transparent copy is a blank page. */
 @keyframes nd-land-rise {
   from {
-    transform: translate3d(0, 18px, 0);
+    transform: translate3d(var(--rise-x, 0px), var(--rise-y, 52px), 0) scale(var(--rise-s, 0.955))
+      rotate(var(--rise-r, 0deg));
   }
   to {
     transform: none;
@@ -738,7 +851,13 @@
 @keyframes nd-land-settle {
   from {
     opacity: 0;
-    transform: translate3d(0, 6px, 0);
+    transform: translate3d(0, 8px, 0) scale(1.24);
+  }
+  52% {
+    opacity: 1;
+  }
+  76% {
+    transform: translate3d(0, 0, 0) scale(0.962);
   }
   to {
     opacity: 1;
@@ -753,18 +872,64 @@
     transform: scale(1);
   }
   50% {
-    opacity: calc(var(--bloom-o) * 1.17);
-    transform: scale(1.045);
+    opacity: calc(var(--bloom-o) * 1.34);
+    transform: scale(1.11);
+  }
+}
+
+/* Counter-timed against the bloom so the two lights never peak together. */
+@keyframes nd-land-drift {
+  0%,
+  100% {
+    opacity: 0.34;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    opacity: 0.2;
+    transform: translate3d(4vmax, -3vmax, 0) scale(1.14);
+  }
+}
+
+/* The signature beat: the packet lands, and the field swells under it. */
+@keyframes nd-land-impact {
+  from {
+    transform: scale(1);
+  }
+  26% {
+    transform: scale(1.07);
+  }
+  to {
+    transform: scale(1);
   }
 }
 
 @keyframes nd-land-float {
   0%,
   100% {
-    transform: translate3d(0, 0, 0);
+    transform: translate3d(0, 0, 0) rotate(0deg);
   }
-  50% {
-    transform: translate3d(0, -7px, 0);
+  34% {
+    transform: translate3d(-8px, -17px, 0) rotate(-1.4deg);
+  }
+  67% {
+    transform: translate3d(8px, -8px, 0) rotate(1.1deg);
+  }
+}
+
+/* Foil the render does not have: a light crossing the packet's own silhouette. */
+@keyframes nd-land-glint {
+  0% {
+    opacity: 0;
+    transform: translate3d(-140%, 0, 0) rotate(14deg);
+  }
+  14%,
+  40% {
+    opacity: 1;
+  }
+  55%,
+  100% {
+    opacity: 0;
+    transform: translate3d(320%, 0, 0) rotate(14deg);
   }
 }
 
@@ -778,30 +943,85 @@
 }
 
 .nd-arrive {
-  animation: nd-land-arrive 620ms var(--nd-ease) both;
+  animation: nd-land-arrive 780ms var(--nd-ease) backwards;
   animation-delay: var(--nd-in, 0ms);
 }
 
 .nd-land-packet {
   animation-name: nd-land-packet-in;
-  animation-duration: 900ms;
+  animation-duration: 1250ms;
+  animation-timing-function: cubic-bezier(0.42, 0, 0.3, 1);
   will-change: transform, opacity;
 }
 
 .nd-land-packet-float {
-  animation: nd-land-float 9s ease-in-out 1.1s infinite;
+  position: relative;
+  animation: nd-land-float 6s ease-in-out 1.5s infinite;
   will-change: transform;
 }
 
+/* Without the mask the sweep is a bright rectangle over the corners the packet
+   does not fill, so it does not render at all rather than render wrong. */
+.nd-land-glint {
+  display: none;
+}
+
+@supports (
+  mask-image: image-set(url('/images/nimdrops/red-packet-cutout-426.webp') type('image/webp'))
+) {
+  .nd-land-glint {
+    display: block;
+    position: absolute;
+    inset: 0;
+    overflow: clip;
+    pointer-events: none;
+    mask-image: image-set(
+      url('/images/nimdrops/red-packet-cutout-426.avif') type('image/avif'),
+      url('/images/nimdrops/red-packet-cutout-426.webp') type('image/webp')
+    );
+    mask-size: 100% 100%;
+  }
+}
+
+.nd-land-glint::before {
+  content: '';
+  position: absolute;
+  top: -30%;
+  bottom: -30%;
+  left: 0;
+  width: 34%;
+  background: linear-gradient(
+    100deg,
+    transparent,
+    rgb(255 240 214 / 0.34) 42%,
+    rgb(255 250 236 / 0.72) 50%,
+    rgb(255 240 214 / 0.34) 58%,
+    transparent
+  );
+  transform: translate3d(-140%, 0, 0) rotate(14deg);
+  animation: nd-land-glint 7s ease-in-out 2.1s infinite;
+  will-change: transform, opacity;
+}
+
+.nd-land-sky {
+  animation: nd-land-impact 1200ms var(--nd-ease) 880ms backwards;
+}
+
 .nd-land-bloom {
-  animation: nd-land-breathe 19s ease-in-out infinite;
+  animation: nd-land-breathe 7.5s ease-in-out infinite;
+  will-change: transform, opacity;
+}
+
+.nd-land-counter {
+  animation: nd-land-drift 11s ease-in-out infinite;
   will-change: transform, opacity;
 }
 
 .nd-settle {
   /* transform does nothing to an inline box, and the value is a `<b>`. */
   display: inline-block;
-  animation: nd-land-settle 420ms var(--nd-ease) both;
+  animation: nd-land-settle 640ms var(--nd-ease) backwards;
+  animation-delay: var(--nd-in, 0ms);
 }
 
 /* Guarded: without a view() timeline there is no animation, so the visible
@@ -809,9 +1029,39 @@
 @supports (animation-timeline: view()) {
   @media (prefers-reduced-motion: no-preference) {
     .nd-rise {
-      animation: nd-land-rise linear both;
+      animation: nd-land-rise linear backwards;
       animation-timeline: view();
-      animation-range: entry 0% entry 55%;
+      /* `cover`, not `entry`: an entry-relative range is only as long as the
+         element, so a 93px card ran its whole reveal inside 58px of scroll and
+         was over before the gesture was. Cover is the viewport plus the
+         element. The per-item offset makes a row of three assemble rather than
+         arrive as a slab. */
+      animation-range: cover calc(2% + var(--nd-i, 0) * 7%) cover calc(36% + var(--nd-i, 0) * 7%);
+    }
+
+    .nd-land-how-head,
+    .nd-land-figures-head,
+    .nd-land-gate-head {
+      --rise-y: 64px;
+      --rise-s: 0.94;
+    }
+
+    .nd-flow > li,
+    .nd-land-gate-facts > div {
+      --rise-x: -20px;
+      --rise-r: -1.4deg;
+      transform-origin: 0% 50%;
+    }
+
+    .nd-ledger-lead,
+    .nd-ledger-row {
+      --rise-y: 34px;
+      --rise-s: 0.985;
+    }
+
+    .nd-land-plain-in {
+      --rise-y: 58px;
+      --rise-s: 0.97;
     }
   }
 }
@@ -829,12 +1079,18 @@
   }
 
   .nd-land-packet-float,
-  .nd-land-bloom {
+  .nd-land-bloom,
+  .nd-land-counter,
+  .nd-land-sky {
     animation: none !important;
   }
 
   .nd-land-bloom {
     opacity: var(--bloom-o);
+  }
+
+  .nd-land-glint {
+    display: none;
   }
 
   .nd-land-packet,

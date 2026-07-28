@@ -282,6 +282,38 @@ describe('nothing on this page is revealed by an animation', () => {
     expect(reduced).toMatch(/animation:\s*none\s*!important/)
     expect(keyframes('nd-land-fade')).not.toMatch(/transform/)
   })
+  it('moves each reveal far enough to be seen', () => {
+    // 18px was invisible on a real page. Anything that drifts back under 30
+    // has regressed to a reveal nobody can perceive.
+    const travel = (name: string) =>
+      Number(keyframes(name).match(/translate3d\([^)]*?(\d+(?:\.\d+)?)px/)?.[1] ?? 0)
+    expect(travel('nd-land-arrive')).toBeGreaterThanOrEqual(30)
+    expect(travel('nd-land-packet-in')).toBeGreaterThanOrEqual(60)
+    expect(keyframes('nd-land-rise')).toMatch(/--rise-y,\s*(?:[5-9]\d|\d{3})px/)
+  })
+
+  it('gives the reveal more scroll than the element is tall', () => {
+    // An `entry`-relative range is exactly the element's own height, so a 93px
+    // card finished its reveal inside 58px of scroll. `cover` is the viewport
+    // plus the element, which is a gesture rather than a jump.
+    const guarded = css.match(/@supports \(animation-timeline: view\(\)\)\s*\{[\s\S]*?\n\}/)![0]
+    expect(guarded).toMatch(/animation-range:\s*cover/)
+    expect(guarded).not.toMatch(/animation-range:\s*entry/)
+  })
+
+  it('hands the element back after an entrance, so a press can still move it', () => {
+    for (const selector of ['.nd-arrive', '.nd-settle']) {
+      expect(block(selector), selector).toMatch(/animation:[^;]*\bbackwards\b/)
+    }
+    const guarded = css.match(/@supports \(animation-timeline: view\(\)\)\s*\{[\s\S]*?\n\}/)![0]
+    expect(guarded).toMatch(/animation:[^;]*\bbackwards\b/)
+  })
+
+  it('renders the glint only where its mask is supported', () => {
+    expect(block('.nd-land-glint')).toMatch(/display:\s*none/)
+    expect(css).toMatch(/@supports \(\s*\n?\s*mask-image: image-set\(/)
+  })
+
   it('breathes the bloom without moving it', () => {
     const body = keyframes('nd-land-breathe')
     expect(body).toMatch(/transform:\s*scale\(/)
@@ -315,101 +347,62 @@ describe('the custody disclosure', () => {
     expect(details?.querySelector('summary')?.textContent).toMatch(/what that means in practice/i)
   })
 })
-describe('the trivia section gates itself on the server', () => {
+describe('the trivia section describes a capability, not a running feature', () => {
   const gate = () => document.querySelector('[aria-labelledby="gate"]')
 
-  it('says nothing about trivia while the tables do not exist', async () => {
+  it('is on the page whatever the server reports', async () => {
     installStats({ body: TINY })
     mount()
+    expect(gate(), 'present before the figures land').toBeTruthy()
     await waitFor(() => expect(screen.getByTestId('stats')).toBeTruthy())
-
-    expect(gate()).toBeNull()
-    const text = document.body.textContent ?? ''
-    expect(text).not.toMatch(/five questions/i)
-    expect(text).not.toMatch(/four options/i)
-    expect(within(row('questionsAnswered')).getByText(/not measured yet/i)).toBeTruthy()
+    expect(gate()).toBeTruthy()
   })
 
-  it('describes trivia once the server can measure it', async () => {
-    installStats({
-      body: {
-        generatedAt: '2026-07-27T14:31:00.000Z',
-        stats: {
-          totalPaidOut: '2',
-          totalPaidOutLuna: '200000',
-          uniqueWalletsPaid: 1,
-          dropsFunded: 1,
-          sharesClaimed: 1,
-          questionsAnswered: 1097,
-        },
-        unavailable: [],
-      } satisfies PublicStats,
-    })
-    mount()
-
-    const section = await waitFor(() => {
-      const el = gate()
-      if (!el) throw new Error('no gate section yet')
-      return el
-    })
-    const text = section.textContent ?? ''
-    expect(text).toMatch(/five questions, four options/i)
-    expect(text).toMatch(/one at a time/i)
-    expect(text).toMatch(/stamped and timed by the server/i)
-    expect(text).toMatch(/never which answer was wrong/i)
-  })
-  it('describes trivia at a genuine zero, because the table exists', async () => {
-    installStats({
-      body: {
-        generatedAt: '2026-07-27T14:31:00.000Z',
-        stats: {
-          totalPaidOut: '0',
-          totalPaidOutLuna: '0',
-          uniqueWalletsPaid: 0,
-          dropsFunded: 0,
-          sharesClaimed: 0,
-          questionsAnswered: 0,
-        },
-        unavailable: [],
-      } satisfies PublicStats,
-    })
-    mount()
-    await waitFor(() => expect(gate()).toBeTruthy())
-    expect(within(row('questionsAnswered')).getByText('0')).toBeTruthy()
-  })
-
-  it('stays silent while the figures are still in flight', () => {
-    installStats({ body: TINY })
-    mount()
-    expect(gate()).toBeNull()
-  })
-
-  it('stays silent when the endpoint is down', async () => {
+  it('survives the endpoint being down, because it never depended on it', async () => {
     installStats({
       status: 503,
       body: { error: { code: 'stats_unavailable', message: 'no' } },
     })
     mount()
     await screen.findByTestId('stats-down')
-    expect(gate()).toBeNull()
+    expect(gate()).toBeTruthy()
   })
-  it('makes no claim the design says must not be made', async () => {
-    installStats({
-      body: {
-        generatedAt: '2026-07-27T14:31:00.000Z',
-        stats: {
-          totalPaidOut: '2',
-          totalPaidOutLuna: '200000',
-          uniqueWalletsPaid: 1,
-          dropsFunded: 1,
-          sharesClaimed: 1,
-          questionsAnswered: 12,
-        },
-        unavailable: [],
-      } satisfies PublicStats,
-    })
+
+  it('states the mechanics the design fixes', () => {
+    installStats({ body: TINY })
     mount()
-    await waitFor(() => expect(gate()).toBeTruthy())
+    const text = gate()!.textContent ?? ''
+    expect(text).toMatch(/five questions, four options/i)
+    expect(text).toMatch(/one at a time/i)
+    expect(text).toMatch(/stamped and timed by the server/i)
+    expect(text).toMatch(/never which answer was wrong/i)
+  })
+
+  it('says on its face that nothing is running', () => {
+    installStats({ body: TINY })
+    mount()
+    expect(gate()!.textContent).toMatch(/designed, not running yet/i)
+  })
+
+  it('sends nobody anywhere: the section holds no link and no button', () => {
+    installStats({ body: TINY })
+    mount()
+    const section = gate()!
+    expect(section.querySelectorAll('a')).toHaveLength(0)
+    expect(section.querySelectorAll('button')).toHaveLength(0)
+  })
+
+  it('leaves the unmeasured figure unmeasured', async () => {
+    installStats({ body: TINY })
+    mount()
+    await waitFor(() => expect(screen.getByTestId('stats')).toBeTruthy())
+    expect(within(row('questionsAnswered')).getByText(/not measured yet/i)).toBeTruthy()
+    expect(gate()).toBeTruthy()
+  })
+
+  it('makes no claim the design says must not be made', () => {
+    installStats({ body: TINY })
+    mount()
 
     // Scoped to the gate: "nothing to win by trying" is the custody
     // disclosure disclaiming a prize, which is the opposite failure.
@@ -418,6 +411,8 @@ describe('the trivia section gates itself on the server', () => {
       expect(text, `must not say "${banned}"`).not.toContain(banned)
     }
     expect(text).not.toMatch(/cheat|anti-?bot|proctor|fraud-proof|sybil|guarantee/)
+    // Nor may it imply a visitor could go and play one.
+    expect(text).not.toMatch(/try it|play|available now|live now|get started/)
   })
 })
 

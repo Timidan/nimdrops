@@ -53,6 +53,11 @@ const ROWS: Row[] = [
 
 type Load = { phase: 'loading' } | { phase: 'ready'; data: PublicStats } | { phase: 'failed' }
 
+/** Stagger index for the scroll reveal, and a matching delay for the settle. */
+function beat(i: number): CSSProperties {
+  return { '--nd-i': i, '--nd-in': `${i * 70}ms` } as CSSProperties
+}
+
 /** Null means the server did not measure this. Never coerce it to 0. */
 function readFigure(data: PublicStats, key: StatKey): string | null {
   const value = data.stats[key]
@@ -109,8 +114,7 @@ function Ledger({ load, retry }: { load: Load; retry: () => void }) {
         <div className="nd-land-figures-head nd-rise">
           <h2 id="figures">What has actually happened</h2>
           <p>
-            A capped pilot on Nimiq mainnet, so these are small. Each is a query against the ledger,
-            not an estimate.
+            A capped pilot on Nimiq mainnet, so these are small. Each is a ledger query, not an estimate.
           </p>
         </div>
 
@@ -131,7 +135,7 @@ function Ledger({ load, retry }: { load: Load; retry: () => void }) {
               data-testid="stats"
               aria-busy={load.phase === 'loading' ? 'true' : 'false'}
             >
-              <div className="nd-ledger-lead" data-stat="totalPaidOut">
+              <div className="nd-ledger-lead nd-rise" data-stat="totalPaidOut" style={beat(0)}>
                 <dt>
                   <NimMark tone="gold" height="1.125rem" />
                   Paid out to claimants
@@ -147,8 +151,8 @@ function Ledger({ load, retry }: { load: Load; retry: () => void }) {
                 <dd className="nd-ledger-note">Confirmed on chain, not merely sent.</dd>
               </div>
 
-              {ROWS.map(({ key, icon: Icon, label, note }) => (
-                <div className="nd-ledger-row" key={key} data-stat={key}>
+              {ROWS.map(({ key, icon: Icon, label, note }, i) => (
+                <div className="nd-ledger-row nd-rise" key={key} data-stat={key} style={beat(i + 1)}>
                   <dt>
                     <Icon size={18} />
                     {label}
@@ -198,50 +202,48 @@ function Money({ nim }: { nim: string | null }) {
   )
 }
 
-/**
- * Trivia is not built. `questionsAnswered` is absent until the `trivia_answers`
- * table exists, so gating on it is what stops this section describing a feature
- * that is not running. Gate on presence, not on a positive count.
- */
-function TriviaBeat({ load }: { load: Load }) {
-  if (load.phase !== 'ready') return null
-  if (readFigure(load.data, 'questionsAnswered') === null) return null
+const GATE_FACTS: { icon: IconComponent; title: string; body: string }[] = [
+  {
+    icon: QuestionMarkIcon,
+    title: 'Five questions, four options',
+    body: 'One at a time, the next only after the last is committed.',
+  },
+  {
+    icon: ClockExpiryIcon,
+    title: 'A deadline on each',
+    body: 'Stamped and timed by the server, not your device.',
+  },
+  {
+    icon: CustodyShieldIcon,
+    title: 'No answers given back',
+    body: 'You are told a run failed, never which answer was wrong.',
+  },
+]
 
+/** Trivia is designed, not built. Nothing here may read as an invitation. */
+function TriviaBeat() {
   return (
     <section className="nd-land-sec nd-land-gate" aria-labelledby="gate">
       <div className="nd-land-wrap nd-land-gate-in">
         <div className="nd-land-gate-head nd-rise">
+          <p className="nd-land-gate-flag">Designed, not running yet</p>
           <h2 id="gate">Some drops ask first</h2>
           <p>
-            A sponsor can put five questions in front of the share. Answer all five and you claim
-            the same fixed amount as everyone else.
+            A drop can hold its share behind five questions. Answer all five for the same fixed
+            share as everyone else.
           </p>
         </div>
 
         <dl className="nd-land-gate-facts">
-          <div className="nd-rise">
-            <dt>
-              <QuestionMarkIcon size={18} />
-              Five questions, four options
-            </dt>
-            <dd>One at a time. The next one arrives only after the last is committed.</dd>
-          </div>
-          <div className="nd-rise">
-            <dt>
-              <ClockExpiryIcon size={18} />
-              Fifteen seconds each
-            </dt>
-            <dd>The deadline is stamped and timed by the server, not by your device.</dd>
-          </div>
-          <div className="nd-rise">
-            <dt>
-              <CustodyShieldIcon size={18} />
-              No answers given back
-            </dt>
-            <dd>
-              You are told that a run failed, never which answer was wrong. You can try again.
-            </dd>
-          </div>
+          {GATE_FACTS.map(({ icon: Icon, title, body }, i) => (
+            <div key={title} className="nd-rise" style={beat(i)}>
+              <dt>
+                <Icon size={18} />
+                {title}
+              </dt>
+              <dd>{body}</dd>
+            </div>
+          ))}
         </dl>
       </div>
     </section>
@@ -252,7 +254,7 @@ const STEPS: { icon: IconComponent; title: string; body: string }[] = [
   {
     icon: WalletIcon,
     title: 'Fund it once',
-    body: 'Pick the amount each person gets, and how many people. One transaction covers all of them.',
+    body: 'Pick the amount each person gets, and how many people. One transaction covers all.',
   },
   {
     icon: ShareIcon,
@@ -262,7 +264,7 @@ const STEPS: { icon: IconComponent; title: string; body: string }[] = [
   {
     icon: ClaimIcon,
     title: 'Everyone gets the same',
-    body: 'They open it in Nimiq Pay and approve. The NIM lands in the wallet that signed. No address to type, no fee.',
+    body: 'They open it in Nimiq Pay and approve. The NIM lands in the wallet that signed. No address, no fee.',
   },
 ]
 
@@ -285,7 +287,7 @@ export default function Landing() {
           <Link
             to="/create"
             className="nd-land-topcta nd-arrive"
-            style={{ '--nd-in': '40ms' } as CSSProperties}
+            style={{ '--nd-in': '70ms' } as CSSProperties}
           >
             Create a drop
           </Link>
@@ -298,26 +300,26 @@ export default function Landing() {
             <h1 className="nd-land-h1">
               <span
                 className="nd-land-h1-a nd-arrive"
-                style={{ '--nd-in': '80ms' } as CSSProperties}
+                style={{ '--nd-in': '150ms' } as CSSProperties}
               >
                 One link.
               </span>
               <span
                 className="nd-land-h1-b nd-arrive"
-                style={{ '--nd-in': '160ms' } as CSSProperties}
+                style={{ '--nd-in': '260ms' } as CSSProperties}
               >
                 A fixed share of NIM for everyone who opens it.
               </span>
             </h1>
-            <p className="nd-land-lede nd-arrive" style={{ '--nd-in': '240ms' } as CSSProperties}>
-              A sponsor funds once in Nimiq Pay and gets one link. Everyone who opens it signs and
-              gets the same amount: one share per wallet, first come, first served.
+            <p className="nd-land-lede nd-arrive" style={{ '--nd-in': '370ms' } as CSSProperties}>
+              A sponsor funds once in Nimiq Pay and gets one link. Everyone who opens it signs for
+              the same amount: one share per wallet, first come, first served.
             </p>
-            <div className="nd-land-cta nd-arrive" style={{ '--nd-in': '320ms' } as CSSProperties}>
+            <div className="nd-land-cta nd-arrive" style={{ '--nd-in': '470ms' } as CSSProperties}>
               <Link to="/create" className="nd-action">
                 Create a drop
               </Link>
-              <p className="nd-land-ctanote">Signed in Nimiq Pay. Nothing to sign up for.</p>
+              <p className="nd-land-ctanote">Signed in Nimiq Pay. No sign-up.</p>
             </div>
           </div>
 
@@ -326,7 +328,7 @@ export default function Landing() {
                 cannot hold both transforms. */}
             <span
               className="nd-land-packet nd-arrive"
-              style={{ '--nd-in': '120ms' } as CSSProperties}
+              style={{ '--nd-in': '140ms' } as CSSProperties}
             >
               <span className="nd-land-packet-float">
                 <NimDropsPhotograph
@@ -335,6 +337,7 @@ export default function Landing() {
                   priority
                   sizes="(max-width: 60rem) 62vw, 26rem"
                 />
+                <span className="nd-land-glint" />
               </span>
             </span>
           </div>
@@ -345,13 +348,13 @@ export default function Landing() {
         <div className="nd-land-wrap nd-land-how-in">
           <div className="nd-land-how-head nd-rise">
             <h2 id="how">How a drop works</h2>
-            <p>Three things the sponsor does, and one the clock does.</p>
+            <p>Three things the sponsor does. One the clock does.</p>
           </div>
 
           <div className="nd-land-how-body">
             <ol className="nd-flow">
-              {STEPS.map(({ icon: Icon, title, body }) => (
-                <li key={title} className="nd-rise">
+              {STEPS.map(({ icon: Icon, title, body }, i) => (
+                <li key={title} className="nd-rise" style={beat(i)}>
                   <span className="nd-flow-mark" aria-hidden="true">
                     <Icon size={20} />
                   </span>
@@ -361,22 +364,22 @@ export default function Landing() {
               ))}
             </ol>
 
-            <div className="nd-flow-after nd-rise">
+            <div className="nd-flow-after nd-rise" style={beat(3)}>
               <span className="nd-flow-mark" aria-hidden="true">
                 <RefundReturnIcon size={20} />
               </span>
               <h3>Then, when the window closes</h3>
               <p>
                 Whatever nobody claims goes back to the sponsor when the claim window closes. The
-                sponsor sets that window when funding, from an hour to two weeks. It is 24 hours
-                unless they change it.
+                sponsor sets it when funding, from an hour to two weeks: 24 hours unless they change
+                it.
               </p>
             </div>
           </div>
         </div>
       </section>
 
-      <TriviaBeat load={load} />
+      <TriviaBeat />
 
       <Ledger load={load} retry={retry} />
 
