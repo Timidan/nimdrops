@@ -542,7 +542,7 @@ describe.skipIf(!hasDb)('submitAttestation', () => {
     const broken = await gatedDrop({ config: { attesterPublicKey: 'nope', maxAgeSeconds: 300 } })
     const message = attestation({ drop: broken })
     // The signature here is valid. Only the drop is broken, so the code must not
-    // be the one that means "your confirmation could not be verified" — the HTTP
+    // be the one that means "we could not check that confirmation" — the HTTP
     // layer maps `misconfigured` to 5xx and pages an operator instead.
     await expect(submit(message, sign(message), broken)).rejects.toMatchObject({
       code: 'misconfigured',

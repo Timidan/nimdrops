@@ -73,7 +73,7 @@ function clearStoredWallet(): void {
 const KIND_TITLES: Record<GateKind, string> = {
   trivia: 'Five questions',
   passphrase: 'A passphrase',
-  attested: 'Confirmed by whoever runs this drop',
+  attested: 'Confirmed by the organiser',
 }
 
 export default function Game({ walletAddress }: GameProps) {
@@ -257,9 +257,9 @@ function Pass({
     <div data-testid="gate-passed" className="mt-9">
       <h1 className="text-2xl font-semibold tracking-tight">You can claim {amount} NIM</h1>
       <p className="mt-3 text-sm leading-relaxed text-chalk-ink/65">
-        This drop&rsquo;s condition is met for the wallet you named. Nothing has been sent yet — the
-        claim happens on the drop&rsquo;s own page, where you tap and approve one signature and the
-        NIM goes to the wallet that signed.
+        This drop&rsquo;s condition is met for the wallet you named. Nothing has been sent yet. You
+        claim on the drop&rsquo;s own page: tap and approve one signature there, and the NIM goes to
+        the wallet that signed.
       </p>
       <Link to={`/drop/${publicId}`} className="nd-primary mt-8 block w-full text-center">
         Go to the claim
@@ -421,13 +421,13 @@ function ReviewRow({ question }: { question: ReviewedQuestion }) {
       ) : chosen === undefined ? null : (
         <p className="mt-2 text-sm leading-relaxed text-chalk-ink/65">
           You chose <span className="font-medium text-chalk-ink">{chosen}</span>
-          {late ? ', but the clock had already run out' : null}
+          {late ? ', but the clock had already run out.' : '.'}
         </p>
       )}
 
       {correct === undefined ? null : (
         <p className="mt-1 text-sm leading-relaxed text-chalk-ink/65">
-          The right answer is <span className="font-medium text-chalk-ink">{correct}</span>
+          The right answer is <span className="font-medium text-chalk-ink">{correct}</span>.
         </p>
       )}
     </li>
@@ -489,7 +489,7 @@ function WalletStep({ onSubmit }: { onSubmit: (address: string) => void }) {
       </p>
       <p className="mt-2 text-sm leading-relaxed text-chalk-ink/65">
         Your wallet will ask you to share your address. Nothing is signed here and nothing leaves
-        your wallet — the signature comes later, on the claim.
+        your wallet. The signature comes later, on the claim.
       </p>
 
       {problem ? (
@@ -574,7 +574,7 @@ function Trivia({
          */}
         <p className="mt-3 text-sm leading-relaxed text-chalk-ink/65">
           {session.error ??
-            `One answer was not the right one, so the round stopped there. You answered ${session.answered} of ${session.questionCount}.`}
+            `One answer was wrong, so the round stopped there. You answered ${session.answered} of ${session.questionCount}.`}
         </p>
         <p className="mt-3 text-sm leading-relaxed text-chalk-ink/65">
           You can try this drop again in {TRIVIA_COOLDOWN_MINUTES} minutes. Nothing was signed and
@@ -661,11 +661,11 @@ function Trivia({
        * that would be a guess.
        */}
       <p className="mt-2 text-sm leading-relaxed text-chalk-ink/65">
-        Each question is timed by the server, and the seconds are on screen while you answer.
+        The server times each question, and the seconds are on screen while you answer.
       </p>
       <p className="mt-2 text-sm leading-relaxed text-chalk-ink/65">
-        Nothing is signed while you play. If you pass, you go to this drop&rsquo;s own page and claim
-        there — the wallet approval comes after, not now.
+        Nothing is signed while you play. If you pass, you claim on this drop&rsquo;s own page. The
+        wallet approval comes after, not now.
       </p>
 
       <button
@@ -788,7 +788,7 @@ function Passphrase({
         </p>
       ) : null}
       <p className="mt-3 text-sm leading-relaxed text-chalk-ink/65">
-        Capital letters and extra spaces do not matter. Nothing is signed here — if the phrase is
+        Capital letters and extra spaces do not matter. Nothing is signed here. If the phrase is
         right, you claim on the drop&rsquo;s own page.
       </p>
 
@@ -828,7 +828,7 @@ function Passphrase({
 function Attested({ onCheckAgain, checking }: { onCheckAgain: () => void; checking: boolean }) {
   return (
     <div data-testid="attested" className="mt-8">
-      <h1 className="text-lg font-semibold tracking-tight">Someone else confirms this one</h1>
+      <h1 className="text-lg font-semibold tracking-tight">The organiser confirms this one</h1>
       <p className="mt-3 text-sm leading-relaxed text-chalk-ink/65">
         Whoever runs this drop decides who can claim it and confirms it themselves. There is nothing
         here to answer and nothing to sign.

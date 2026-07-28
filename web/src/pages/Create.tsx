@@ -491,7 +491,7 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
         setPhase('closed')
         return
       }
-      setFailure(err instanceof ApiError ? err.message : 'we could not reach NimDrops just now')
+      setFailure(err instanceof ApiError ? err.message : 'We could not reach NimDrops just now.')
       setPhase('failed')
       return
     }
@@ -731,7 +731,7 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
       <Recover
         mark="clock"
         title="Waiting for wallet confirmation"
-        body="Your wallet has the transaction, but it has not given us a receipt we can verify yet. We keep checking — the moment the network shows it, this drop goes live and your share link appears here."
+        body="Your wallet has the transaction, but it has not given us a receipt we can verify yet. We keep checking. The moment the network shows it, this drop goes live and your link appears here."
         action="Check again"
         onAction={() => void approve(draft)}
         quiet
@@ -845,7 +845,7 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
               Fund drop
             </button>
             <p className="nd-note text-center">
-              Nimiq Pay opens next — tap and approve one transaction.
+              Nimiq Pay opens next. Tap and approve one transaction.
             </p>
           </Sheet>
         </>
@@ -897,7 +897,7 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
             label="NIM per person"
             value={amountEach}
             onChange={setAmountEach}
-            hint="Everyone gets exactly this. No splitting, no chance."
+            hint="Everyone gets exactly this. No splitting, nothing random."
           />
 
           <PeopleStepper value={claimCount} onChange={setClaimCount} />
@@ -1296,7 +1296,7 @@ function ReservationNote({
       ? ''
       : ` ${custody.limits.remaining} NIM of the ${custody.limits.aggregateMax} NIM cap is free right now.`
   const text = lapsed
-    ? `The ${windowMinutes} minute hold on your room has ended.${free} Funding may still work — it is just no longer held for you.`
+    ? `The ${windowMinutes}-minute hold on your room has ended.${free} Funding may still work, but the room is no longer held for you.`
     : minutesLeft <= 1
       ? 'Your room is held for less than a minute more.'
       : `Your room is held for another ${minutesLeft} minutes.`
@@ -1424,8 +1424,8 @@ function ExpiryChoice({ value, onChange }: { value: number; onChange: (hours: nu
       </div>
       <p className="nd-hint">
         Unclaimed NIM goes back to you {expiryWindowLabel(value)} after the drop goes live. NimDrops
-        holds it for the whole window, and you can close the drop early from the wallet you fund
-        with to get the unclaimed NIM back sooner.
+        holds it for the whole window. To get it back sooner, close the drop early from the wallet
+        you fund with.
       </p>
     </div>
   )
@@ -1493,7 +1493,7 @@ const PROGRESS_COPY: Record<string, { title: string; body: string }> = {
   },
   creating: {
     title: 'Preparing your drop',
-    body: 'Reserving your drop and the exact amount to fund.',
+    body: 'We are reserving your drop and the exact amount to fund.',
   },
   approving: {
     title: 'Approve in Nimiq Pay',
@@ -1676,10 +1676,10 @@ function NoWallet() {
     <Field brand>
       <OpenInApp title="Fund your drop in Nimiq Pay" deepLink={nimiqPayDeeplink(here)} url={here}>
         <p>
-          A NimDrop is funded by one transaction from your own wallet, so this step happens inside
-          Nimiq Pay rather than in a browser.
+          One transaction from your own wallet funds a NimDrop, so this step happens inside Nimiq
+          Pay rather than in a browser.
         </p>
-        <p>You pick the amount per person and the headcount there, and approve once.</p>
+        <p>There you pick the amount per person and how many people, then approve once.</p>
       </OpenInApp>
     </Field>
   )
@@ -1730,7 +1730,7 @@ function Live({
         caption={
           <p className="nd-note">
             {drop
-              ? `${drop.remaining} of ${drop.claimCount} shares of ${drop.amountEach} NIM are waiting. Share the link — the first ${drop.claimCount} wallets to open it each get one.`
+              ? `${drop.remaining} of ${drop.claimCount} shares are waiting, ${drop.amountEach} NIM each. Share the link: the first ${drop.claimCount} wallets to open it each get one.`
               : 'Share the link. Each wallet that opens it can claim one fixed share.'}
           </p>
         }

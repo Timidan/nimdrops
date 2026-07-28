@@ -32,7 +32,7 @@ export default function Receipt({ publicId, txHash, sponsorLabel }: ReceiptProps
         <div className="nd-row">
           <dt>Transaction</dt>
           <dd className="font-mono text-xs">
-            {txHash ? shortHash(txHash) : 'confirmed, id syncing'}
+            {txHash ? shortHash(txHash) : 'confirmed, waiting for the id'}
           </dd>
         </div>
       </dl>

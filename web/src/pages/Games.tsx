@@ -71,7 +71,7 @@ export default function Games() {
         {games === null && error === null ? <Loading /> : null}
         {error !== null ? (
           <p data-testid="games-error" className="mt-8 text-sm leading-relaxed text-chalk-ink/65">
-            {error} Nothing has been lost — the list is just a list.
+            {error} Nothing has been lost. This is only a list.
           </p>
         ) : null}
         {games !== null && games.length === 0 ? <Empty /> : null}

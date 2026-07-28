@@ -4,7 +4,6 @@ import {
   AnswerReviewIcon,
   ClaimIcon,
   ClockExpiryIcon,
-  CustodyShieldIcon,
   EnvelopeSealedIcon,
   QuestionMarkIcon,
   FreshQuestionIcon,
@@ -121,18 +120,15 @@ function Ledger({ load, retry }: { load: Load; retry: () => void }) {
     <section className="nd-land-sec nd-land-figures" aria-labelledby="figures">
       <div className="nd-land-wrap nd-land-figures-in">
         <div className="nd-land-figures-head nd-rise">
-          <h2 id="figures">What has actually happened</h2>
-          <p>
-            A capped pilot on Nimiq mainnet, so these are small. Each is a ledger query, not an estimate.
-          </p>
+          <h2 id="figures">Paid out so far</h2>
+          <p>Read from the ledger, not estimated.</p>
         </div>
 
         {load.phase === 'failed' ? (
           <div className="nd-panel nd-land-figures-down" data-testid="stats-down">
-            <p className="nd-note">
-              The live figures are not loading right now. No number here is filled in when they are
-              missing.
-            </p>
+            {/* One line, not two sentences of apology. A figure this page cannot
+                read is still never invented — it is simply absent. */}
+            <p className="nd-note">Figures are not loading.</p>
             <button type="button" className="nd-textlink" onClick={retry}>
               Try again
             </button>
@@ -427,46 +423,6 @@ export default function Landing() {
       <TriviaBeat />
 
       <Ledger load={load} retry={retry} />
-
-      <section className="nd-land-sec nd-land-plain" aria-labelledby="custody">
-        <div className="nd-land-wrap">
-          <div className="nd-land-plain-in nd-rise">
-            <div className="nd-land-plain-head">
-              <span className="nd-land-plain-mark" aria-hidden="true">
-                <CustodyShieldIcon size={22} />
-              </span>
-              <h2 id="custody">Said before you have to ask</h2>
-            </div>
-            <div className="nd-land-plain-body">
-              <p className="nd-land-plain-lead">
-                NimDrops holds the NIM between funding and payout. That is custody: not a smart
-                contract, and not your wallet.
-              </p>
-              {/* Shortening moved these behind a summary. Removing any of them
-                  deletes a custody fact. */}
-              <details className="nd-land-plain-more">
-                <summary>What that means in practice</summary>
-                <div className="nd-land-plain-detail">
-                  <p>
-                    When someone claims, the NIM is sent to the wallet that signed and to no other
-                    address.
-                  </p>
-                  <p>
-                    A signature proves control of one wallet, not one person, so anyone holding
-                    several wallets can take several shares. Shares are fixed and equal, which is
-                    why there is nothing to win by trying.
-                  </p>
-                  <p>
-                    Funding, payouts and refunds are ordinary Nimiq transactions: public, permanent
-                    and readable by anyone. Nothing here says &ldquo;paid&rdquo; before the network
-                    has confirmed it.
-                  </p>
-                </div>
-              </details>
-            </div>
-          </div>
-        </div>
-      </section>
 
       <footer className="nd-land-foot">
         <div className="nd-land-wrap nd-land-foot-in">

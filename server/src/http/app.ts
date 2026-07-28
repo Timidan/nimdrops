@@ -186,7 +186,7 @@ function notFound(): HttpError {
   return new HttpError(404, 'not_found', 'not found')
 }
 
-function invalidRequest(message = 'request body is not valid'): HttpError {
+function invalidRequest(message = 'the request body is not valid'): HttpError {
   return new HttpError(400, 'invalid_request', message)
 }
 
@@ -220,7 +220,7 @@ const CLAIM_MESSAGES: Record<ClaimRejectionCode, string> = {
   // the condition at all, so this says what to do rather than what went wrong.
   // It also avoids naming the condition: this layer does not know which kind the
   // drop carries, and guessing would eventually be wrong.
-  gate_required: 'this drop asks you to do something first — open it to see what',
+  gate_required: 'this drop asks you to do something first — open the drop to see what it is',
 }
 
 /**
@@ -236,25 +236,25 @@ const CLOSE_MESSAGES: Record<CloseRejectionCode, string> = {
   unknown_challenge: 'this request is no longer valid — start again',
   cross_drop_challenge: 'this request is no longer valid — start again',
   challenge_expired: 'this request expired — start again',
-  challenge_consumed: 'this request was already used — reload the page to see the drop’s state',
+  challenge_consumed: 'this request was already used — reload the page to see where the drop stands',
   invalid_signature:
     'we could not check that approval — nothing changed and the drop is still running, so try again',
   message_mismatch: 'this request is no longer valid — start again',
   not_the_funder: 'only the wallet that funded this drop can close it',
   drop_not_funded: 'this drop was never funded, so there is nothing to close or refund',
   already_closed: 'this drop is already closed',
-  drop_not_live: 'this drop cannot be closed',
+  drop_not_live: 'this drop is not running, so it cannot be closed',
 }
 
 const FUNDING_MESSAGES: Record<FundingRejectionCode, string> = {
   wrong_network: 'that transaction is on a different network',
   execution_failed: 'that transaction did not succeed on chain',
-  wrong_recipient: 'that transaction was not sent to the funding address',
-  wrong_amount: 'that transaction does not match the exact funding amount',
+  wrong_recipient: 'that transaction did not go to this drop’s funding address',
+  wrong_amount: 'that transaction is not for the exact amount this drop needs',
   wrong_memo: 'that transaction does not carry this drop’s funding message',
-  invalid_sender: 'that transaction has no usable sender',
+  invalid_sender: 'we could not read a sender address from that transaction',
   reused_hash: 'that transaction was already used to fund a drop',
-  drop_not_fundable: 'this drop is no longer awaiting funding',
+  drop_not_fundable: 'this drop is no longer waiting to be funded',
   attested_as_float: 'that transaction is already recorded as an operator deposit',
 }
 
@@ -271,24 +271,31 @@ const FUNDING_MESSAGES: Record<FundingRejectionCode, string> = {
 const GATE_MESSAGES: Record<GateRejectionCode, string> = {
   not_a_game: 'this drop has no condition to meet',
   game_not_live: 'this drop is not accepting claims',
-  wrong_kind: 'that is not how this drop works',
+  wrong_kind: 'that is not what this drop asks for — reload the page to see what it needs',
   already_granted: 'you have already met this drop’s condition — claim your share',
-  cooldown: 'wait a few minutes before trying again',
-  too_many_attempts: 'too many tries — try again in an hour',
-  bad_attempt: 'that is not it',
+  cooldown: 'wait a few minutes, then try again',
+  too_many_attempts: 'you have run out of tries for now — try again in an hour',
+  // The player guessed wrong, which this may say, because it is what happened.
+  // It says nothing else: no count, no hint, no "try again" — a next try is the
+  // cooldown's and the attempt limit's decision, not this sentence's.
+  bad_attempt: 'that is not correct',
   session_not_found: 'that attempt is no longer valid — start again',
   session_over: 'that attempt is finished — start again',
+  // Deliberately offers no way forward, even though the session is still in
+  // progress and there IS a next question: the web client treats any refusal as
+  // terminal for the session, so "go on to the next one" would be a sentence the
+  // screen behind it does not honour.
   deadline_missed: 'time ran out on that question',
-  wrong_index: 'that is not the question in play — reload and try again',
-  tier_locked: 'pass an easier one first to unlock this',
-  bad_attestation: 'that confirmation could not be verified',
+  wrong_index: 'that is not the question you are on — reload the page and try again',
+  tier_locked: 'pass an easier game first, then this one opens',
+  bad_attestation: 'we could not check that confirmation',
   attestation_replayed: 'that confirmation was already used',
   // Every route above already rejects a bad address at the boundary, so this is
   // normally unreachable over HTTP. It is here because the gates now check for
   // themselves rather than trusting that — see `requireGateWallet`.
   bad_address: 'that is not a valid Nimiq address',
   // 5xx: see GATE_STATUS.
-  misconfigured: 'this drop is not set up correctly — nobody can claim it yet',
+  misconfigured: 'this drop is not set up correctly, so nobody can claim it yet',
 }
 
 /**
@@ -394,7 +401,7 @@ function wholeNumberIn(
 function requirePhrase(body: Record<string, unknown>): string {
   const value = body.phrase
   if (typeof value !== 'string' || value.trim() === '' || value.length > PHRASE_MAX_LENGTH) {
-    throw invalidRequest('phrase must be a short non-empty string')
+    throw invalidRequest('a phrase must be a short line of text, and it cannot be empty')
   }
   return value
 }
@@ -409,7 +416,7 @@ function requirePhrase(body: Record<string, unknown>): string {
 function requireAttestationMessage(body: Record<string, unknown>): string {
   const value = body.message
   if (typeof value !== 'string' || value === '' || value.length > ATTESTATION_MAX_LENGTH) {
-    throw invalidRequest('message must be a non-empty attestation string')
+    throw invalidRequest('the attestation message must be text, and it cannot be empty')
   }
   return value
 }
@@ -768,14 +775,14 @@ export function makeApp(deps: AppDeps): Hono {
   )
 
   function requireGates(): GateServices {
-    if (!gates) throw new HttpError(404, 'not_found', 'this deployment has no gated drops')
+    if (!gates) throw new HttpError(404, 'not_found', 'this deployment does not run drops with conditions')
     return gates
   }
 
   function requireTrivia(): TriviaService {
     const service = requireGates().trivia
     if (!service) {
-      throw new HttpError(404, 'not_found', 'this deployment does not serve question games')
+      throw new HttpError(404, 'not_found', 'this deployment does not run question games')
     }
     return service
   }
@@ -783,7 +790,7 @@ export function makeApp(deps: AppDeps): Hono {
   function requirePassphraseSalt(): string {
     const salt = requireGates().passphraseSalt
     if (!salt) {
-      throw new HttpError(404, 'not_found', 'this deployment does not serve passphrase games')
+      throw new HttpError(404, 'not_found', 'this deployment does not run passphrase games')
     }
     return salt
   }
@@ -1403,7 +1410,7 @@ function mapError(err: unknown): HttpError {
     return new HttpError(
       GATE_STATUS[err.code] ?? 409,
       err.code,
-      GATE_MESSAGES[err.code] ?? 'this condition cannot be completed',
+      GATE_MESSAGES[err.code] ?? 'this drop’s condition cannot be met right now',
     )
   }
   if (err instanceof DropShapeError) return invalidRequest(err.message)
@@ -1451,7 +1458,7 @@ function mapError(err: unknown): HttpError {
     return new HttpError(503, 'paused', 'payouts are paused — try again shortly', DEGRADED_RETRY_SECONDS)
   }
   if (err instanceof StaleReconciliationError) {
-    return new HttpError(503, 'degraded', 'temporarily unavailable — try again shortly', DEGRADED_RETRY_SECONDS)
+    return new HttpError(503, 'degraded', 'we cannot do this right now — try again shortly', DEGRADED_RETRY_SECONDS)
   }
   // A chain call that hit the money engine's deadline (`chain/deadline.ts`).
   //
@@ -1462,7 +1469,7 @@ function mapError(err: unknown): HttpError {
   // `submitFunding`'s own lookups and from the `reconcile` it runs after
   // finality, both of which used to land on the 500 below.
   if (err instanceof ChainCallTimeoutError) {
-    return new HttpError(503, 'degraded', 'temporarily unavailable — try again shortly', DEGRADED_RETRY_SECONDS)
+    return new HttpError(503, 'degraded', 'we cannot do this right now — try again shortly', DEGRADED_RETRY_SECONDS)
   }
   // Its own code, NOT the shared `unavailable`: that one makes `onError` fire an
   // `insolvent` alert, and a landing-page statistic that could not be computed
@@ -1472,14 +1479,14 @@ function mapError(err: unknown): HttpError {
     return new HttpError(
       503,
       'stats_unavailable',
-      'statistics are temporarily unavailable — try again shortly',
+      'we cannot show the statistics right now — try again shortly',
       DEGRADED_RETRY_SECONDS,
     )
   }
   if (err instanceof InsolventError || err instanceof CapExceededError) {
-    return new HttpError(503, 'unavailable', 'temporarily unavailable — try again shortly', DEGRADED_RETRY_SECONDS)
+    return new HttpError(503, 'unavailable', 'we cannot do this right now — try again shortly', DEGRADED_RETRY_SECONDS)
   }
-  return new HttpError(500, 'internal_error', 'something went wrong')
+  return new HttpError(500, 'internal_error', 'something went wrong on our side')
 }
 
 function envelope(err: HttpError): Response {

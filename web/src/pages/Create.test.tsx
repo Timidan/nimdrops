@@ -1141,7 +1141,7 @@ describe('Create — the funding reservation window', () => {
     await tick(121_000)
 
     const note = screen.getByTestId('reservation-note').textContent ?? ''
-    expect(note).toMatch(/the 30 minute hold on your room has ended/i)
+    expect(note).toMatch(/the 30-minute hold on your room has ended/i)
     // The headroom in that sentence is the re-read one, not the stale one.
     expect(note).toMatch(/0\.75 NIM of the 2 NIM cap is free right now/i)
     expect(custodyCalls(script.calls)).toBeGreaterThan(before)

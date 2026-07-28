@@ -66,10 +66,10 @@ export const MAX_LUNA = 9_223_372_036_854_775_807n
 export class DropShapeError extends Error {}
 
 export function lunaFromNim(nim: string): bigint {
-  if (!/^\d+(\.\d{1,5})?$/.test(nim)) throw new DropShapeError(`invalid NIM amount: ${nim}`)
+  if (!/^\d+(\.\d{1,5})?$/.test(nim)) throw new DropShapeError(`${nim} is not a valid NIM amount`)
   const [whole, frac = ''] = nim.split('.')
   const luna = BigInt(whole) * LUNA_PER_NIM + BigInt(frac.padEnd(5, '0'))
-  if (luna <= 0n) throw new DropShapeError('amount must be positive')
+  if (luna <= 0n) throw new DropShapeError('the amount must be more than zero')
   return luna
 }
 export function formatNim(luna: bigint): string {
@@ -80,7 +80,7 @@ export function formatNim(luna: bigint): string {
 export function assertDropShape(amountEachLuna: bigint, claimCount: number): void {
   if (!Number.isInteger(claimCount) || claimCount < MIN_CLAIMS)
     throw new DropShapeError(`a drop needs at least ${MIN_CLAIMS} people`)
-  if (amountEachLuna <= 0n) throw new DropShapeError('amount must be positive')
+  if (amountEachLuna <= 0n) throw new DropShapeError('the amount must be more than zero')
   if (amountEachLuna < MIN_AMOUNT_EACH_LUNA)
     throw new DropShapeError(`each person must get at least ${formatNim(MIN_AMOUNT_EACH_LUNA)} NIM`)
   if (claimCount > MAX_CLAIM_COUNT)

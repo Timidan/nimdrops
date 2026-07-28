@@ -218,6 +218,37 @@ export interface HeroEntranceOptions {
  * press can transform it (the same reason `Landing.css` fills `backwards` rather
  * than `both`).
  */
+/**
+ * Force everything visible after `ms`, whatever the tween thinks.
+ *
+ * The entrance hides elements up front and relies on a ticker to bring them
+ * back. Every stall in that chain leaves the page with no visible call to
+ * action: a throttled `requestAnimationFrame` in a backgrounded tab, a
+ * compositor that never produces a frame, a headless or embedded WebView that
+ * paces rAF differently, or simply a device slow enough that GSAP's ticker is
+ * starved. None of those raise, so the existing `catch` cannot see them.
+ *
+ * This is deliberately wall-clock (`setTimeout`) rather than another rAF: the
+ * whole point is to be independent of the clock that failed. Restoring twice is
+ * harmless — `restore` only clears inline properties.
+ */
+function failsafeReveal(
+  els: readonly HTMLElement[],
+  ms: number,
+  handBack: () => void,
+): () => void {
+  const timer = setTimeout(() => {
+    for (const el of els) restore(el)
+    // Deliberately NOT un-silencing. Tried, and it is worse: `.nd-arrive`
+    // fills `backwards`, so re-arming the CSS animation restarts its delay from
+    // now and the element goes straight back to its hidden from-state. Leaving
+    // `animation: none` in place is what keeps it visible — the element rests at
+    // its natural styles, which is exactly where the entrance would have ended.
+    void handBack
+  }, ms)
+  return () => clearTimeout(timer)
+}
+
 export function useHeroEntrance(scope: MotionScope, options: HeroEntranceOptions = {}): void {
   const allowed = useMotionAllowed()
   const { selector = '.nd-arrive', step = 0.09 } = options
@@ -230,6 +261,9 @@ export function useHeroEntrance(scope: MotionScope, options: HeroEntranceOptions
 
     let unsilence: (() => void) | undefined
     let timeline: gsap.core.Timeline | undefined
+    // 2.6s covers the longest authored beat plus its duration, with room to
+    // spare. If the tween is healthy it has finished long before this fires.
+    const cancelFailsafe = failsafeReveal(els, 2600, () => unsilence?.())
 
     try {
       unsilence = silenceCss(els)
@@ -263,6 +297,7 @@ export function useHeroEntrance(scope: MotionScope, options: HeroEntranceOptions
     } catch {
       // `fromTo` renders its start state on construction, so a throw part-way
       // through the loop leaves some elements hidden. Undo all of it.
+      cancelFailsafe()
       timeline?.kill()
       for (const el of els) restore(el)
       unsilence?.()
@@ -270,6 +305,7 @@ export function useHeroEntrance(scope: MotionScope, options: HeroEntranceOptions
     }
 
     return () => {
+      cancelFailsafe()
       timeline?.kill()
       for (const el of els) restore(el)
       unsilence?.()

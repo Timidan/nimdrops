@@ -188,7 +188,7 @@ export function buildDisclosure(o: {
     },
     {
       id: 'why_no_contract',
-      text: 'A Nimiq HTLC pays one named recipient. A drop pays a list of people nobody knows yet, so no contract on this chain can hold the money. A person holds it instead.',
+      text: 'A Nimiq HTLC, which is a hashed timelock contract, pays one named recipient. A drop pays a list of people nobody knows yet, so no contract on this chain can hold the money. A person holds it instead.',
     },
     {
       id: 'operator_key',
@@ -206,16 +206,16 @@ export function buildDisclosure(o: {
       // is actually being asked to trust: the operator is holding this NIM and
       // has not yet finished sending it on.
       text:
-        'Nothing limits the size of a drop, so the amount at risk is whatever sponsors have ' +
-        `funded and the operator has not finished paying out. That is ${atRisk} NIM right now, ` +
+        'Nothing limits the size of a drop. The amount at risk is whatever sponsors have funded ' +
+        `and the operator has not finished paying out. That is ${atRisk} NIM right now, ` +
         'and your drop adds to it.',
     },
     {
       id: 'mitigations',
       text:
         'What stands in the way is not cryptography. The books are checked against the chain ' +
-        'before anything is signed, only one process is ever allowed to sign, the operator can ' +
-        'stop every payment at once, and funding does not count until the network has buried it ' +
+        'before anything is signed. Only one process is ever allowed to sign. The operator can ' +
+        'stop every payment at once. Funding does not count until the network has buried it ' +
         `${finalityDepthBlocks()} blocks deep.`,
     },
     {
@@ -225,7 +225,7 @@ export function buildDisclosure(o: {
     mainnetPilot
       ? {
           id: 'first_mainnet_run',
-          text: 'This is the first run with real NIM. Send a small amount and expect to watch it.',
+          text: 'This is the first run with real NIM. Send a small amount, and watch it closely.',
         }
       : {
           id: 'test_network',
@@ -246,12 +246,12 @@ export function buildDisclosure(o: {
       // change this line in the same commit.
       text:
         `The ${formatExpiryWindow(expiryHours)} claim window starts when the network confirms your ` +
-        `funding, not when you tap send. The operator holds your NIM for the whole window, and only ` +
+        `funding, not when you tap send. The operator holds your NIM for the whole window. Only ` +
         `the wallet you fund from can end the drop early and take back what nobody claimed.`,
     },
     {
       id: 'refunds',
-      text: 'Whatever nobody claims goes back to the wallet you fund from. The operator signs that transfer, so a pause or a manual check can hold it up.',
+      text: 'Whatever nobody claims goes back to the wallet you fund from. The operator signs that transfer, so a pause or a manual check can delay it.',
     },
   ]
 
@@ -262,7 +262,7 @@ export function buildDisclosure(o: {
     points.splice(points.findIndex((p) => p.id === 'mitigations') + 1, 0, limits)
     points.push({
       id: 'funding_window',
-      text: `This drop holds its room for ${FUNDING_RESERVATION_MINUTES} minutes. Fund it in this session, or check the limits again before you send.`,
+      text: `This drop holds its place under those limits for ${FUNDING_RESERVATION_MINUTES} minutes. Fund it in this session, or check the limits again before you send.`,
     })
   }
 

@@ -552,8 +552,8 @@ function Face({ publicId, state, drop, serverState, txHash, amount, sponsor, onC
           {state === 'degraded' ? (
             <div data-testid="degraded-banner" className="nd-panel nd-panel--warn mt-4">
               <p className="text-[0.9375rem] leading-relaxed text-pretty">
-                NimDrops is having trouble reaching the network. Your share is not gone, so try
-                again shortly.
+                NimDrops is having trouble reaching the network. Your share is not gone. Try again
+                shortly.
               </p>
             </div>
           ) : null}
@@ -580,7 +580,7 @@ function Face({ publicId, state, drop, serverState, txHash, amount, sponsor, onC
               <p className="nd-note mt-2.5 text-center">
                 {state === 'signing'
                   ? 'Nimiq Pay is open. Approve there to reserve your share.'
-                  : 'Nimiq Pay opens next. You approve one signature, with no fee to pay.'}
+                  : 'Nimiq Pay opens next. You approve one signature and pay no fee.'}
               </p>
             </div>
           )}
@@ -719,8 +719,8 @@ function Funding({ confirming }: { confirming: boolean }) {
           </p>
         ) : (
           <p className="text-[0.9375rem] leading-relaxed text-pretty">
-            The sponsor has not funded this NimDrop yet. Nothing is wrong with this link, and the
-            claim button appears here as soon as the funding is confirmed.
+            The sponsor has not funded this NimDrop yet. Nothing is wrong with this link. The claim
+            button appears here as soon as the funding is confirmed.
           </p>
         )}
       </div>
@@ -799,8 +799,8 @@ function Outcome({
         <>
           <Line>
             {expiryHours === undefined
-              ? 'Its claim window is up, so it is no longer accepting claims.'
-              : `Its ${expiryWindowAdjective(expiryHours)} claim window is up, so it is no longer accepting claims.`}
+              ? 'Its claim window is over, so nothing more can be claimed.'
+              : `Its ${expiryWindowAdjective(expiryHours)} claim window is over, so nothing more can be claimed.`}
           </Line>
           <Line>Anything unclaimed is refunded to the wallet that funded it.</Line>
           <DropOneBack amount={amount} />
@@ -834,7 +834,7 @@ function Outcome({
       {state === 'rejected' ? (
         <>
           <Line>{notice || 'Your wallet closed without approving. Nothing was claimed.'}</Line>
-          <Line>Your share is still here as long as the drop has one left.</Line>
+          <Line>A share is still here for you, as long as the drop has one left.</Line>
           <button type="button" onClick={onRetry} className="nd-action mt-5">
             Try again
           </button>
@@ -866,7 +866,7 @@ function NoWallet() {
       <a href={nimiqPayDeeplink(here)} className="nd-action">
         Open in Nimiq Pay
       </a>
-      <p className="nd-note mt-2.5 text-center">Claiming needs your own wallet to sign.</p>
+      <p className="nd-note mt-2.5 text-center">You need your own wallet to sign the claim.</p>
       <GetNimiqPay />
     </div>
   )

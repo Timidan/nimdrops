@@ -13,8 +13,8 @@ export default function PostClaimActions() {
         Your NIM is ready to use
       </h2>
       <p className="nd-note mt-2 text-center">
-        Keep it there, send NIM, or return to the wallet scanner to pay a NIM or supported Bitcoin
-        Lightning request. You can also choose an independent next step below.
+        Keep it in your wallet, send it on, or use the wallet scanner to pay a NIM request or a
+        supported Bitcoin Lightning request.
       </p>
       <div className="mt-4 grid gap-2">
         <a className="nd-quiet" href={NIMIQ_ECOSYSTEM_LINKS.spend.href} {...EXTERNAL_LINK_PROPS}>
@@ -25,8 +25,8 @@ export default function PostClaimActions() {
         </a>
       </div>
       <p className="nd-note mt-3 text-center">
-        Selling leaves NimDrops and is handled by the provider you choose. Availability, minimums,
-        fees, and identity checks vary. Your claim details are not added to either link.
+        Both links leave NimDrops. Selling is handled by the provider you choose, and availability,
+        minimums, fees, and identity checks vary. Your claim details are not added to either link.
       </p>
     </section>
   )

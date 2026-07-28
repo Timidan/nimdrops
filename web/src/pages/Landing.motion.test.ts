@@ -787,3 +787,40 @@ describe('useSmoothScroll (re-export)', () => {
     expect(() => unmount()).not.toThrow()
   })
 })
+
+describe('the entrance cannot leave the page invisible', () => {
+  /**
+   * The failure this guards is not an exception — it is silence. The entrance
+   * hides elements and waits for a ticker; if that ticker never advances
+   * (backgrounded tab, starved rAF, an embedded WebView pacing frames its own
+   * way) nothing throws, so the `catch` never runs and the page keeps a hidden
+   * call to action forever. Observed for real: a built page served locally sat
+   * at `opacity: 0` on `.nd-land-lede` and `.nd-land-cta` with no error.
+   */
+  it('reveals on a wall clock even when no frame is ever produced', () => {
+    // Only the timers. Vitest fakes `requestAnimationFrame` by default, and
+    // jsdom defines it read-only — but faking it would also defeat the point:
+    // the failsafe must be independent of the clock that failed.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    const host = document.createElement('div')
+    host.innerHTML = '<p class="nd-arrive">copy</p><div class="nd-arrive">cta</div>'
+    document.body.append(host)
+    const scope = { current: host }
+
+    // gsap.ticker is what actually drives the tween; stopping it reproduces a
+    // starved rAF without touching a read-only global.
+    gsap.ticker.sleep()
+    const { unmount } = renderHook(() => useHeroEntrance(scope))
+
+    vi.advanceTimersByTime(3000)
+
+    for (const el of Array.from(host.querySelectorAll<HTMLElement>('.nd-arrive'))) {
+      expect(el.style.opacity, 'a starved ticker must not leave content hidden').not.toBe('0')
+    }
+
+    gsap.ticker.wake()
+    unmount()
+    host.remove()
+    vi.useRealTimers()
+  })
+})

@@ -245,7 +245,7 @@ describe('Game — trivia before play', () => {
     expect(card.textContent).toMatch(/5 questions, four options each/i)
     // The one line about the signature, and its ordering.
     expect(card.textContent).toMatch(/the wallet approval comes after, not now/i)
-    expect(card.textContent).toMatch(/each question is timed/i)
+    expect(card.textContent).toMatch(/the server times each question/i)
     // How many are left, before spending five questions to find out.
     expect(screen.getByTestId('game-slots').textContent).toMatch(/7 shares left/)
   })

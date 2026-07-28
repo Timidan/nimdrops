@@ -292,7 +292,7 @@ function Confirm({
         </p>
         <p className="nd-note mt-3">
           Anyone who opens the link after this finds the drop closed. The link keeps working; there
-          is simply nothing left to claim.
+          is nothing left to claim.
         </p>
       </div>
 

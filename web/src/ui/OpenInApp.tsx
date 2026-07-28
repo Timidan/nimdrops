@@ -77,7 +77,7 @@ export function GetNimiqPay({ platform, className }: GetNimiqPayProps) {
       </ul>
       <p className="nd-note nd-getapp-note">
         Install Nimiq Pay, then return to this page and tap Open in Nimiq Pay. The wallet is free,
-        and opening the app does not sign or send anything.
+        and opening it signs nothing and sends nothing.
       </p>
     </div>
   )
@@ -105,7 +105,7 @@ export default function OpenInApp({ title, children, deepLink, url, qrSrc }: Ope
           Open in Nimiq Pay
         </a>
         <p className="nd-note nd-openin-hint">
-          The wallet opens this same page. Nothing is signed by opening it.
+          The wallet opens this same page. Opening it signs nothing.
         </p>
 
         {showQr ? (

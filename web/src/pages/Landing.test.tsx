@@ -82,7 +82,6 @@ describe('what a stranger is told', () => {
     expect(text).toMatch(/one share per wallet, first come, first served/i)
     expect(text).toMatch(/goes back to the sponsor when the claim window closes/i)
     expect(text).toMatch(/24 hours unless they change it/i)
-    expect(text).toMatch(/custody: not a smart contract, and not your wallet/i)
     await waitFor(() => expect(screen.getByTestId('stats')).toBeTruthy())
   })
 
@@ -204,7 +203,7 @@ describe('when the endpoint is down', () => {
     mount()
 
     const panel = await screen.findByTestId('stats-down')
-    expect(panel.textContent).toMatch(/not loading right now/i)
+    expect(panel.textContent).toMatch(/not loading/i)
     expect(screen.queryByTestId('stats')).toBeNull()
     expect(document.body.textContent).toMatch(/how a drop works/i)
   })
@@ -322,32 +321,6 @@ describe('nothing on this page is revealed by an animation', () => {
   })
 })
 
-describe('the custody disclosure', () => {
-  it('states the claim itself outside the disclosure', () => {
-    installStats({ body: TINY })
-    mount()
-    const details = document.querySelector('.nd-land-plain-more')!
-    const lead = document.querySelector('.nd-land-plain-lead')!
-    expect(lead.textContent).toMatch(/custody: not a smart contract, and not your wallet/i)
-    expect(details.contains(lead)).toBe(false)
-  })
-  it('keeps every custody fact reachable', () => {
-    installStats({ body: TINY })
-    mount()
-    const text = document.querySelector('.nd-land-plain-more')!.textContent ?? ''
-    expect(text).toMatch(/sent to the wallet that signed and to no other address/i)
-    expect(text).toMatch(/anyone holding several wallets can take several shares/i)
-    expect(text).toMatch(/public, permanent and readable by anyone/i)
-    expect(text).toMatch(/before the network has confirmed it/i)
-  })
-  it('uses markup a reader can open with no script at all', () => {
-    installStats({ body: TINY })
-    mount()
-    const details = document.querySelector('.nd-land-plain-more')
-    expect(details?.tagName).toBe('DETAILS')
-    expect(details?.querySelector('summary')?.textContent).toMatch(/what that means in practice/i)
-  })
-})
 describe('the trivia section describes a capability, not a running feature', () => {
   const gate = () => document.querySelector('[aria-labelledby="gate"]')
 
