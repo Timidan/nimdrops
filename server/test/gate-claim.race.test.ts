@@ -5,7 +5,8 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { FakeChain } from '../src/chain/fake'
 import { migrate } from '../src/db/migrate'
 import { issueGrant } from '../src/gates/grants'
-import { ClaimRejectedError, issueChallenge, reserveClaim } from '../src/services/claims'
+import { formatNim } from '../src/money'
+import { ClaimRejectedError, claimStatus, issueChallenge, reserveClaim } from '../src/services/claims'
 import { createDraft, submitFunding } from '../src/services/drops'
 // Side-effect import: installs the int8-as-string parser so BIGINT luna never
 // passes through a lossy JS number. This suite builds its own pool, so it still
@@ -67,11 +68,15 @@ function newChain(): FakeChain {
   return c
 }
 
-/** Create, fund and activate a drop. Returns its public id and internal id. */
-async function liveDrop(): Promise<{ publicId: string; dropId: string }> {
+/**
+ * Create, fund and activate a drop. Returns its public id and internal id.
+ * `amountEachLuna` defaults to the suite's flat share; the scored-payout tests
+ * override it with an odd amount so flooring is observable.
+ */
+async function liveDrop(amountEachLuna: bigint = AMOUNT_EACH): Promise<{ publicId: string; dropId: string }> {
   const draft = await createDraft(pool, chain, {
     sponsorLabel: 'Sponsor',
-    amountEachLuna: AMOUNT_EACH,
+    amountEachLuna,
     claimCount: CLAIM_COUNT,
   })
   const hash = `tx-${draft.publicId}`
@@ -79,7 +84,7 @@ async function liveDrop(): Promise<{ publicId: string; dropId: string }> {
     hash,
     sender: SPONSOR,
     recipient: CUSTODY,
-    valueLuna: AMOUNT_EACH * BigInt(CLAIM_COUNT),
+    valueLuna: amountEachLuna * BigInt(CLAIM_COUNT),
     dataUtf8: draft.fundingMemo,
     includedHeight: FUND_HEIGHT,
   })
@@ -111,8 +116,12 @@ async function attachGate(dropId: string, kind = 'passphrase'): Promise<void> {
  * writes — the exact gap that would let `reserveClaim` refuse every gated claim
  * in production while this suite stayed green.
  */
-async function grantTo(dropId: string, walletAddress: string): Promise<string> {
-  const { grantId } = await issueGrant(pool, { dropId, walletAddress, kind: 'passphrase' })
+async function grantTo(
+  dropId: string,
+  walletAddress: string,
+  payoutPermille?: number,
+): Promise<string> {
+  const { grantId } = await issueGrant(pool, { dropId, walletAddress, kind: 'passphrase', payoutPermille })
   return grantId
 }
 
@@ -486,5 +495,54 @@ describe.skipIf(!hasDb)('gated claim reservation (real Postgres)', () => {
       await grantTo(dropId, wallet.address)
       expect((await claim(publicId, wallet)).state).toBe('reserved')
     }
+  })
+
+  // ---- scored payouts --------------------------------------------------------
+
+  /**
+   * The amount is odd on purpose (1000001, not a round number), so flooring is
+   * observable: a naive `amount_each_luna * permille / 1000` computed in a
+   * lossy type would round instead of floor, or drift a luna from the integer
+   * SQL arithmetic it has to match.
+   */
+  it("pays the grant's scored fraction, floored to whole luna", async () => {
+    const { publicId, dropId } = await liveDrop(1_000_001n)
+    await attachGate(dropId)
+    const wallet = newWallet()
+    await grantTo(dropId, wallet.address, 600)
+
+    const result = await claim(publicId, wallet)
+
+    const { rows } = await pool.query<{ amount_luna: string }>(
+      `SELECT amount_luna FROM outgoing_transfers WHERE claim_id = $1 AND purpose = 'payout'`,
+      [result.claimId],
+    )
+    expect(rows[0].amount_luna).toBe('600000') // floor(1000001 * 600 / 1000)
+  })
+
+  it('pays the full share when the grant carries no permille', async () => {
+    const { publicId, dropId } = await liveDrop(1_000_001n)
+    await attachGate(dropId)
+    const wallet = newWallet()
+    await grantTo(dropId, wallet.address) // NULL permille: every grant issued before scoring, and every kind without partial success
+
+    const result = await claim(publicId, wallet)
+
+    const { rows } = await pool.query<{ amount_luna: string }>(
+      `SELECT amount_luna FROM outgoing_transfers WHERE claim_id = $1 AND purpose = 'payout'`,
+      [result.claimId],
+    )
+    expect(rows[0].amount_luna).toBe('1000001')
+  })
+
+  it("reports the claim's actual amount, not the drop's full share", async () => {
+    const { publicId, dropId } = await liveDrop(1_000_001n)
+    await attachGate(dropId)
+    const wallet = newWallet()
+    await grantTo(dropId, wallet.address, 600)
+
+    const result = await claim(publicId, wallet)
+    const status = await claimStatus(pool, result.claimId, result.statusToken)
+    expect(status.amountEach).toBe(formatNim(600_000n))
   })
 })

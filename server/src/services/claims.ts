@@ -182,7 +182,12 @@ export interface ClaimStatus {
   state: ClaimState
   /** Present only once an on-chain attempt is confirmed. `broadcast` is not `paid`. */
   txHash?: string
-  /** Decimal NIM string, e.g. `"2.5"`. */
+  /**
+   * The CLAIM's amount, as a decimal NIM string, e.g. `"2.5"`. Equal to the
+   * drop's per-person share, except on a scored grant, where it is the
+   * committed payout — the amount actually written to `outgoing_transfers`,
+   * not the drop's full share.
+   */
   amountEach: string
 }
 
@@ -524,6 +529,11 @@ export async function reserveClaim(pool: Pool, o: ReserveClaimInput): Promise<Cl
       [drop.id],
     )
     let grantId: string | null = null
+    // Read off the grant ROW at the same lock that spends it, never from a kind:
+    // that is what keeps this file able to pay a scored amount while still
+    // importing nothing from `src/gates/`. NULL for every ungated drop and every
+    // grant issued before scoring existed.
+    let payoutPermille: number | null = null
     if (gate.length > 0) {
       // Compared in the spelling `gate_grants` stores, which is the compact one.
       //
@@ -541,8 +551,8 @@ export async function reserveClaim(pool: Pool, o: ReserveClaimInput): Promise<Cl
       // grant matches nothing, and every gated claim is refused with
       // `gate_required` — the condition satisfied, the money unreachable.
       const canonicalRecipient = normaliseNimiqAddress(recipient) ?? recipient
-      const { rows: held } = await client.query<{ id: string }>(
-        `SELECT id FROM gate_grants
+      const { rows: held } = await client.query<{ id: string; payout_permille: number | null }>(
+        `SELECT id, payout_permille FROM gate_grants
          WHERE drop_id = $1 AND wallet_address = $2 AND consumed_claim_id IS NULL
          FOR UPDATE`,
         [drop.id, canonicalRecipient],
@@ -554,6 +564,7 @@ export async function reserveClaim(pool: Pool, o: ReserveClaimInput): Promise<Cl
         )
       }
       grantId = held[0].id
+      payoutPermille = held[0].payout_permille
     }
 
     // 5. Reserve the next slot; the last one closes the drop in this same
@@ -591,11 +602,19 @@ export async function reserveClaim(pool: Pool, o: ReserveClaimInput): Promise<Cl
        VALUES ($1, $2, $3, $4, $5, 'reserved')`,
       [claimId, drop.id, slotIndex, recipient, hashToken(token)],
     )
+    // The scored amount, floored to whole luna. NULL permille — every grant
+    // issued before scoring existed, and every kind without partial success —
+    // pays the full share. The number comes off the grant ROW, so this file
+    // still knows nothing about what a score is.
+    const payoutLuna =
+      grantId !== null && payoutPermille !== null
+        ? (BigInt(locked.amount_each_luna) * BigInt(payoutPermille)) / 1000n
+        : BigInt(locked.amount_each_luna)
     await client.query(
       `INSERT INTO outgoing_transfers (
          idempotency_key, purpose, drop_id, claim_id, recipient_address, amount_luna, state
        ) VALUES ($1, 'payout', $2, $3, $4, $5, 'queued')`,
-      [`payout:${claimId}`, drop.id, claimId, recipient, locked.amount_each_luna],
+      [`payout:${claimId}`, drop.id, claimId, recipient, payoutLuna.toString()],
     )
     // The grant is spent HERE, in the transaction that created the claim it paid
     // for. A rollback un-spends it, so a claim refused after this point — by the
@@ -675,11 +694,14 @@ export async function claimStatus(
 
   const { rows } = await pool.query<{
     state: ClaimState
-    amount_each_luna: string
+    amount_luna: string
     tx_hash: string | null
   }>(
     `SELECT c.state,
-            d.amount_each_luna,
+            COALESCE((SELECT t.amount_luna FROM outgoing_transfers t
+                       WHERE t.claim_id = c.id AND t.purpose = 'payout'
+                       LIMIT 1),
+                     d.amount_each_luna) AS amount_luna,
             (SELECT a.tx_hash
                FROM transaction_attempts a
                JOIN outgoing_transfers t ON t.id = a.transfer_id
@@ -696,7 +718,7 @@ export async function claimStatus(
 
   return {
     state: row.state,
-    amountEach: formatNim(BigInt(row.amount_each_luna)),
+    amountEach: formatNim(BigInt(row.amount_luna)),
     ...(row.tx_hash === null ? {} : { txHash: row.tx_hash }),
   }
 }
