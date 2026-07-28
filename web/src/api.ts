@@ -160,11 +160,9 @@ export interface DropPublic {
    * `'trivia'` is the one kind whose payout is a score-derived fraction, so it
    * is the one kind a pre-claim screen may promise only "up to".
    *
-   * Optional in the type for the same reason `expiryHours` is: the public
-   * drop endpoint does not send this field yet, so every reader of it today
-   * sees `undefined` and must treat that as "unknown", never as "ungated" —
-   * `undefined` and `null` both mean "say nothing kind-specific" until the
-   * server starts sending the real value.
+   * Optional in the type because an older server may not send it. `undefined`
+   * and `null` both mean "say nothing kind-specific": `undefined` is an old
+   * server, `null` is a real answer meaning ungated.
    */
   gateKind?: GateKind | null
 }

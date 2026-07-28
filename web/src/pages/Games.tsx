@@ -66,7 +66,7 @@ export default function Games() {
         <div className="flex flex-1 flex-col px-5 pt-9 pb-12 text-chalk">
         <h1 className="text-2xl font-semibold tracking-tight">Games you can earn from</h1>
         <p className="mt-2 text-sm leading-relaxed text-chalk/65">
-          Each of these asks one thing of you first. Meet it and you claim a fixed share on the
+          Each of these asks one thing of you first. Meet it and you claim a share on the
           drop&rsquo;s own page, where you tap and approve one signature.
         </p>
 

@@ -207,6 +207,7 @@ export default function DropView({
         opened={revealed ?? gateOpened(state, resumed)}
         {...(sponsor ? { sponsor } : {})}
         message={drop?.message ?? null}
+        scored={drop?.gateKind === 'trivia'}
         publicId={publicId}
         deepLink={nimiqPayDeeplink(here)}
       >
@@ -589,7 +590,9 @@ function Face({ publicId, state, drop, serverState, txHash, amount, sponsor, onC
               {/* The envelope is already open. This action claims the visible
                   amount and leads to the wallet confirmation. */}
               <button type="button" disabled={state !== 'ready'} onClick={onClaim} className="nd-action">
-                Claim {amount} NIM
+                {/* A scored gate cannot promise the full figure before the
+                    server has computed this wallet's fraction. */}
+                {drop?.gateKind === 'trivia' ? `Claim up to ${amount} NIM` : `Claim ${amount} NIM`}
               </button>
               <p className="nd-note mt-2.5 text-center">
                 {state === 'signing'

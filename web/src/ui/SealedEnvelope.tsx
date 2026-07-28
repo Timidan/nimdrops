@@ -107,6 +107,12 @@ export interface SealedEnvelopeProps {
   sponsor?: string
   /** Their own words. Also not the amount. */
   message?: string | null
+  /**
+   * The drop's payout is a score-derived fraction of the share (the trivia
+   * gate). Only the sealed-only copy reads it: "every share is the same size"
+   * is a promise this component must not make on a scored drop.
+   */
+  scored?: boolean
   /** For the sealed-only path: the QR and deep link. */
   publicId?: string
   deepLink?: string
@@ -152,6 +158,7 @@ export default function SealedEnvelope({
   holdMs = HOLD_MS,
   sponsor,
   message,
+  scored = false,
   publicId,
   deepLink,
   qrSrc,
@@ -275,11 +282,12 @@ export default function SealedEnvelope({
           "unsupported", because nothing has gone wrong.
         */}
         <div className="nd-env" data-static="true" data-testid="sealed-envelope">
-          <Envelope label="Sealed" sub="A fixed share of NIM" />
+          <Envelope label="Sealed" sub={scored ? 'A share of NIM' : 'A fixed share of NIM'} />
         </div>
         <p className="nd-gate-hint" data-testid="sealed-only">
-          Every share in this drop is the same size. Open it on the phone that has Nimiq Pay, and
-          the envelope tells you the amount before you sign anything.
+          {scored
+            ? 'Your score set the size of your share. Open it on the phone that has Nimiq Pay, and the envelope tells you the amount before you sign anything.'
+            : 'Every share in this drop is the same size. Open it on the phone that has Nimiq Pay, and the envelope tells you the amount before you sign anything.'}
         </p>
         <div className="nd-gate-out">
           {deepLink ? (

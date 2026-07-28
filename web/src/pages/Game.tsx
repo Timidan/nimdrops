@@ -3,7 +3,12 @@ import { Link, useParams } from 'react-router-dom'
 import { ApiError, submitPassphrase, type GateKind, type ReviewedQuestion } from '../api'
 import { formatNim } from '../money'
 import { ADDRESS_RE, PASSPHRASE_MAX_ATTEMPTS, useGate } from '../state/gate'
-import { TRIVIA_COOLDOWN_MINUTES, TRIVIA_QUESTION_COUNT, useTriviaSession } from '../state/trivia'
+import {
+  TRIVIA_COOLDOWN_MINUTES,
+  TRIVIA_PASS_MIN_CORRECT,
+  TRIVIA_QUESTION_COUNT,
+  useTriviaSession,
+} from '../state/trivia'
 import { BridgeError, getBridge, nimiqPayDeeplink, resolveBridge } from '../sdk/adapter'
 import { openInNimiqPay } from '../sdk/openApp'
 import Field from '../ui/Field'
@@ -276,7 +281,11 @@ function Pass({
 }) {
   return (
     <div data-testid="gate-passed" className="mt-9">
-      <h1 className="text-2xl font-semibold tracking-tight">You can claim {amount} NIM</h1>
+      <h1 className="text-2xl font-semibold tracking-tight">
+        {correctCount !== null && correctCount < (questionCount ?? TRIVIA_QUESTION_COUNT)
+          ? `You can claim ${Math.floor((correctCount / (questionCount ?? TRIVIA_QUESTION_COUNT)) * 100)}% of ${amount} NIM`
+          : `You can claim ${amount} NIM`}
+      </h1>
       {correctCount !== null ? (
         <p className="mt-2 text-sm leading-relaxed text-chalk/75">
           {correctCount} of {questionCount ?? TRIVIA_QUESTION_COUNT} right: you claim{' '}
@@ -738,8 +747,9 @@ function Trivia({
         {TRIVIA_QUESTION_COUNT} questions, four options each
       </h1>
       <p className="mt-2 text-sm leading-relaxed text-chalk/65">
-        Answer all {TRIVIA_QUESTION_COUNT} correctly and this drop&rsquo;s share is yours to claim.
-        One wrong answer ends the attempt{tier ? ` at ${tier}` : ''}, and you can try again in{' '}
+        Get at least {TRIVIA_PASS_MIN_CORRECT} of {TRIVIA_QUESTION_COUNT} right
+        {tier ? ` at ${tier}` : ''} and a share is yours: your score sets how much of it you claim,
+        and all {TRIVIA_QUESTION_COUNT} pays it in full. Fall short and you can try again in{' '}
         {TRIVIA_COOLDOWN_MINUTES} minutes.
       </p>
       {/**

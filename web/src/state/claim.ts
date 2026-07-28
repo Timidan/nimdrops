@@ -478,7 +478,10 @@ export function useClaim(publicId: string, options: UseClaimOptions = {}): Claim
     drop,
     serverState,
     txHash,
-    amountEach: drop?.amountEach ?? claimAmount,
+    // The claim status's amount FIRST: on a scored gate it is the committed
+    // payout (60/80/100% of the share), while the drop's own figure is always
+    // the full share. The drop is only the answer before a claim exists.
+    amountEach: claimAmount ?? drop?.amountEach ?? null,
     notice,
     claim,
     retry,

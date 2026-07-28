@@ -29,6 +29,13 @@ export const TRIVIA_COOLDOWN_MINUTES = 3
 /** Global constraint: this kind serves five questions or none. */
 export const TRIVIA_QUESTION_COUNT = 5
 
+/**
+ * Correct answers needed to pass, a deliberate mirror of `PASS_MIN_CORRECT`
+ * in `server/src/gates/trivia/sessions.ts`. The score sets the payout:
+ * score/5 of the share, so 3 pays 60%, 4 pays 80%, 5 pays it in full.
+ */
+export const TRIVIA_PASS_MIN_CORRECT = 3
+
 export type TriviaPhase = 'idle' | 'playing' | 'passed' | 'failed'
 
 export interface TriviaSession {
