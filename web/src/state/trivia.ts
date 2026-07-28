@@ -24,7 +24,7 @@ import type { ReviewedQuestion, TriviaQuestion } from '../api'
  * wait at the moment of failing, which is before any such refusal has happened
  * — and "try again later" is the kind of vagueness this product does not use.
  */
-export const TRIVIA_COOLDOWN_MINUTES = 10
+export const TRIVIA_COOLDOWN_MINUTES = 3
 
 /** Global constraint: this kind serves five questions or none. */
 export const TRIVIA_QUESTION_COUNT = 5

@@ -872,7 +872,7 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
       // question set, that let an attacker solve each question independently: at
       // most three failed sessions per question, five questions, so SIXTEEN
       // attempts rather than 4^5 = 1024. At a three-minute cooldown that is about
-      // forty-five minutes against a twenty-four hour drop, from one address,
+      // fifty minutes against a twenty-four hour drop, from one address,
       // knowing none of the answers. The gate was decorative.
       //
       // Scoring only once every question is in restores the intended bound: an
