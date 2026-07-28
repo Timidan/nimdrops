@@ -239,10 +239,12 @@ describe('Game — which wallet is playing', () => {
     mount(null)
 
     const open = await screen.findByTestId('open-in-app')
-    const link = open.querySelector('a')!
-    // A real Nimiq Pay deeplink carrying this page's own https url, encoded.
-    expect(link.getAttribute('href')).toMatch(/^nimiqpay:\/\/miniapp\?url=https%3A/)
-    // And no wallet button, because there is no wallet to reach here.
+    // An "Open in Nimiq Pay" action, which fires the deeplink and — proven in
+    // openApp.test.ts — falls through to the store when the app is absent. The
+    // exact deeplink/store dance is that module's contract; here we only need
+    // the action present and no dead-end wallet button.
+    expect(screen.getByTestId('open-in-app-cta')).toBeTruthy()
+    expect(open.textContent).toMatch(/open in nimiq pay/i)
     expect(screen.queryByTestId('connect-wallet')).toBeNull()
   })
 })

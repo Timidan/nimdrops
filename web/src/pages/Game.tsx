@@ -5,6 +5,7 @@ import { formatNim } from '../money'
 import { ADDRESS_RE, PASSPHRASE_MAX_ATTEMPTS, useGate } from '../state/gate'
 import { TRIVIA_COOLDOWN_MINUTES, TRIVIA_QUESTION_COUNT, useTriviaSession } from '../state/trivia'
 import { BridgeError, getBridge, nimiqPayDeeplink, resolveBridge } from '../sdk/adapter'
+import { openInNimiqPay } from '../sdk/openApp'
 import Screen from '../ui/Screen'
 import { GetNimiqPay } from '../ui/OpenInApp'
 
@@ -537,9 +538,14 @@ function WalletStep({ onSubmit }: { onSubmit: (address: string) => void }) {
             ready to play.
           </p>
           {url ? (
-            <a href={nimiqPayDeeplink(url)} className="nd-action mt-4 w-full text-center">
+            <button
+              type="button"
+              data-testid="open-in-app-cta"
+              onClick={() => openInNimiqPay({ deeplink: nimiqPayDeeplink(url) })}
+              className="nd-action mt-4 w-full"
+            >
               Open in Nimiq Pay
-            </a>
+            </button>
           ) : null}
           <div className="mt-6">
             <GetNimiqPay />
