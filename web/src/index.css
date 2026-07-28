@@ -917,6 +917,75 @@ body {
   color: var(--color-chalk-ink);
 }
 
+/**
+ * The gate screens' buttons: the Start button, the four answer options, the
+ * passphrase submit, and the links out.
+ *
+ * `Game.tsx` and `Games.tsx` reference `.nd-primary` and `.nd-secondary`, which
+ * had NO definition anywhere — so every button on a gate screen rendered as bare
+ * text, no fill, no border, no target. Functionally fine (clickable, and the
+ * tests only read text and clicks), visually a screen of unstyled lines. It is
+ * defined here, scoped to `.nd-gate-surface`, because the gate surface is the one
+ * LIGHT surface in the app and its buttons must be dark — the global
+ * `.nd-action`/`.nd-quiet` are built for the dark field and would be near-white
+ * on near-white here. Scoping also keeps these two names off the dark field,
+ * where they would be wrong.
+ *
+ * Geometry matches `.nd-action` so a gate screen and a claim screen share one
+ * button shape. `chalk-ink` on `chalk` is ~16:1.
+ */
+.nd-gate-surface .nd-primary,
+.nd-gate-surface .nd-secondary {
+  display: block;
+  width: 100%;
+  min-height: 3.25rem;
+  padding: 0.875rem 1.25rem;
+  border-radius: var(--nd-radius-control);
+  font: inherit;
+  font-size: 1.0625rem;
+  font-weight: 650;
+  cursor: pointer;
+  transition:
+    opacity var(--nd-t-press) var(--nd-ease-exit),
+    transform var(--nd-t-press) var(--nd-ease-exit);
+}
+
+/* Primary: a solid dark key. The Start button, the claim link, the retry. */
+.nd-gate-surface .nd-primary {
+  border: 0;
+  background-color: var(--color-chalk-ink);
+  color: var(--color-chalk);
+  text-align: center;
+}
+
+/* Secondary: an outlined tile. The four answer options (left-aligned by their
+   own utility class) and the quieter links. A 1px ink hairline and a barely
+   tinted fill are enough to say "tap me" on a light surface without competing
+   with the primary. */
+.nd-gate-surface .nd-secondary {
+  border: 1px solid rgb(23 16 14 / 0.22);
+  background-color: rgb(23 16 14 / 0.03);
+  color: var(--color-chalk-ink);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .nd-gate-surface .nd-secondary:hover {
+    border-color: rgb(23 16 14 / 0.4);
+    background-color: rgb(23 16 14 / 0.06);
+  }
+}
+
+.nd-gate-surface .nd-primary:active,
+.nd-gate-surface .nd-secondary:active {
+  transform: scale(0.985);
+}
+
+.nd-gate-surface .nd-primary:disabled,
+.nd-gate-surface .nd-secondary:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
 .nd-gate-surface .nd-amount.text-center {
   justify-content: center;
 }
