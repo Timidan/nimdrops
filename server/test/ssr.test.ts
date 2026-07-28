@@ -90,6 +90,12 @@ beforeAll(() => {
     ].join('\n'),
   )
 
+  // A public-copied asset in a subdirectory, i.e. the shape that keeps 404ing in
+  // production because the static handler allowlists prefixes by hand. Fonts,
+  // images and now badges have each been added after the fact.
+  mkdirSync(join(distRoot, 'badges'))
+  writeFileSync(join(distRoot, 'badges', 'download-on-the-app-store.svg'), '<svg/>\n')
+
   assetRoot = mkdtempSync(join(tmpdir(), 'nimdrops-static-'))
   writeFileSync(join(assetRoot, 'og-envelope.png'), Buffer.from('89504e470d0a1a0a', 'hex'))
 
@@ -250,6 +256,17 @@ describe('static serving', () => {
     const res = await app.request('/og-envelope.png')
     expect(res.status).toBe(200)
     expect(res.headers.get('content-type')).toBe('image/png')
+  })
+
+  it('serves a store badge from public/, the case that 404s when the allowlist forgets it', async () => {
+    // The store badges are referenced by fixed path from OpenInApp, exactly like
+    // the fonts and the photography. Every one of those was invisible on
+    // mainnet — 404 in production, fine in dev — until its prefix was added
+    // here. This pins /badges/ so the next one is not found the same way.
+    const res = await app.request('/badges/download-on-the-app-store.svg')
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-type')).toMatch(/^image\/svg\+xml/)
+    expect(res.headers.get('cache-control')).toMatch(/immutable/)
   })
 
   it('serves the shell at the root path', async () => {

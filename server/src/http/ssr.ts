@@ -425,7 +425,7 @@ export function registerSsr(app: Hono, opts: SsrOptions = {}): void {
    * are also the only unauthenticated paths that read from disk by name, hence
    * `safeJoin`, which is what keeps a `..` out of the filesystem.
    */
-  for (const prefix of ['/fonts/', '/images/'] as const) {
+  for (const prefix of ['/fonts/', '/images/', '/badges/'] as const) {
     app.get(`${prefix}*`, async (c) => {
       const relative = c.req.path.slice(prefix.length)
       const file = await serveFile(safeJoin(join(staticRoot, prefix.slice(1, -1)), relative))
@@ -441,6 +441,24 @@ export function registerSsr(app: Hono, opts: SsrOptions = {}): void {
   })
 
   app.get('/favicon.svg', async (c) => {
+    return (
+      (await serveFile(safeJoin(staticRoot, 'favicon.svg'))) ??
+      (await serveFile(join(assetRoot, 'favicon.svg'))) ??
+      c.notFound()
+    )
+  })
+
+  /**
+   * `/favicon.ico`, served as the SVG.
+   *
+   * A browser requests `/favicon.ico` by fixed convention whether or not the
+   * document links an icon, and a 404 there is what leaves a tab showing a blank
+   * or a stale cached mark. There is no `.ico` file — modern browsers read the
+   * SVG this returns, and the ones that truly need a bitmap were never going to
+   * be satisfied by a 404 either. Same body as `/favicon.svg`, one honest
+   * content type.
+   */
+  app.get('/favicon.ico', async (c) => {
     return (
       (await serveFile(safeJoin(staticRoot, 'favicon.svg'))) ??
       (await serveFile(join(assetRoot, 'favicon.svg'))) ??
