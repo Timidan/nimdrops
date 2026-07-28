@@ -2,17 +2,104 @@
    away and back. With CSS animation off, the base cascade is the whole page.
    Nothing here may be revealed by a class, a listener or an observer. */
 
+/* ---- direction -----------------------------------------------------------
+ *
+ * A stranger who arrived without a link should feel: EXACT, WARM, UNHURRIED,
+ * PHYSICAL. Not "a dashboard about a product" — closer to being handed a paper
+ * packet that happens to be lit. The two doors and the paid-out figure have
+ * priority; the vermilion bloom, Mulish 200–1000, and the grain in `index.css`
+ * are the constraints that shape everything else.
+ *
+ * The signature move is the CREASE. Every section boundary on this page is a
+ * fold in paper rather than a divider line: one hairline of shadow, one hairline
+ * of light directly beneath it. It costs two declarations, it is the red
+ * packet's own physics, and it is the reason the page reads as one material
+ * instead of as stacked panels. Divider lines INSIDE a section stay plain
+ * hairlines, so a crease always means "a new section starts here".
+ *
+ * Gold appears three times and never as body text: on the money row's own
+ * hairline, on the custody mark, and on the trivia icons. `index.css` computes
+ * gold at 2.74:1 against the field's brightest pixel, which is why it is a line
+ * and a glyph here and never a word.
+ */
+
 .nd-land {
   --pad: clamp(1.25rem, 5vw, 3.5rem);
   --measure: 68rem;
+
+  /* ---- type scale -------------------------------------------------------
+   * A ~1.2 ratio through the text sizes, then two deliberately wide steps for
+   * the display line, because a headline one step above a subhead is not a
+   * headline. Every step is a named role, never a raw size at a call site.
+   */
+  --t-note: 0.8125rem; /* row notes, the read stamp */
+  --t-small: 0.875rem; /* the header pill, gate bodies */
+  --t-body: 0.9375rem; /* every running paragraph */
+  --t-label: 1rem; /* ledger and fact labels */
+  --t-sub: clamp(1.0625rem, 1rem + 0.42vw, 1.1875rem); /* h3, brand */
+  --t-lede: clamp(1rem, 0.94rem + 0.3vw, 1.125rem); /* the hero lede */
+  --t-lead: clamp(1.0625rem, 0.97rem + 0.55vw, 1.3125rem); /* the custody claim */
+  --t-h2: clamp(1.5rem, 1.13rem + 1.6vw, 2.125rem);
+  /* Floored at the h2 step: this is the h1's second line, and a section
+     heading must never out-size part of the page's own first-level heading. */
+  --t-h1b: clamp(1.5rem, 1.05rem + 1.8vw, 2.25rem);
+  --t-h1a: clamp(2.875rem, 1.05rem + 8.2vw, 5.75rem);
+
+  /* ---- material --------------------------------------------------------
+   * The crease. Shade above, light below: paper folding towards the reader.
+   * On a near-black field the shade is nearly invisible on its own and the lit
+   * hairline is what the eye reads — the shade is what stops it reading as a
+   * drawn line.
+   */
+  --crease-dark: rgb(0 0 0 / 0.55);
+  --crease-lit: rgb(255 238 228 / 0.085);
+  /* The inner lip every raised surface gets, so an edge catches the bloom. */
+  --lip: rgb(255 238 228 / 0.09);
+  /* Darkening at the inline edges of the viewport, so the column reads as lit
+     rather than as a flat fill that happens to stop. */
+  --edge-shade: rgb(6 3 3 / 0.44);
+  /* The one warm accent, spent only where the money is. */
+  --gold-line: rgb(233 178 19 / 0.36);
+  --gold-wash: rgb(233 178 19 / 0.05);
 
   position: relative;
   overflow: clip;
   min-height: 100dvh;
   padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)
     env(safe-area-inset-left);
+  /* The field's own substrate, not a flat fill. `.nd-field` in index.css has
+     had this since the palette landed; this page was the one surface still
+     painting a single colour under the bloom, which is what made it read flat.
+     Same three stops, re-anchored to where THIS page's bloom is (upper right)
+     so the base agrees with the light instead of arguing with it, and sized in
+     viewport units rather than percentages — a percentage radius on a document
+     several screens tall would lift the whole page instead of the hero. The
+     lightest stop is `--nd-field-base-max` exactly, because every contrast
+     floor in `surface.contrast.test.ts` starts from that number. */
   background-color: var(--color-field);
+  background-image: radial-gradient(140vw 85vh at 88% 0%, #16100e 0%, #120c0b 46%, #0e0a09 100%);
   color: var(--nd-on-surface);
+  /* Light text on a dark field: subpixel AA over-thickens it. */
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* The vignette. One static layer, painted once, never animated, and it sits
+   UNDER the grain for the same reason the grain is last in index.css: the noise
+   is the top-most thing beneath the content or it bands. */
+.nd-land::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: var(--nd-z-texture);
+  pointer-events: none;
+  background-image: linear-gradient(
+    90deg,
+    var(--edge-shade) 0%,
+    rgb(6 3 3 / 0) 11%,
+    rgb(6 3 3 / 0) 89%,
+    var(--edge-shade) 100%
+  );
 }
 
 .nd-land-wrap {
@@ -80,8 +167,12 @@
   }
 }
 
+/* A 140px noise tile is coarse once a phone renders it at 3x. Same opacity —
+   `surface.contrast.test.ts` reads `--nd-grain-o` and every floor on this
+   palette is computed from it — only a finer weave. */
 .nd-land > .nd-field-texture {
   z-index: var(--nd-z-texture);
+  background-size: 96px 96px;
 }
 
 .nd-land-top,
@@ -92,6 +183,8 @@
   z-index: var(--nd-z-content);
 }
 
+/* ---- masthead ----------------------------------------------------------- */
+
 .nd-land-top-in {
   display: flex;
   align-items: center;
@@ -100,126 +193,207 @@
   padding-block: 1.125rem;
 }
 
+/* `AppDoor` wraps its own animation span; without this the span is an inline
+   flex item and the pill inside it sits on a text baseline. */
+.nd-land-top-in > span {
+  display: inline-flex;
+}
+
 .nd-land-brand {
   margin: 0;
-  font-size: 1.0625rem;
+  font-size: var(--t-sub);
   font-weight: 800;
-  letter-spacing: -0.015em;
+  line-height: 1.2;
+  letter-spacing: -0.022em;
   color: var(--nd-on-surface);
 }
 
-.nd-land-topcta {
+/* The masthead door and the (currently unused) hand-rolled pill share one
+   shape. `.nd-quiet` from index.css is a 3.25rem full-width sheet control,
+   which is the wrong object in a header — this is the pill it should be here,
+   and it holds whichever of the two markups the page carries. */
+.nd-land .nd-land-topcta,
+.nd-land-top-in .nd-action,
+.nd-land-top-in .nd-quiet {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  width: auto;
   min-height: 2.75rem;
-  padding: 0 0.875rem;
+  padding: 0 1rem;
   border: 1px solid var(--nd-rule-strong);
   border-radius: 999px;
+  background-color: rgb(12 7 6 / 0.34);
+  box-shadow: inset 0 1px 0 var(--lip);
   color: var(--nd-on-surface);
-  font-size: 0.875rem;
+  font-size: var(--t-small);
   font-weight: 650;
+  letter-spacing: -0.006em;
   text-decoration: none;
   white-space: nowrap;
-  transition:
-    border-color var(--nd-t-state) var(--nd-ease),
-    background-color var(--nd-t-state) var(--nd-ease),
-    transform var(--nd-t-press) var(--nd-ease-exit);
 }
 
-.nd-land-topcta:hover {
+.nd-land .nd-land-topcta:hover,
+.nd-land-top-in .nd-action:hover,
+.nd-land-top-in .nd-quiet:hover {
   border-color: rgb(245 240 238 / 0.5);
-  background-color: rgb(245 240 238 / 0.08);
+  background-color: rgb(245 240 238 / 0.09);
 }
+
+/* ---- hero --------------------------------------------------------------- */
 
 .nd-land-hero-in {
   display: grid;
   gap: clamp(2rem, 6vw, 3rem);
-  padding-top: clamp(2.5rem, 9vw, 5rem);
-  padding-bottom: clamp(3rem, 9vw, 6rem);
+  padding-top: clamp(2.75rem, 9vw, 5.5rem);
+  padding-bottom: clamp(3.25rem, 10vw, 6.5rem);
 }
 
 .nd-land-h1 {
   display: flex;
   flex-direction: column;
-  gap: 0.375rem;
+  gap: clamp(0.5rem, 1.4vw, 0.9375rem);
   margin: 0;
-  text-wrap: balance;
 }
 
 .nd-land-h1-a {
-  font-size: clamp(2.75rem, 12vw, 5.5rem);
-  font-weight: 800;
-  line-height: 0.92;
-  letter-spacing: -0.045em;
+  /* Optical alignment: a display cap at 46–92px carries a side bearing wide
+     enough to make the H1 look indented against the lede beneath it. Pulling
+     back by a fraction of the em scales the correction with the size. */
+  margin-inline-start: -0.035em;
+  font-size: var(--t-h1a);
+  font-weight: 850;
+  line-height: 0.88;
+  letter-spacing: -0.042em;
   color: var(--nd-on-surface);
+  text-wrap: balance;
 }
 
 .nd-land-h1-b {
-  max-width: 18ch;
-  font-size: clamp(1.375rem, 5.2vw, 2.25rem);
+  max-width: 19ch;
+  font-size: var(--t-h1b);
   font-weight: 500;
-  line-height: 1.2;
-  letter-spacing: -0.02em;
+  line-height: 1.16;
+  letter-spacing: -0.022em;
   color: var(--nd-on-surface);
+  text-wrap: balance;
 }
 
 .nd-land-lede {
-  max-width: 46ch;
-  margin: 1.5rem 0 0;
-  font-size: clamp(0.9375rem, 1.4vw, 1.0625rem);
+  max-width: 44ch;
+  margin: clamp(1.25rem, 3vw, 1.75rem) 0 0;
+  font-size: var(--t-lede);
   font-weight: 400;
-  line-height: 1.6;
+  line-height: 1.58;
+  /* Full strength, not muted: this sits inside the bloom's band, where
+     index.css's arithmetic says secondary text has no headroom. */
   color: var(--nd-on-surface);
   text-wrap: pretty;
 }
 
 .nd-land-cta {
-  margin-top: 1.875rem;
-  max-width: 22rem;
+  margin-top: clamp(1.625rem, 4vw, 2.25rem);
+  max-width: 24rem;
 }
 
-/* Out-specified past `.nd-action:not(:disabled):active` in index.css, which is
-   a flat 0.99 and reads as nothing on a button this size. */
-.nd-land .nd-land-cta .nd-action {
-  transition:
-    transform var(--nd-t-state) var(--nd-ease),
-    opacity var(--nd-t-press) var(--nd-ease-exit);
-}
-
-.nd-land .nd-land-cta .nd-action:hover {
-  transform: translate3d(0, -3px, 0) scale(1.015);
-}
-
-.nd-land .nd-land-cta .nd-action:active {
-  transform: translate3d(0, 2px, 0) scale(0.955);
-  transition-duration: var(--nd-t-press);
-}
-
-.nd-land-topcta:active,
-.nd-land-foot-cta:active {
-  transform: scale(0.96);
-}
-
-.nd-land-foot-cta {
-  transition: transform var(--nd-t-press) var(--nd-ease-exit);
-}
+/* ---- the two doors ------------------------------------------------------
+ *
+ * The most important interaction on the page, so both get the same geometry
+ * and the emphasis is carried by MATERIAL: the primary is a lit chalk key
+ * standing off the page, the secondary is a recess cut into it. Fill, weight,
+ * border and elevation all differ, so the pair still reads as a pair with a
+ * clear first choice for anyone who cannot tell the two colours apart.
+ *
+ * `flex: 1 1 10rem` is deliberate and unchanged: equal share of the row, and a
+ * long label wraps the pair onto two full-width rows rather than squeezing its
+ * neighbour to nothing. At 390px the row is ~350px, so two 10rem doors sit
+ * side by side; one longer label stacks them.
+ */
 
 .nd-land-doors {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.75rem;
+  gap: 0.625rem;
 }
 
-/* Each door takes an equal share of the row and never collapses below a
-   comfortable tap target. `1 1 10rem` rather than `1 1 0` so a long label wraps
-   instead of squeezing its neighbour to nothing. */
 .nd-land-doors > * {
   flex: 1 1 10rem;
 }
 
+.nd-land-doors > .nd-action,
+.nd-land-doors > .nd-quiet,
+.nd-land-doors > [data-testid='app-door'] {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  min-height: 3.5rem;
+  padding: 0.75rem 1rem;
+  border-radius: var(--nd-radius-control);
+  font-size: 1.0625rem;
+  line-height: 1.3;
+  letter-spacing: -0.012em;
+  text-align: center;
+  text-decoration: none;
+}
+
+/* The primary. A near-white key lit from above: a bright top lip, a hairline
+   of contact shadow at the bottom edge, and a soft drop shadow that puts it in
+   front of the field rather than on it. The gradient spans about five points of
+   luminance — enough to read as light falling on paper, not as a gradient. */
+.nd-land-doors > .nd-action {
+  font-weight: 700;
+  background-image: linear-gradient(180deg, #fffdfc 0%, var(--color-chalk) 56%, #eae3e0 100%);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.85),
+    inset 0 -1px 0 rgb(23 16 14 / 0.16),
+    0 0.125rem 0.375rem -0.125rem rgb(0 0 0 / 0.5),
+    0 0.875rem 1.75rem -0.75rem rgb(0 0 0 / 0.7);
+}
+
+.nd-land-doors > .nd-action:hover {
+  background-image: linear-gradient(180deg, #ffffff 0%, #f8f4f2 56%, #eee7e4 100%);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.9),
+    inset 0 -1px 0 rgb(23 16 14 / 0.16),
+    0 0.1875rem 0.5rem -0.125rem rgb(0 0 0 / 0.55),
+    0 1.25rem 2.25rem -0.875rem rgb(0 0 0 / 0.75);
+}
+
+/* A press has to be legible with motion off too, so the shadow collapsing is
+   the state and the transform below is the polish. */
+.nd-land .nd-land-doors > .nd-action:active {
+  background-image: linear-gradient(180deg, #f4efed 0%, #ece5e2 100%);
+  box-shadow:
+    inset 0 1px 2px rgb(23 16 14 / 0.2),
+    0 0.0625rem 0.125rem rgb(0 0 0 / 0.4);
+}
+
+/* The secondary. A recess, which is the only direction with contrast headroom
+   on this palette (index.css: every nested surface here goes down, never up). */
+.nd-land-doors > .nd-quiet {
+  border-color: rgb(245 240 238 / 0.22);
+  background-color: rgb(12 7 6 / 0.44);
+  background-image: linear-gradient(180deg, rgb(245 240 238 / 0.055), rgb(245 240 238 / 0));
+  box-shadow: inset 0 1px 0 var(--lip);
+  color: var(--nd-on-surface);
+  font-weight: 600;
+}
+
+.nd-land-doors > .nd-quiet:hover {
+  border-color: rgb(245 240 238 / 0.44);
+  background-color: rgb(12 7 6 / 0.28);
+}
+
+.nd-land .nd-land-doors > .nd-quiet:active {
+  border-color: rgb(245 240 238 / 0.34);
+  background-color: rgb(6 3 3 / 0.6);
+  box-shadow: inset 0 1px 3px rgb(0 0 0 / 0.5);
+}
+
 .nd-land-ctanote {
-  margin: 0.75rem 0 0;
-  font-size: 0.8125rem;
+  margin: 0.875rem 0 0;
+  font-size: var(--t-note);
   font-weight: 500;
   line-height: 1.5;
   color: var(--nd-on-surface);
@@ -260,27 +434,41 @@
   .nd-land-packet {
     max-width: 26rem;
   }
+  .nd-land-cta {
+    max-width: 27rem;
+  }
 }
 
+/* ---- sections -----------------------------------------------------------
+ *
+ * Rhythm, not a constant. The column edges are shared by every section so
+ * nothing drifts sideways; what varies is the VERTICAL room each one is worth
+ * and how wide its own copy is allowed to run. The figures band is the widest
+ * breath because it is the page's only full-bleed change of surface; the
+ * custody panel is the tightest because the panel supplies its own inset.
+ */
+
 .nd-land-sec {
-  padding-block: clamp(2.75rem, 7vw, 5rem);
+  padding-block: clamp(3rem, 8vw, 5.5rem);
 }
 
 .nd-land-sec h2 {
+  max-width: 22ch;
   margin: 0;
-  font-size: clamp(1.5rem, 3.4vw, 2rem);
+  font-size: var(--t-h2);
   font-weight: 800;
-  line-height: 1.15;
-  letter-spacing: -0.025em;
+  line-height: 1.1;
+  letter-spacing: -0.03em;
   color: var(--nd-on-surface);
   text-wrap: balance;
 }
 
 .nd-land-sec h3 {
   margin: 0;
-  font-size: 1.0625rem;
+  font-size: var(--t-sub);
   font-weight: 700;
-  letter-spacing: -0.015em;
+  line-height: 1.28;
+  letter-spacing: -0.016em;
   color: var(--nd-on-surface);
 }
 
@@ -288,9 +476,20 @@
   text-wrap: pretty;
 }
 
-.nd-land-how {
-  border-top: 1px solid var(--nd-rule);
+/* The crease. Section boundaries, and the one place inside a section where the
+   subject genuinely changes hands (`.nd-flow-after`, below, where the clock
+   takes over from the sponsor). Every other rule on this page is a plain
+   hairline, so a crease always means "something else starts here". */
+.nd-land-how,
+.nd-land-gate,
+.nd-land-figures,
+.nd-land-plain,
+.nd-land-foot {
+  border-top: 1px solid var(--crease-dark);
+  box-shadow: inset 0 1px 0 var(--crease-lit);
 }
+
+/* ---- how a drop works --------------------------------------------------- */
 
 .nd-land-how-in {
   display: grid;
@@ -298,9 +497,9 @@
 }
 
 .nd-land-how-head > p {
-  max-width: 44ch;
+  max-width: 40ch;
   margin: 0.875rem 0 0;
-  font-size: 0.9375rem;
+  font-size: var(--t-body);
   line-height: 1.6;
   color: var(--nd-on-surface-muted);
 }
@@ -313,30 +512,44 @@
   list-style: none;
 }
 
+/* Logical, not physical: the rail hangs off the READING edge, so it swaps
+   sides with the text rather than staying stubbornly on the left. */
 .nd-flow > li,
 .nd-flow-after {
   position: relative;
-  padding: 0 0 1.625rem 3.25rem;
+  padding-block: 0 1.75rem;
+  padding-inline: 3.25rem 0;
 }
 
+/* The rail. It brightens where a step starts and fades where the sequence
+   ends, so the last item is visibly the last one and not a line that got cut. */
 .nd-flow > li::before {
   content: '';
   position: absolute;
-  top: 2.5rem;
-  bottom: 0.375rem;
-  left: 1.1875rem;
+  top: 2.625rem;
+  bottom: 0.25rem;
+  inset-inline-start: 1.1875rem;
   width: 1px;
-  background-color: var(--nd-rule);
+  background-image: linear-gradient(180deg, var(--nd-rule-strong) 0%, var(--nd-rule) 44%);
+}
+
+.nd-flow > li:last-child::before {
+  background-image: linear-gradient(
+    180deg,
+    var(--nd-rule-strong) 0%,
+    var(--nd-rule) 40%,
+    rgb(245 240 238 / 0) 100%
+  );
 }
 
 .nd-flow > li:last-child {
-  padding-bottom: 1.75rem;
+  padding-bottom: 1.875rem;
 }
 
 .nd-flow-mark {
   position: absolute;
   top: 0;
-  left: 0;
+  inset-inline-start: 0;
   display: grid;
   place-items: center;
   width: 2.375rem;
@@ -344,6 +557,9 @@
   border: 1px solid var(--nd-rule-strong);
   border-radius: 50%;
   background-color: var(--nd-recess-field);
+  box-shadow:
+    inset 0 1px 0 var(--lip),
+    0 2px 6px -2px rgb(0 0 0 / 0.7);
   color: var(--nd-on-surface);
 }
 
@@ -354,49 +570,27 @@
 
 .nd-flow > li > p,
 .nd-flow-after > p {
-  max-width: 52ch;
-  margin: 0.4375rem 0 0;
-  font-size: 0.9375rem;
+  max-width: 50ch;
+  margin: 0.5rem 0 0;
+  font-size: var(--t-body);
   line-height: 1.6;
   color: var(--nd-on-surface-muted);
 }
 
-/* The row itself carries the reveal animation, so its own transform is spoken
-   for. The children are what move under the pointer. */
-.nd-flow-mark,
-.nd-flow > li > h3,
-.nd-flow > li > p {
-  transition: transform var(--nd-t-state) var(--nd-ease);
-}
-
-.nd-flow-mark {
-  transition:
-    transform var(--nd-t-state) var(--nd-ease),
-    border-color var(--nd-t-state) var(--nd-ease),
-    color var(--nd-t-state) var(--nd-ease);
-}
-
-.nd-flow > li:hover > h3,
-.nd-flow > li:hover > p {
-  transform: translate3d(7px, 0, 0);
-}
-
-.nd-flow > li:hover > .nd-flow-mark {
-  transform: scale(1.14);
-  border-color: var(--nd-accent);
-  color: var(--nd-accent);
-}
-
+/* The clock's step, not the sponsor's: a crease of its own and a dashed mark,
+   because "and then nobody does anything" is a different kind of step. */
 .nd-flow-after {
-  margin-top: 0.25rem;
-  padding-top: 1.625rem;
+  margin-top: 0.375rem;
+  padding-top: 1.75rem;
   padding-bottom: 0;
-  border-top: 1px solid var(--nd-rule);
+  border-top: 1px solid var(--crease-dark);
+  box-shadow: inset 0 1px 0 var(--crease-lit);
 }
 
 .nd-flow-after > .nd-flow-mark {
-  top: 1.625rem;
+  top: 1.75rem;
   border-style: dashed;
+  box-shadow: none;
   color: var(--nd-on-surface-muted);
 }
 
@@ -407,31 +601,39 @@
   }
   .nd-land-how-head {
     position: sticky;
-    top: 2.5rem;
+    top: 3.5rem;
   }
 }
 
+/* ---- the figures -------------------------------------------------------- */
+
+/* The page's one change of surface, so it goes DOWN rather than up: a band
+   recessed into the field, with the light hairline of the crease as its top
+   edge and its own shadow falling inwards from it. */
 .nd-land-figures {
-  border-top: 1px solid var(--nd-rule);
-  background-color: rgb(12 7 6 / 0.4);
+  padding-block: clamp(3.25rem, 9vw, 6rem);
+  background-color: rgb(9 5 4 / 0.5);
+  background-image: linear-gradient(180deg, rgb(0 0 0 / 0.24) 0%, rgb(0 0 0 / 0) 10rem);
 }
 
 .nd-land-figures-in {
   display: grid;
-  gap: 1.5rem;
+  gap: 1.75rem;
 }
 
 .nd-land-figures-head > p {
-  max-width: 60ch;
+  max-width: 46ch;
   margin: 0.875rem 0 0;
-  font-size: 0.9375rem;
+  font-size: var(--t-body);
   line-height: 1.6;
   color: var(--nd-on-surface-muted);
 }
 
 .nd-ledger {
   margin: 0;
-  border-top: 1px solid var(--nd-rule);
+  /* Every figure on this page, not only the amount. A count that changes on
+     reload must not shift the column it is right-aligned in. */
+  font-variant-numeric: tabular-nums;
 }
 
 .nd-ledger-lead,
@@ -440,8 +642,18 @@
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: baseline;
   gap: 0.25rem 1rem;
-  padding: 0.9375rem 0;
+  padding: 1rem 0;
   border-bottom: 1px solid var(--nd-rule);
+}
+
+/* The money row. Gold as a HAIRLINE and a wash — never as a word — and it is
+   the only gold on this section. The row is already twice the type size of the
+   ones beneath it and already labelled "Paid out to claimants", so the colour
+   is the third carrier of "this is the money", never the only one. */
+.nd-ledger-lead {
+  padding-block: 1.5rem 1.375rem;
+  border-top: 1px solid var(--gold-line);
+  background-image: linear-gradient(90deg, var(--gold-wash), rgb(233 178 19 / 0) 64%);
 }
 
 .nd-ledger dt {
@@ -450,8 +662,9 @@
   gap: 0.5rem;
   min-width: 0;
   grid-column: 1;
-  font-size: 0.9375rem;
+  font-size: var(--t-label);
   font-weight: 650;
+  letter-spacing: -0.008em;
   color: var(--nd-on-surface);
 }
 
@@ -463,13 +676,14 @@
 .nd-ledger dd {
   grid-column: 2;
   margin: 0;
-  text-align: right;
+  text-align: end;
 }
 
 .nd-ledger dd > b {
-  font-size: 1.375rem;
+  font-size: 1.4375rem;
   font-weight: 800;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.024em;
+  font-variant-numeric: tabular-nums;
   color: var(--nd-on-surface);
   overflow-wrap: anywhere;
 }
@@ -479,50 +693,45 @@
 .nd-ledger dd.nd-ledger-note {
   grid-column: 1 / -1;
   grid-row: 2;
-  font-size: 0.8125rem;
+  max-width: 46ch;
+  font-size: var(--t-note);
   line-height: 1.5;
   color: var(--nd-on-surface-muted);
-  text-align: left;
+  text-align: start;
 }
 
-/* Right-aligned, so it grows leftwards into the row instead of past its edge. */
+/* Right-aligned, so it grows leftwards into the row instead of past its edge.
+   The hover scale itself lives in the `no-preference` block near the end. */
 .nd-ledger dd > .nd-settle {
   transform-origin: 100% 50%;
-}
-
-.nd-ledger dd > .nd-settle,
-.nd-ledger dt svg {
-  transition: transform var(--nd-t-state) var(--nd-ease);
-}
-
-.nd-ledger-lead:hover dd > .nd-settle,
-.nd-ledger-row:hover dd > .nd-settle {
-  transform: scale(1.07);
-}
-
-.nd-ledger-lead:hover dt svg,
-.nd-ledger-row:hover dt svg {
-  transform: scale(1.18) rotate(-6deg);
 }
 
 .nd-ledger-lead dt svg {
   color: var(--nd-accent);
 }
 
+/* The largest thing in this section, and the ceiling is set by the row rather
+   than by taste: `dt` and `dd` share one grid row, so an amount that outgrows
+   its column pushes the label to two lines. 30px at 390 leaves the label whole
+   for every figure this endpoint can return. */
 .nd-ledger-lead dd > b {
-  font-size: clamp(1.75rem, 5vw, 2.5rem);
-  line-height: 1.05;
+  font-size: clamp(1.875rem, 5.5vw, 2.875rem);
+  line-height: 1;
+  letter-spacing: -0.032em;
 }
 
+/* The unit rides the amount rather than competing with it: smaller, tracked
+   out, and never on its own line — PRODUCT.md forbids an ambiguous amount. */
 .nd-ledger-unit {
-  margin-left: 0.1875em;
-  font-size: 0.4em;
-  font-weight: 800;
-  letter-spacing: 0.06em;
+  margin-inline-start: 0.22em;
+  font-size: 0.38em;
+  font-weight: 750;
+  letter-spacing: 0.07em;
+  white-space: nowrap;
 }
 
 .nd-ledger-none {
-  font-size: 0.875rem;
+  font-size: var(--t-small);
   font-weight: 500;
   color: var(--nd-on-surface-muted);
 }
@@ -536,18 +745,28 @@
   vertical-align: baseline;
 }
 
+/* The placeholder stands in for a 30–46px number, so it reserves roughly that
+   much of the row instead of leaving a 12px pill where the amount will land. */
+.nd-ledger-lead .nd-ledger-wait {
+  width: 7rem;
+  height: 1.375rem;
+}
+
 .nd-land-stamp {
   margin: 0;
-  font-size: 0.8125rem;
+  font-size: var(--t-note);
   font-variant-numeric: tabular-nums;
   color: var(--nd-on-surface-muted);
 }
 
-.nd-land-figures-down {
+.nd-land .nd-land-figures-down {
   display: grid;
   justify-items: start;
-  gap: 0.25rem;
+  gap: 0.5rem;
+  padding: 1.125rem;
   border: 1px solid var(--nd-rule);
+  border-radius: var(--nd-radius-plate);
+  box-shadow: inset 0 1px 0 var(--lip);
 }
 
 @media (min-width: 60rem) {
@@ -577,24 +796,69 @@
   }
 }
 
+/* ---- the custody disclosure --------------------------------------------
+ *
+ * The one elevated surface on the page, and the only blurred one.
+ *
+ * Glass is defensible here for the reason index.css gives and nowhere else:
+ * exactly ONE bounded element is ever blurred, never the page. It earns the
+ * elevation because "NimDrops holds the NIM" is the sentence a stranger has to
+ * read before signing anything, and this is the page's only surface that comes
+ * FORWARD instead of receding.
+ *
+ * It is also the safe place for it. The bloom's mask ends at 62% of the sky, so
+ * the backdrop behind this panel is static: a blurred region only re-reads its
+ * backdrop when something behind it moves, and nothing behind this does. Three
+ * fallbacks, in the order index.css established: no `backdrop-filter` support,
+ * Reduce Transparency, and the runtime's own `data-nd-glass='off'` for a
+ * low-memory phone — each lands on the same opaque sheet.
+ */
+
 .nd-land-plain {
-  border-top: 1px solid var(--nd-rule);
+  padding-block: clamp(2.5rem, 6.5vw, 4.75rem);
 }
 
 .nd-land-plain-in {
   display: grid;
   gap: clamp(1.25rem, 3vw, 3rem);
-  padding: clamp(1.25rem, 3vw, 2.25rem);
-  border: 1px solid var(--nd-rule);
+  padding: clamp(1.375rem, 3.2vw, 2.5rem);
+  border: 1px solid rgb(245 240 238 / 0.12);
   border-radius: var(--nd-radius-sheet);
-  background-color: var(--nd-recess-field);
+  background-color: var(--color-sheet);
+  box-shadow:
+    inset 0 1px 0 rgb(255 238 228 / 0.1),
+    0 1.5rem 3.5rem -1.5rem rgb(0 0 0 / 0.8);
+}
+
+@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .nd-land-plain-in {
+    background-color: rgb(28 18 16 / 0.62);
+    -webkit-backdrop-filter: blur(16px) saturate(115%);
+    backdrop-filter: blur(16px) saturate(115%);
+  }
+}
+
+/* Reduce Transparency means SOLID, not "a bit less blur". */
+@media (prefers-reduced-transparency: reduce) {
+  .nd-land-plain-in {
+    background-color: var(--color-sheet);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
+
+/* `ui/surface.ts` sets this on a coarse pointer with low memory or few cores. */
+:root[data-nd-glass='off'] .nd-land-plain-in {
+  background-color: var(--color-sheet);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
 }
 
 .nd-land-plain-head {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 0.875rem;
+  gap: 1rem;
 }
 
 .nd-land-plain-mark {
@@ -606,20 +870,23 @@
   border: 1px solid var(--nd-rule-strong);
   border-radius: 50%;
   background-color: var(--nd-recess-field);
+  box-shadow: inset 0 1px 0 var(--lip);
   color: var(--nd-accent);
 }
 
 .nd-land-plain-lead {
-  max-width: 52ch;
+  max-width: 40ch;
   margin: 0;
-  font-size: clamp(1rem, 1.6vw, 1.125rem);
+  font-size: var(--t-lead);
   font-weight: 500;
-  line-height: 1.55;
+  line-height: 1.45;
+  letter-spacing: -0.014em;
   color: var(--nd-on-surface);
+  text-wrap: pretty;
 }
 
 .nd-land-plain-more {
-  margin-top: 1.125rem;
+  margin-top: 1.25rem;
 }
 
 .nd-land-plain-more > summary {
@@ -627,16 +894,16 @@
   align-items: center;
   gap: 0.5rem;
   min-height: 2.75rem;
-  padding-right: 0.25rem;
+  padding-inline-end: 0.25rem;
   color: var(--nd-on-surface);
-  font-size: 0.9375rem;
+  font-size: var(--t-body);
   font-weight: 650;
   cursor: pointer;
   list-style: none;
   text-underline-offset: 0.25em;
   text-decoration: underline;
+  text-decoration-thickness: from-font;
   text-decoration-color: rgb(245 240 238 / 0.3);
-  transition: text-decoration-color var(--nd-t-state) var(--nd-ease);
 }
 
 .nd-land-plain-more > summary::-webkit-details-marker {
@@ -650,7 +917,6 @@
   border-right: 1.5px solid var(--nd-accent);
   border-bottom: 1.5px solid var(--nd-accent);
   transform: rotate(45deg) translate(-0.0625rem, -0.0625rem);
-  transition: transform var(--nd-t-state) var(--nd-ease);
 }
 
 .nd-land-plain-more[open] > summary::before {
@@ -668,13 +934,13 @@
 }
 
 .nd-land-plain-detail {
-  padding-top: 0.5rem;
+  padding-top: 0.625rem;
 }
 
 .nd-land-plain-detail > p {
-  max-width: 62ch;
+  max-width: 60ch;
   margin: 0;
-  font-size: 0.9375rem;
+  font-size: var(--t-body);
   line-height: 1.65;
   color: var(--nd-on-surface-muted);
 }
@@ -690,28 +956,45 @@
   }
 }
 
+/* ---- footer ------------------------------------------------------------- */
+
+/* The page sinks at the end rather than stopping. One static gradient, and it
+   is also the bottom half of the vignette — the `::before` above only handles
+   the inline edges, so neither layer does the other's job twice. */
 .nd-land-foot {
-  border-top: 1px solid var(--nd-rule);
-  padding-block: clamp(2.25rem, 5vw, 3.5rem) clamp(2.5rem, 6vw, 4rem);
+  padding-block: clamp(2.5rem, 5vw, 3.75rem) clamp(2.75rem, 6vw, 4.25rem);
+  background-image: linear-gradient(180deg, rgb(0 0 0 / 0) 0%, rgb(0 0 0 / 0.34) 100%);
 }
 
 .nd-land-foot-in {
   display: grid;
-  gap: 1.75rem;
+  gap: 2.25rem;
   align-items: start;
 }
 
 .nd-land-foot-line {
   max-width: 34ch;
   margin: 0;
-  font-size: 0.9375rem;
+  font-size: var(--t-body);
   line-height: 1.6;
   color: var(--nd-on-surface-muted);
 }
 
-.nd-land-foot-cta {
-  max-width: 18rem;
-  margin-top: 1.125rem;
+/* Whether the footer door carries `.nd-land-foot-cta` or is a bare `AppDoor`,
+   it needs to stop being a full-bleed sheet control down here. */
+.nd-land .nd-land-foot-cta,
+.nd-land-foot-copy > .nd-action,
+.nd-land-foot-copy > .nd-quiet {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  max-width: 20rem;
+  min-height: 3.25rem;
+  margin-top: 1.25rem;
+  border-radius: var(--nd-radius-control);
+  box-shadow: inset 0 1px 0 var(--lip);
+  font-size: var(--t-lede);
+  letter-spacing: -0.01em;
   text-decoration: none;
 }
 
@@ -726,14 +1009,12 @@
   }
 }
 
-.nd-land-gate {
-  border-top: 1px solid var(--nd-rule);
-}
+/* ---- the trivia entrance ------------------------------------------------ */
 
 .nd-land-gate-head > p {
-  max-width: 52ch;
+  max-width: 48ch;
   margin: 0.875rem 0 0;
-  font-size: 0.9375rem;
+  font-size: var(--t-body);
   line-height: 1.6;
   color: var(--nd-on-surface-muted);
 }
@@ -741,7 +1022,7 @@
 .nd-land-gate-facts {
   display: grid;
   gap: 0;
-  margin: clamp(1.5rem, 4vw, 2.25rem) 0 0;
+  margin: clamp(1.75rem, 4vw, 2.5rem) 0 0;
 }
 
 .nd-land-gate-facts > div {
@@ -755,37 +1036,53 @@
 
 .nd-land-gate-facts dt {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: 0.5rem;
-  font-size: 0.9375rem;
+  font-size: var(--t-label);
   font-weight: 650;
+  line-height: 1.35;
+  letter-spacing: -0.01em;
   color: var(--nd-on-surface);
+  text-wrap: balance;
 }
 
+/* Baseline-aligned text with an icon on it: an 18px glyph whose bottom sits on
+   the baseline reads as too tall, so nudge it down onto the x-height. This is
+   optical alignment, not motion, so it is NOT behind `no-preference`. */
 .nd-land-gate-facts dt svg {
   flex: 0 0 auto;
+  transform: translateY(0.1875rem);
   color: var(--nd-accent);
-  transition: transform var(--nd-t-state) var(--nd-ease);
-}
-
-.nd-land-gate-facts > div:hover dt svg {
-  transform: scale(1.24) rotate(8deg);
 }
 
 .nd-land-gate-facts dd {
-  max-width: 44ch;
-  margin: 0.4375rem 0 0;
-  font-size: 0.875rem;
+  max-width: 40ch;
+  margin: 0.5rem 0 0;
+  font-size: var(--t-small);
   line-height: 1.6;
   color: var(--nd-on-surface-muted);
+  text-wrap: pretty;
 }
 
-@media (min-width: 48rem) {
+/* Four facts, so two columns and then four — never three. A `repeat(3)` grid
+   left the fourth fact alone on a second row, which reads as a mistake and is
+   also the SaaS three-card reflex PRODUCT.md names as an anti-reference. */
+@media (min-width: 34rem) {
   .nd-land-gate-facts {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: clamp(1.5rem, 4vw, 2.5rem);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0 clamp(1.5rem, 4vw, 2.5rem);
   }
-  .nd-land-gate-facts > div {
+  .nd-land-gate-facts > div:last-child {
+    padding-bottom: 1.125rem;
+  }
+}
+
+@media (min-width: 72rem) {
+  .nd-land-gate-facts {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+  .nd-land-gate-facts > div,
+  .nd-land-gate-facts > div:last-child {
     padding-bottom: 0;
   }
 }
@@ -1023,6 +1320,130 @@
   animation-delay: var(--nd-in, 0ms);
 }
 
+/* ---- pointer feedback ----------------------------------------------------
+ *
+ * Every TRANSFORM under the pointer lives here, behind `no-preference`, and
+ * every state it belongs to is already carried by a fill, a border or a shadow
+ * in the rules above. Switch motion off and the hover and the press are still
+ * visible, just instant — which is the whole contract: motion is the polish on
+ * a state, never the state itself.
+ *
+ * The WebView has no hover at all, so none of this is ever the only signal
+ * that something is interactive.
+ */
+@media (prefers-reduced-motion: no-preference) {
+  .nd-land-doors > .nd-action,
+  .nd-land-doors > .nd-quiet,
+  .nd-land-doors > [data-testid='app-door'] {
+    transition:
+      transform var(--nd-t-state) var(--nd-ease),
+      box-shadow var(--nd-t-state) var(--nd-ease),
+      background-color var(--nd-t-state) var(--nd-ease),
+      border-color var(--nd-t-state) var(--nd-ease),
+      opacity var(--nd-t-press) var(--nd-ease-exit);
+  }
+
+  /* Out-specified past `.nd-action:not(:disabled):active` in index.css, which
+     is a flat 0.99 and reads as nothing on a control this size. */
+  .nd-land .nd-land-doors > .nd-action:hover,
+  .nd-land .nd-land-doors > [data-testid='app-door'][data-tone='primary']:hover {
+    transform: translate3d(0, -2px, 0);
+  }
+
+  .nd-land .nd-land-doors > .nd-action:active,
+  .nd-land .nd-land-doors > [data-testid='app-door'][data-tone='primary']:active {
+    transform: translate3d(0, 1px, 0) scale(0.985);
+    transition-duration: var(--nd-t-press);
+  }
+
+  .nd-land .nd-land-doors > .nd-quiet:active {
+    transform: translate3d(0, 1px, 0);
+    transition-duration: var(--nd-t-press);
+  }
+
+  .nd-land .nd-land-topcta,
+  .nd-land-top-in .nd-quiet,
+  .nd-land .nd-land-foot-cta,
+  .nd-land-foot-copy > .nd-quiet {
+    transition:
+      border-color var(--nd-t-state) var(--nd-ease),
+      background-color var(--nd-t-state) var(--nd-ease),
+      transform var(--nd-t-press) var(--nd-ease-exit);
+  }
+
+  .nd-land .nd-land-topcta:active,
+  .nd-land-top-in .nd-quiet:active,
+  .nd-land .nd-land-foot-cta:active,
+  .nd-land-foot-copy > .nd-quiet:active {
+    transform: scale(0.96);
+  }
+
+  /* The row itself carries the reveal animation, so its own transform is
+     spoken for. The children are what move under the pointer. */
+  .nd-flow-mark,
+  .nd-flow > li > h3,
+  .nd-flow > li > p {
+    transition: transform var(--nd-t-state) var(--nd-ease);
+  }
+
+  .nd-flow-mark {
+    transition:
+      transform var(--nd-t-state) var(--nd-ease),
+      border-color var(--nd-t-state) var(--nd-ease),
+      color var(--nd-t-state) var(--nd-ease);
+  }
+
+  .nd-flow > li:hover > h3,
+  .nd-flow > li:hover > p {
+    transform: translate3d(7px, 0, 0);
+  }
+
+  /* The ledger. Pointing at a row swells its figure and cocks its icon — the
+     one place on the page a number is allowed to move, and only under a
+     pointer that the WebView does not have. */
+  .nd-ledger dd > .nd-settle,
+  .nd-ledger dt svg,
+  .nd-land-gate-facts dt svg {
+    transition: transform var(--nd-t-state) var(--nd-ease);
+  }
+
+  .nd-ledger-lead:hover dd > .nd-settle,
+  .nd-ledger-row:hover dd > .nd-settle {
+    transform: scale(1.07);
+  }
+
+  .nd-ledger-lead:hover dt svg,
+  .nd-ledger-row:hover dt svg {
+    transform: scale(1.18) rotate(-6deg);
+  }
+
+  /* Composed with the optical nudge above, not replacing it. */
+  .nd-land-gate-facts > div:hover dt svg {
+    transform: translateY(0.1875rem) scale(1.2) rotate(8deg);
+  }
+
+  /* The custody disclosure. The caret's OPEN position is a plain state rule, so
+     with motion off it still flips — it just stops sweeping there. */
+  .nd-land-plain-more > summary {
+    transition: text-decoration-color var(--nd-t-state) var(--nd-ease);
+  }
+
+  .nd-land-plain-more > summary::before {
+    transition: transform var(--nd-t-state) var(--nd-ease);
+  }
+}
+
+/* Gold on a mark, not on a word, and it arrives with a size change so the hover
+   is not carried by hue alone. The rule itself is unconditional — the state has
+   to be reachable with motion off — and only its TRANSITION lives in the
+   `no-preference` block above, so under `reduce` the mark simply is bigger
+   rather than growing. */
+.nd-flow > li:hover > .nd-flow-mark {
+  transform: scale(1.14);
+  border-color: var(--nd-accent);
+  color: var(--nd-accent);
+}
+
 /* Guarded: without a view() timeline there is no animation, so the visible
    base rule is what renders. */
 @supports (animation-timeline: view()) {
@@ -1058,9 +1479,12 @@
       --rise-s: 0.985;
     }
 
+    /* Translate only, no scale. This is the page's one `backdrop-filter`
+       element, and a blurred region being scaled while it samples its backdrop
+       is where engines disagree. The offset is the legible part anyway. */
     .nd-land-plain-in {
       --rise-y: 58px;
-      --rise-s: 0.97;
+      --rise-s: 1;
     }
   }
 }

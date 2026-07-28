@@ -234,3 +234,37 @@ export function QuestionMarkIcon(props: IconProps) {
     </IconBase>
   )
 }
+
+/**
+ * A question card with a spark: one this wallet has not been asked before.
+ *
+ * `RefundReturnIcon` was used here first and is wrong — it means money coming
+ * back to the sponsor, which is a different fact on the same page.
+ */
+export function FreshQuestionIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <rect x="3.5" y="5" width="15" height="15.5" rx="2.25" />
+      <path d="M8.35 10.2a2.2 2.2 0 1 1 2.7 2.14c-.44.12-.7.47-.7.92v.63" />
+      <circle cx="10.35" cy="16.6" r=".75" fill="currentColor" stroke="none" />
+      <path d="M19.25 2.75v3.5M17.5 4.5H21" />
+    </IconBase>
+  )
+}
+
+/**
+ * A marked-up answer sheet: one tick, one cross.
+ *
+ * Deliberately NOT `SuccessCheckIcon`, which promises the reader succeeded. A
+ * finished session reports what was right AND what was wrong, and an icon that
+ * only says "correct" would be the picture disagreeing with the words.
+ */
+export function AnswerReviewIcon(props: IconProps) {
+  return (
+    <IconBase {...props}>
+      <rect x="4" y="3.5" width="16" height="17" rx="2.25" />
+      <path d="m7.1 8.75 1.35 1.35 2.4-2.55M13.75 9h3" />
+      <path d="m7.35 14.5 3.2 3.2m0-3.2-3.2 3.2M13.75 16.1h3" />
+    </IconBase>
+  )
+}

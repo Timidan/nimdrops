@@ -1,14 +1,15 @@
-import { useCallback, useEffect, useState, type CSSProperties } from 'react'
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
 import { getStats, type PublicStats, type StatKey } from '../api'
 import {
+  AnswerReviewIcon,
   ClaimIcon,
   ClockExpiryIcon,
   CustodyShieldIcon,
   EnvelopeSealedIcon,
   QuestionMarkIcon,
+  FreshQuestionIcon,
   RefundReturnIcon,
   ShareIcon,
-  SuccessCheckIcon,
   WalletIcon,
   type IconComponent,
 } from '../ui/icons'
@@ -17,6 +18,13 @@ import NimDropsPhotograph from '../ui/NimDropsPhotograph'
 import { GetNimiqPay } from '../ui/OpenInApp'
 import AppDoor from '../ui/AppDoor'
 import './Landing.css'
+import {
+  useHeroEntrance,
+  useHeroParallax,
+  useMagneticDoors,
+  useSectionReveals,
+  useSmoothScroll,
+} from './Landing.motion'
 
 interface Row {
   key: StatKey
@@ -215,12 +223,12 @@ const GATE_FACTS: { icon: IconComponent; title: string; body: string }[] = [
     body: 'Stamped and timed by the server, not your device.',
   },
   {
-    icon: RefundReturnIcon,
+    icon: FreshQuestionIcon,
     title: 'Never the same question twice',
     body: 'Never one a wallet has already seen.',
   },
   {
-    icon: SuccessCheckIcon,
+    icon: AnswerReviewIcon,
     title: 'You find out how you did',
     body: 'Afterwards: every question, and whether you got it.',
   },
@@ -287,9 +295,21 @@ const STEPS: { icon: IconComponent; title: string; body: string }[] = [
 
 export default function Landing() {
   const { load, retry } = useStats()
+  const page = useRef<HTMLElement>(null)
+  const hero = useRef<HTMLElement>(null)
+
+  // Every one of these is a no-op under `prefers-reduced-motion: reduce`, and
+  // every one leaves its element visible if it cannot run. Landing.css remains
+  // the floor: with the module absent or throwing, the page still animates
+  // itself through the cascade.
+  useSmoothScroll()
+  useHeroEntrance(page)
+  useHeroParallax(hero)
+  useSectionReveals(page)
+  useMagneticDoors(page)
 
   return (
-    <main className="nd-land">
+    <main className="nd-land" ref={page}>
       <div className="nd-land-sky" aria-hidden="true">
         <span className="nd-land-bloom" />
         <span className="nd-land-counter" />
@@ -301,13 +321,16 @@ export default function Landing() {
           <p className="nd-land-brand nd-arrive" style={{ '--nd-in': '0ms' } as CSSProperties}>
             NimDrops
           </p>
-          <span className="nd-arrive" style={{ '--nd-in': '70ms' } as CSSProperties}>
+          <span
+            className="nd-arrive"
+            style={{ '--nd-in': '70ms', display: 'inline-block' } as CSSProperties}
+          >
             <AppDoor to="/games" label="Find a game" tone="secondary" />
           </span>
         </div>
       </header>
 
-      <section className="nd-land-hero">
+      <section className="nd-land-hero" ref={hero}>
         <div className="nd-land-wrap nd-land-hero-in">
           <div className="nd-land-hero-copy">
             <h1 className="nd-land-h1">

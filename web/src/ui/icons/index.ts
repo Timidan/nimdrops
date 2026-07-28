@@ -1,4 +1,6 @@
 export {
+  AnswerReviewIcon,
+  FreshQuestionIcon,
   ICON_GRID,
   ICON_STROKE_WIDTH,
   AppMarkIcon,
