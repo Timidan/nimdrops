@@ -1151,7 +1151,7 @@ async function run(): Promise<void> {
   console.log(`\nkept, by category (${perCategory.size} distinct, cap ${capPerCategory}/tier):`)
   for (const [category, count] of [...perCategory].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))) {
     const share = ((count / kept.length) * 100).toFixed(1)
-    const perTierBreakdown = wanted
+    const perTierBreakdown = promised
       .map((t) => `${t[0]}${catsByTier.get(t)?.get(category) ?? 0}`)
       .join(' ')
     console.log(
