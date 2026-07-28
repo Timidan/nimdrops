@@ -139,6 +139,18 @@ describe.skipIf(!hasDb)('issueGrant', () => {
     expect(rows[0].payout_permille).toBeNull()
   })
 
+  // The CHECK is `> 0 AND <= 1000`, not merely "looks like a fraction": zero
+  // would be a grant for nothing, which a failed session never issues, and a
+  // failed insert here is preferable to a slot silently consumed for no share.
+  it('rejects a payout fraction outside the valid range', async () => {
+    await expect(
+      issueGrant(pool, { dropId, walletAddress: WALLET, kind: 'trivia', payoutPermille: 0 }),
+    ).rejects.toThrow(/payout_permille/)
+    await expect(
+      issueGrant(pool, { dropId, walletAddress: WALLET, kind: 'trivia', payoutPermille: 1001 }),
+    ).rejects.toThrow(/payout_permille/)
+  })
+
   it('returns the existing grant even after it has been consumed', async () => {
     // A wallet that already claimed may still re-submit the condition — the
     // page it is on does not know the claim happened. It must not get a second
