@@ -387,9 +387,13 @@ function amountField() {
  * text content is three pieces and its accessible name is the sentence. Reading
  * the name rather than the DOM is also the stricter check: it is what a sponsor
  * who cannot see the screen is told the drop will cost.
+ *
+ * The name comes from the `sr-only` span, not `aria-label`: ARIA's `paragraph`
+ * role is "Name from: prohibited", so `aria-label` on an `as="p"` lockup can be
+ * silently dropped by the accessibility tree.
  */
 function totalNim(): string | null {
-  return screen.getByTestId('amount-hero').getAttribute('aria-label')
+  return screen.getByTestId('amount-hero').querySelector('.sr-only')?.textContent ?? null
 }
 
 function fillForm(opts: { amount?: string; people?: string; from?: string } = {}) {

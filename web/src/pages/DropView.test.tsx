@@ -299,7 +299,8 @@ describe('the money never depends on the visual layer', () => {
       if (amount) {
         const hero = screen.getByTestId('amount-hero')
         expect(hero.textContent).toMatch(/2\s*NIM/)
-        expect(hero.getAttribute('aria-label')).toBe('2 NIM')
+        // The accessible name comes from the sr-only text, not aria-label.
+        expect(hero.querySelector('.sr-only')!.textContent).toBe('2 NIM')
       } else {
         expect(screen.queryByTestId('amount-hero')).toBeNull()
       }
@@ -422,8 +423,9 @@ describe('the printed amount', () => {
     const hero = screen.getByTestId('amount-hero')
     expect(hero.querySelector('.nim-figure')!.textContent).toBe('10000.00000')
     expect(hero.querySelector('.nim-word')!.textContent).toBe('NIM')
-    // Read out once, as one fact.
-    expect(hero.getAttribute('aria-label')).toBe('10000.00000 NIM')
+    // Read out once, as one fact — the accessible name comes from the
+    // sr-only text, not from aria-label, which the paragraph role can drop.
+    expect(hero.querySelector('.sr-only')!.textContent).toBe('10000.00000 NIM')
     expect(hero.querySelector('.nim-word')!.getAttribute('aria-hidden')).toBe('true')
   })
 

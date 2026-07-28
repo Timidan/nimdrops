@@ -129,9 +129,14 @@ export interface AmountProps {
  *
  * ## Accessibility
  *
- * `aria-label` carries `5 NIM` in words in both forms, so the mark-only version
- * is not a screen-reader regression. The spans are `aria-hidden` because the
- * label already replaced them; announcing both reads the amount twice.
+ * The accessible name comes from content, not `aria-label`: ARIA's `paragraph`
+ * role is "Name from: prohibited", so an `aria-label` on the `as="p"` form can be
+ * silently dropped by the accessibility tree, and every visible child here is
+ * `aria-hidden`, which would leave a money screen announcing nothing at all. A
+ * `sr-only` span carries `5 NIM` in words instead, in both forms, so the
+ * mark-only version is not a screen-reader regression either. The visible spans
+ * stay `aria-hidden` because the `sr-only` span already replaced them;
+ * announcing both reads the amount twice.
  *
  * The figure never wraps and never truncates. If the lockup cannot fit, the
  * `flex-wrap` in the surface's CSS drops the unit onto its own line.
@@ -148,7 +153,8 @@ export function Amount({
   const height = `${CAP * markScale}em`
   const lift = `${((CAP / 2) * (markScale - 1)).toFixed(4)}em`
   return (
-    <Tag className={className} aria-label={`${value} NIM`} data-testid="amount-hero" data-size={size}>
+    <Tag className={className} data-testid="amount-hero" data-size={size}>
+      <span className="sr-only">{`${value} NIM`}</span>
       <span className="nim-figure" aria-hidden="true">
         {value}
       </span>
