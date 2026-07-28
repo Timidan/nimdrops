@@ -25,13 +25,13 @@ export default function Receipt({ publicId, txHash, sponsorLabel }: ReceiptProps
       <dl className="nd-rows mt-5">
         <div className="nd-row">
           <dt>From</dt>
-          <dd className="font-normal">
-            {sponsorLabel} <span className="text-plate/60">(name unverified)</span>
+          <dd>
+            {sponsorLabel} <span className="text-(--nd-on-surface-muted)">(name unverified)</span>
           </dd>
         </div>
         <div className="nd-row">
           <dt>Transaction</dt>
-          <dd className="font-mono text-xs">
+          <dd className="nd-num text-xs">
             {txHash ? shortHash(txHash) : 'confirmed, waiting for the id'}
           </dd>
         </div>
@@ -56,7 +56,7 @@ export default function Receipt({ publicId, txHash, sponsorLabel }: ReceiptProps
           to the receipt, and rendering one of them mid-artifact put the drop's
           id between two buttons. */}
       <p className="nd-note mt-1 text-center">
-        Drop <code className="font-mono">{publicId.slice(0, 8)}…</code>
+        Drop <span className="nd-num">{publicId.slice(0, 8)}…</span>
       </p>
     </section>
   )

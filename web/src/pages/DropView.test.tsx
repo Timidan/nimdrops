@@ -641,3 +641,20 @@ describe('the trivia slot', () => {
     expect(screen.getByTestId('bare').children).toHaveLength(2)
   })
 })
+
+/* -------------------------------------------------------------------------
+ * Receipt component styling
+ * ---------------------------------------------------------------------- */
+
+describe('Receipt design system compliance', () => {
+  /**
+   * Mulish is the only typeface on a production surface.
+   * No font-mono, and no <code> element which brings preflight's monospace stack.
+   */
+  it('keeps the paid receipt on Mulish and computed ink', () => {
+    view('paid', { serverState: 'paid', txHash: TX_HASH })
+    // Mulish is the only face on a production surface.
+    expect(document.querySelector('.font-mono')).toBeNull()
+    expect(document.querySelector('code')).toBeNull()
+  })
+})
