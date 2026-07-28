@@ -55,9 +55,12 @@ import { PausedError, StaleReconciliationError, lockControls } from './solvency'
  * needs, and a second implementation of them would be a second chance to get
  * one of them wrong. So {@link closeLiveDrop} owns the whole transaction, both
  * callers hand it a reason and (for the sponsor) an authorization hook that runs
- * under the locks, and the refund amount is derived in exactly one place: the
- * lines below that sum committed payouts and subtract them from the funded
- * principal. No other code in this repository computes what a drop owes back.
+ * under the locks, and the refund amount is derived from ONE formula — funded
+ * principal minus every committed payout — applied at the two places a drop can
+ * ever need it worked out: here, for a drop still `live`, and again in
+ * {@link settleTerminal}'s backstop for a drop that reached `closing` without
+ * this function ever running. No other code in this repository computes what a
+ * drop owes back.
  */
 
 /** Design §6.1: an unfunded draft may be collected after this long. */
@@ -72,12 +75,12 @@ export const SWEEP_BATCH = 50
  *
  * `exhausted` is written by `claims.ts` when the last slot is taken, and is not
  * a {@link closeLiveDrop} reason: that close allocates the final slot, so it
- * belongs to the allocation transaction rather than this one. Note that
- * "every slot taken" is no longer the same fact as "nothing left to refund":
- * a scored (sub-full-share) claim can take the last slot while still leaving
- * an unpaid remainder, and nothing in this file writes a refund for it — the
- * exhausted path never calls {@link closeLiveDrop} at all. That gap is a known
- * open item, not something this comment should paper over.
+ * belongs to the allocation transaction rather than this one. "Every slot
+ * taken" is not the same fact as "nothing left to refund" — a scored
+ * (sub-full-share) claim can take the last slot while still leaving an unpaid
+ * remainder — so {@link settleTerminal} carries its own backstop for exactly
+ * that gap: it writes the refund an exhausted drop's last slot never got,
+ * before it ever gets classified `settled` in error.
  */
 export type ClosingReason = 'expired' | 'closed_by_sponsor'
 
@@ -392,10 +395,61 @@ export async function closeLiveDrop(
  * solvency picture. An intent in `manual_review` fails the predicate, which is
  * exactly design §9's rule that the drop stays non-terminal around stuck money.
  *
+ * **The backstop (Task 4b).** A drop can reach `closing` without ever getting a
+ * refund for its unpaid remainder: `reserveClaim` (`claims.ts`) closes an
+ * exhausted drop inline — `closing_reason = 'exhausted'` — the moment the last
+ * slot is taken, without ever calling {@link closeLiveDrop}. A flat-share drop
+ * owes nothing back in that case, but a scored (sub-full-share) claim taking
+ * that last slot leaves real luna behind with no path that ever refunds it.
+ * Rather than teach `reserveClaim`'s hot allocation path (or any FUTURE path
+ * into `closing`) to compute and write its own refund, this function does it
+ * once, here, before deciding `refunded` vs `settled`: every `closing` drop
+ * with no refund row yet is offered {@link closeLiveDrop}'s own formula —
+ * funded principal minus every committed payout — over its now-frozen final
+ * claim set (nothing can join a drop that has left `live`). The idempotency
+ * key is `refund:<dropId>`, byte for byte the SAME string `closeLiveDrop`
+ * writes for the same drop, so a drop `closeLiveDrop` already refunded
+ * collides on `idempotency_key` (and, redundantly, `one_refund_per_drop`) and
+ * this INSERT is a no-op for it — that identity, not a lock, is what makes it
+ * safe to run unconditionally on every tick.
+ *
  * Takes only the drop row lock and acquires nothing after it, so it cannot form
  * a cycle with the `custody_controls` → drop order taken everywhere else.
  */
 export async function settleTerminal(pool: Pool): Promise<number> {
+  // The backstop refund. Filtered to `refund_luna > 0` rather than computed
+  // and clamped: a drop whose claims all paid full share, or that never left
+  // `live` with anything unclaimed to begin with, contributes no row at all —
+  // there is no path here that could attempt a non-positive `amount_luna`
+  // insert (the column's own `CHECK (amount_luna > 0)` would refuse it
+  // regardless, since the same guarantees `closeLiveDrop` relies on — a
+  // payout can never exceed its slot's full share, and payout rows can never
+  // outnumber `claim_count` — hold here too, over the same table).
+  await pool.query(
+    `WITH remainder AS (
+       SELECT d.id AS drop_id, d.refund_address,
+              d.claim_count::BIGINT * d.amount_each_luna
+                - COALESCE(
+                    (SELECT SUM(t.amount_luna) FROM outgoing_transfers t
+                      WHERE t.drop_id = d.id AND t.purpose = 'payout'),
+                    0
+                  ) AS refund_luna
+       FROM drops d
+       WHERE d.state = 'closing'
+         AND d.refund_address IS NOT NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM outgoing_transfers r WHERE r.drop_id = d.id AND r.purpose = 'refund'
+         )
+     )
+     INSERT INTO outgoing_transfers (
+       idempotency_key, purpose, drop_id, claim_id, recipient_address, amount_luna, state
+     )
+     SELECT 'refund:' || drop_id, 'refund', drop_id, NULL, refund_address, refund_luna, 'queued'
+     FROM remainder
+     WHERE refund_luna > 0
+     ON CONFLICT DO NOTHING`,
+  )
+
   const { rowCount } = await pool.query(
     `WITH ready AS (
        SELECT d.id,

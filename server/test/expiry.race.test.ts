@@ -510,8 +510,108 @@ describe.skipIf(!hasDb)('expiry, exact refunds, settlement and draft GC (real Po
 
     expect(await settleTerminal(pool)).toBe(1)
     expect((await readDrop(publicId)).state).toBe('settled')
+    // The backstop found nothing to refund: every claim paid its full share,
+    // so `claim_count × amount_each_luna − SUM(payouts)` is exactly zero.
+    expect(await readRefunds(publicId)).toHaveLength(0)
     // Idempotent: a settled drop is terminal and never re-settles.
     expect(await settleTerminal(pool)).toBe(0)
+  })
+
+  /**
+   * Task 4b: `reserveClaim` closes an exhausted drop inline
+   * (`closing_reason='exhausted'`) without ever calling `closeLiveDrop`, so a
+   * scored (sub-full-share) claim taking the LAST slot used to strand its
+   * unpaid remainder in custody forever — nothing wrote a refund for it.
+   * `settleTerminal` is the backstop: before classifying a `closing` drop as
+   * `refunded` or `settled`, it gives every such drop with no refund yet one
+   * last chance to owe one, using `closeLiveDrop`'s own formula over the
+   * drop's now-frozen claim set.
+   */
+  it('refunds the scored remainder when an exhausted drop settles', async () => {
+    const publicId = await liveDrop({ claimCount: 2 })
+    const dropId = (await readDrop(publicId)).id
+    // The gate applies to the whole drop, so BOTH claimants need a grant —
+    // the first's carries no permille, so it still pays the full share.
+    const fullShareClaimant = newWallet()
+    const scoredClaimant = newWallet()
+    await attachGate(dropId)
+    await grantTo(dropId, fullShareClaimant.address)
+    await grantTo(dropId, scoredClaimant.address, 600)
+    await reserveAs(publicId, fullShareClaimant) // full share — slot 1
+    await reserveAs(publicId, scoredClaimant) // 600‰ — slot 2, exhausts the drop
+
+    expect(await readDrop(publicId)).toMatchObject({
+      state: 'closing',
+      closing_reason: 'exhausted',
+    })
+    // Nothing has settled yet, so the backstop has not run.
+    expect(await readRefunds(publicId)).toHaveLength(0)
+
+    // Confirm the two payouts before the drop can be terminal at all.
+    await drainWorker()
+
+    const scoredPayout = (AMOUNT_EACH * 600n) / 1000n
+    const remainderLuna = AMOUNT_EACH - scoredPayout
+
+    // The backstop writes the refund on this tick, but the drop is not
+    // terminal yet: the refund it just queued hasn't confirmed.
+    expect(await settleTerminal(pool)).toBe(0)
+    const refunds = await readRefunds(publicId)
+    expect(refunds).toHaveLength(1)
+    expect(refunds[0]).toMatchObject({
+      idempotency_key: `refund:${dropId}`,
+      purpose: 'refund',
+      claim_id: null,
+      amount_luna: remainderLuna.toString(),
+      recipient_address: SPONSOR,
+      state: 'queued',
+    })
+    expect((await readDrop(publicId)).state).toBe('closing')
+
+    // Drain the newly-queued refund, then settle again: NOW it is terminal,
+    // and the classification reads the refund transfer this tick wrote.
+    await drainWorker()
+    expect(await settleTerminal(pool)).toBe(1)
+    expect((await readDrop(publicId)).state).toBe('refunded')
+
+    // Every luna accounted for exactly once: 2 payouts + 1 refund = principal.
+    const total = (await readTransfers(publicId)).reduce((sum, t) => sum + BigInt(t.amount_luna), 0n)
+    expect(total).toBe(AMOUNT_EACH * 2n)
+  })
+
+  it('settling an exhausted scored drop twice writes exactly one refund transfer', async () => {
+    const publicId = await liveDrop({ claimCount: 2 })
+    const dropId = (await readDrop(publicId)).id
+    const fullShareClaimant = newWallet()
+    const scoredClaimant = newWallet()
+    await attachGate(dropId)
+    await grantTo(dropId, fullShareClaimant.address)
+    await grantTo(dropId, scoredClaimant.address, 600)
+    await reserveAs(publicId, fullShareClaimant)
+    await reserveAs(publicId, scoredClaimant)
+    await drainWorker()
+
+    // Genuinely concurrent, not just sequential: two calls racing the very
+    // first tick the backstop is eligible to fire on. Whichever wins the
+    // `idempotency_key`/`one_refund_per_drop` conflict, the loser's INSERT is
+    // an `ON CONFLICT DO NOTHING` no-op — never a thrown unique violation and
+    // never a second row.
+    await Promise.all([settleTerminal(pool), settleTerminal(pool)])
+    expect(await readRefunds(publicId)).toHaveLength(1)
+
+    // A second tick, before the new refund has even confirmed: the `NOT
+    // EXISTS` guard (and, redundantly, `idempotency_key`/`one_refund_per_drop`)
+    // must stop a second row from ever being written.
+    expect(await settleTerminal(pool)).toBe(0)
+    expect(await readRefunds(publicId)).toHaveLength(1)
+
+    await drainWorker()
+    expect(await settleTerminal(pool)).toBe(1)
+    expect(await readRefunds(publicId)).toHaveLength(1)
+
+    // And once terminal, settling again is the pre-existing no-op.
+    expect(await settleTerminal(pool)).toBe(0)
+    expect(await readRefunds(publicId)).toHaveLength(1)
   })
 
   it('marks refunded only after EVERY payout and the refund are confirmed', async () => {
