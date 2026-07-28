@@ -1339,7 +1339,7 @@
    the user's setting, so both must silence the page. Entrances use
    `backwards` fill, so with the animation removed every element simply rests
    in its final, fully visible state. */
-:root[data-nd-motion='off'] :is(.nd-arrive, .nd-settle, .nd-land-sky, .nd-land-bloom, .nd-land-counter, .nd-land-packet, .nd-land-packet-float),
+:root[data-nd-motion='off'] :is(.nd-arrive, .nd-settle, .nd-rise, .nd-land-sky, .nd-land-bloom, .nd-land-counter, .nd-land-packet, .nd-land-packet-float),
 :root[data-nd-motion='off'] .nd-land-glint::before {
   animation: none;
 }

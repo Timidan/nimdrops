@@ -57,21 +57,48 @@ export function motionAllowed(): boolean {
   return list === null ? false : !list.matches
 }
 
-/** The same answer, live, so switching `reduce` on mid-session takes effect. */
+/**
+ * The same answer, live, so switching `reduce` on mid-session takes effect —
+ * and so does `ui/surface.ts` flipping `data-nd-motion` mid-session, which it
+ * can: `(pointer: coarse)` is one of the signals it re-watches, so a tablet
+ * that grows a mouse changes the runtime budget after this hook has already
+ * mounted.
+ */
 export function useMotionAllowed(): boolean {
   const [allowed, setAllowed] = useState(motionAllowed)
   useEffect(() => {
-    const list = query()
-    if (!list) return
-    const settle = () => setAllowed(!list.matches)
+    // Re-derive through `motionAllowed()`, not `!list.matches` alone: the
+    // runtime budget has to survive every reconciliation below, or a
+    // low-end device with no reduced-motion preference gets Lenis back the
+    // instant one of them fires.
+    const settle = () => setAllowed(motionAllowed())
     settle()
-    if (typeof list.addEventListener === 'function') {
-      list.addEventListener('change', settle)
-      return () => list.removeEventListener('change', settle)
+
+    const offs: Array<() => void> = []
+
+    const list = query()
+    if (list) {
+      if (typeof list.addEventListener === 'function') {
+        list.addEventListener('change', settle)
+        offs.push(() => list.removeEventListener('change', settle))
+      } else {
+        // Safari <14's spelling. The WebView is the constraint.
+        list.addListener?.(settle)
+        offs.push(() => list.removeListener?.(settle))
+      }
     }
-    // Safari <14's spelling. The WebView is the constraint.
-    list.addListener?.(settle)
-    return () => list.removeListener?.(settle)
+
+    // `data-nd-motion` itself, for the reasons `motionAllowed` cannot see
+    // from a media query: device memory, core count, Data Saver.
+    if (typeof MutationObserver === 'function') {
+      const observer = new MutationObserver(settle)
+      observer.observe(document.documentElement, { attributeFilter: ['data-nd-motion'] })
+      offs.push(() => observer.disconnect())
+    }
+
+    return () => {
+      for (const off of offs) off()
+    }
   }, [])
   return allowed
 }

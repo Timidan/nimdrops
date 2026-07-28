@@ -169,6 +169,56 @@ describe('useSmoothScroll', () => {
     expect(document.documentElement.classList.contains('lenis')).toBe(false)
   })
 
+  it('does not touch the document under the runtime motion budget, even once the media query settles', () => {
+    // No preference either way — reduced motion alone would allow this — but
+    // the runtime budget (`ui/surface.ts`, a low-end device) has to win.
+    stubMotion(false)
+    stubResizeObserver()
+    document.documentElement.dataset.ndMotion = 'off'
+
+    try {
+      const { unmount } = renderHook(() => useSmoothScroll())
+
+      // The effect that reconciles with the live media query must not
+      // clobber the runtime refusal on mount.
+      expect(document.documentElement.classList.contains('lenis')).toBe(false)
+      expect(() => unmount()).not.toThrow()
+    } finally {
+      delete document.documentElement.dataset.ndMotion
+    }
+  })
+
+  it('picks up the runtime motion budget mid-session, the way it already does for reduced motion', async () => {
+    // `ui/surface.ts` re-watches `(pointer: coarse)`, so `data-nd-motion` can
+    // flip after this hook has already mounted — a media-query listener alone
+    // would miss that. The observer callback is a microtask, so the
+    // assertions after each mutation need to wait for it.
+    stubMotion(false)
+    stubResizeObserver()
+    document.documentElement.dataset.ndMotion = 'off'
+
+    try {
+      const { unmount } = renderHook(() => useSmoothScroll())
+      expect(document.documentElement.classList.contains('lenis')).toBe(false)
+
+      await act(async () => {
+        document.documentElement.dataset.ndMotion = 'on'
+        await Promise.resolve()
+      })
+      expect(document.documentElement.classList.contains('lenis')).toBe(true)
+
+      await act(async () => {
+        document.documentElement.dataset.ndMotion = 'off'
+        await Promise.resolve()
+      })
+      expect(document.documentElement.classList.contains('lenis')).toBe(false)
+
+      unmount()
+    } finally {
+      delete document.documentElement.dataset.ndMotion
+    }
+  })
+
   it('degrades to native scroll when Lenis cannot start', () => {
     stubMotion(false)
     dropResizeObserver()
