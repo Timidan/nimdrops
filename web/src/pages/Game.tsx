@@ -24,7 +24,7 @@ import { GetNimiqPay } from '../ui/OpenInApp'
  *
  * **Nothing here is built on the sealed-paper component.** Three redesign
  * directions are live and undecided and one of them removes it entirely, so
- * these screens use `Screen`, the paper and ink tokens, and the `nd-*` classes
+ * these screens use `Field`, the paper and ink tokens, and the `nd-*` classes
  * in `index.css` — all of which survive every direction. A grep of this file for
  * that component's name comes back empty, and is meant to keep doing so.
  *
@@ -214,7 +214,7 @@ function Offer({
         ) : null}
       </div>
 
-      <p data-testid="game-amount" className="nd-amount mt-6 text-center text-[2.75rem]">
+      <p data-testid="game-amount" className="nd-amount nd-num mt-6 justify-center" data-size="md">
         {amount} NIM
       </p>
       <p className="mt-3 text-center text-xs leading-relaxed text-chalk/55">
@@ -578,7 +578,7 @@ function PlayingAs({ address, onChange }: { address: string; onChange: () => voi
         type="button"
         data-testid="change-wallet"
         onClick={onChange}
-        className="shrink-0 text-xs font-semibold text-chalk/60 underline"
+        className="nd-textlink shrink-0"
       >
         Use a different wallet
       </button>
@@ -673,7 +673,7 @@ function Trivia({
                 setSubmitting(true)
                 void session.submit(index).finally(() => setSubmitting(false))
               }}
-              className="nd-quiet w-full text-left"
+              className="nd-option"
             >
               {option}
             </button>
@@ -765,7 +765,7 @@ function Countdown({ secondsLeft }: { secondsLeft: number }) {
       <div className="mt-2 h-1 w-full overflow-hidden rounded-full bg-chalk/10">
         <div
           aria-hidden="true"
-          className="h-full rounded-full bg-gold transition-[width] duration-300 ease-linear"
+          className="h-full rounded-full bg-chalk/70 transition-[width] duration-300 ease-linear"
           style={{ width: `${Math.min(100, secondsLeft * 10)}%` }}
         />
       </div>
@@ -840,7 +840,7 @@ function Passphrase({
     >
       <h1 className="text-lg font-semibold tracking-tight">Know the phrase, claim a share</h1>
       {hint ? (
-        <p data-testid="passphrase-hint" className="mt-3 border-l-2 border-gold/45 pl-4 text-sm leading-relaxed text-chalk/70">
+        <p data-testid="passphrase-hint" className="mt-3 border-l-2 border-chalk/25 pl-4 text-sm leading-relaxed text-chalk/70">
           {hint}
         </p>
       ) : null}
@@ -859,7 +859,7 @@ function Passphrase({
         autoComplete="off"
         spellCheck={false}
         onChange={(event) => setPhrase(event.target.value)}
-        className="mt-2 w-full rounded-2xl border border-chalk/12 bg-white px-4 py-3 text-base text-chalk outline-none placeholder:text-chalk/45 focus:border-gold"
+        className="nd-input mt-2"
       />
 
       <button type="submit" disabled={busy || phrase.trim() === ''} className="nd-action mt-6 w-full">
@@ -912,7 +912,7 @@ function Attested({ onCheckAgain, checking }: { onCheckAgain: () => void; checki
 function Loading() {
   return (
     <div className="flex flex-1 flex-col items-center justify-center pb-24 text-center">
-      <div className="nd-pulse h-1.5 w-16 rounded-full bg-gold" aria-hidden="true" />
+      <div className="nd-beacon nd-pulse" aria-hidden="true" />
       <p className="mt-6 text-sm text-chalk/55">Opening…</p>
     </div>
   )

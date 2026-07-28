@@ -319,6 +319,11 @@ describe('Game — trivia in play', () => {
 
     // No score, no running tally, no per-question feedback.
     expect(panel.textContent).not.toMatch(/score|correct|right so far|points/i)
+
+    // Trivia answers are the exported control, not a re-invented one.
+    const options = document.querySelectorAll('button.nd-option')
+    expect(options.length).toBeGreaterThan(0)
+    expect(document.querySelector('.bg-gold')).toBeNull()
   })
 
   it('derives the countdown from the server deadline rather than the render', async () => {
@@ -729,6 +734,15 @@ describe('Game — passphrase', () => {
     expect(form.querySelectorAll('input')).toHaveLength(1)
     expect(form.querySelectorAll('button')).toHaveLength(1)
     expect(screen.getByRole('button', { name: /check the phrase/i })).toBeTruthy()
+
+    // The system input: recessed dark well, token ink. bg-white made typed
+    // text near-white-on-white; nd-input is the fix, not a tweak to it.
+    const phrase = screen.getByLabelText('The phrase')
+    expect(phrase.className).toContain('nd-input')
+    expect(phrase.className).not.toContain('bg-white')
+    // Gold never sits on the bare field (2.74:1).
+    expect(document.querySelector('.bg-gold')).toBeNull()
+    expect(document.querySelector('[class*="border-gold"]')).toBeNull()
   })
 
   it('says "that is not it" with the tries left, and never reveals the phrase', async () => {
