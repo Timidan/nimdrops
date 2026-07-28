@@ -212,9 +212,9 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
     return answerN(svc, sessionId, correct ? 5 : 0)
   }
 
-  it('ships a ten-minute session and a ten-minute gap between attempts', () => {
+  it('ships a ten-minute session and a three-minute gap between attempts', () => {
     expect(SESSION_TTL_MINUTES).toBe(10)
-    expect(COOLDOWN_MINUTES).toBe(10)
+    expect(COOLDOWN_MINUTES).toBe(3)
   })
 
   it('ships a pass bar of three of five', () => {

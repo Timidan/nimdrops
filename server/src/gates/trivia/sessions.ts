@@ -60,12 +60,14 @@ export const SESSION_LOCK_TIMEOUT_MS = 5_000
  * previous session's `started_at`.
  *
  * This is the multiplier on the brute-force floor: guaranteed brute force is
- * 4^5 = 1024 attempts, each costing five deadlines of wall clock; a ten-minute
- * gap between attempts pushes that well past the 24-hour life of a drop. It is a
- * policy window rather than an invariant, so it lives here and not in a database
- * constraint.
+ * 4^5 = 1024 attempts, each costing five deadlines of wall clock; with pass-at-3
+ * a random guesser passes roughly once per 10 attempts and finishes in ~half an
+ * hour of 3-minute cycles, converging retries faster via the finished-session
+ * review. The owner chose reach over friction (design §5); no attempt cap ships.
+ * See docs/superpowers/specs/2026-07-28-trivia-scored-payouts-design.md §Decisions
+ * point 5 for the accepted-risk framing.
  */
-export const COOLDOWN_MINUTES = 10
+export const COOLDOWN_MINUTES = 3
 
 /**
  * A session passes at this many correct answers. Below it, failing works
@@ -405,7 +407,7 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
    * @param expectWallet when given, the session must belong to this wallet.
    *   Session ids are v4 uuids and so unguessable, but they are not secrets: they
    *   sit in URLs, referrers and access logs. Holding one used to be sufficient to
-   *   drive the session, and a single wrong answer imposes a ten-minute cooldown
+   *   drive the session, and a single wrong answer imposes a three-minute cooldown
    *   on the wallet — so a leaked id was a remote "end that player's run" button.
    *   Requiring the address does not make it secret (the client asserts it
    *   anyway); it makes the leaked id alone useless, which is the exposure.
@@ -869,8 +871,8 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
       // `in_progress` for yes. Combined with a retry serving the identical
       // question set, that let an attacker solve each question independently: at
       // most three failed sessions per question, five questions, so SIXTEEN
-      // attempts rather than 4^5 = 1024. At a ten-minute cooldown that is about
-      // two and a half hours against a twenty-four hour drop, from one address,
+      // attempts rather than 4^5 = 1024. At a three-minute cooldown that is about
+      // forty-five minutes against a twenty-four hour drop, from one address,
       // knowing none of the answers. The gate was decorative.
       //
       // Scoring only once every question is in restores the intended bound: an
