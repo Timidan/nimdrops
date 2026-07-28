@@ -151,6 +151,9 @@ describe('CloseDrop — before the wallet', () => {
     const sheet = screen.getByTestId('close-confirm')
     expect(sheet.querySelector('[data-testid="amount-hero"]')).toBeNull()
     expect(document.querySelector('.nd-money [data-testid="amount-hero"]')).not.toBeNull()
+    // The money zone sits inside the open upper field, with its gutter padding
+    // and flex, exactly like every other field-mounted amount.
+    expect(document.querySelector('.nd-upper .nd-money')).not.toBeNull()
     // Secondary actions are controls, not muted prose.
     expect(screen.getByText('Leave it running').className).toContain('nd-textlink')
   })
@@ -212,6 +215,28 @@ describe('CloseDrop — closing', () => {
     expect(screen.getByTestId('close-done').getAttribute('data-dip')).toBe('true')
     expect(screen.getByText('See the drop').className).toContain('nd-textlink')
     expect(document.querySelectorAll('h1')).toHaveLength(1)
+    // The money zone sits inside the open upper field, same as the confirm stage.
+    expect(document.querySelector('.nd-upper .nd-money')).not.toBeNull()
+  })
+
+  it('says nothing was left to send back when every share had been claimed', async () => {
+    installFetch({
+      drop: { status: 200, body: dropBody() },
+      challenge: { status: 200, body: CHALLENGE },
+      close: {
+        status: 202,
+        body: { claimedShares: 5, unclaimedShares: 0, refund: '0', refundLuna: '0' },
+      },
+    })
+    mount()
+
+    const button = await screen.findByRole('button', { name: /send back 6 NIM/i })
+    button.click()
+
+    await waitFor(() => expect(screen.getByTestId('close-done')).toBeTruthy())
+    expect(screen.getByText('nothing was left to send back')).toBeTruthy()
+    // A refund of zero has no transaction to describe as ordinary or pending.
+    expect(screen.queryByText(/sent as an ordinary transaction/i)).toBeNull()
   })
 
   it('keeps the drop running when the wallet closes without approving', async () => {

@@ -266,9 +266,18 @@ function Confirm({
   return (
     <>
       {unclaimed ? (
-        <div className="nd-money">
-          <Amount value={unclaimed} as="p" tone="ink" className="nd-amount" data-size="md" />
-          <p className="nd-moneycap">unclaimed in this drop</p>
+        <div className="nd-upper">
+          <div className="nd-money">
+            <Amount
+              value={unclaimed}
+              as="p"
+              markScale={0.46}
+              tone="ink"
+              className="nd-amount"
+              data-size={unclaimed.length <= 6 ? 'lg' : unclaimed.length <= 9 ? 'md' : 'sm'}
+            />
+            <p className="nd-moneycap">unclaimed in this drop</p>
+          </div>
         </div>
       ) : null}
       <GlassSheet
@@ -362,13 +371,22 @@ function Confirm({
 function Closed({ publicId, result }: { publicId: string; result: CloseAccepted }) {
   return (
     <>
-      <div className="nd-money">
-        <Amount value={result.refund} as="p" tone="ink" className="nd-amount" data-size="md" />
-        <p className="nd-moneycap">
-          {result.refundLuna === '0'
-            ? 'nothing was left to send back'
-            : 'on its way back to the wallet that funded this drop'}
-        </p>
+      <div className="nd-upper">
+        <div className="nd-money">
+          <Amount
+            value={result.refund}
+            as="p"
+            markScale={0.46}
+            tone="ink"
+            className="nd-amount"
+            data-size={result.refund.length <= 6 ? 'lg' : result.refund.length <= 9 ? 'md' : 'sm'}
+          />
+          <p className="nd-moneycap">
+            {result.refundLuna === '0'
+              ? 'nothing was left to send back'
+              : 'on its way back to the wallet that funded this drop'}
+          </p>
+        </div>
       </div>
       <GlassSheet
         testId="close-done"

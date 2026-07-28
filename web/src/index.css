@@ -907,18 +907,6 @@ body {
   color: var(--nd-on-surface);
 }
 
-/**
- * The gate screens (`/games`, `/game/:publicId`) put their card on chalk rather
- * than on the field, so the amount takes the chalk foreground. Without this it
- * inherits `--nd-on-surface`, which is near-white and correct everywhere else.
- *
- * `justify-content` is here because `.nd-amount` is a flex row, which a
- * `text-center` on the element cannot move.
- */
-.nd-gate-surface .nd-amount {
-  color: var(--color-chalk-ink);
-}
-
 .nd-amount[data-size='lg'] {
   font-size: clamp(2.75rem, 16cqw, 5.5rem);
 }
