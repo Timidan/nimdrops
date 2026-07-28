@@ -23,10 +23,15 @@ import { PausedError, StaleReconciliationError, lockControls } from './solvency'
  *     slot BEFORE the drop closes — in which case the refund is computed
  *     without that slot — or arrives after and is refused. There is no window
  *     where both, or neither, happen.
- *  2. **The refund is only what nobody claimed.** `(claim_count − reserved) ×
- *     amount_each_luna`, counted inside the locked transaction. Reserved value
- *     stays a claimant liability even if its payout later fails; a failed
- *     payout becomes `manual_review`, never refund capacity.
+ *  2. **The refund is only what nobody claimed, or nobody was promised.**
+ *     `claim_count × amount_each_luna − SUM(payout transfer amounts)`, counted
+ *     inside the locked transaction — the funded principal minus every payout
+ *     this drop has committed to, not a slot count times the flat share. A
+ *     scored (sub-full-share) claim leaves an unpaid remainder on a slot that
+ *     IS reserved; this formula returns that remainder too, instead of it
+ *     vanishing. Reserved value stays a claimant liability even if its payout
+ *     later fails; a failed payout becomes `manual_review`, never refund
+ *     capacity.
  *  3. **At most one refund per drop, forever.** The code checks, and
  *     `one_refund_per_drop` (a partial unique index) is the backstop that holds
  *     even if the code is wrong — hence the `ON CONFLICT DO NOTHING`: a
@@ -51,8 +56,8 @@ import { PausedError, StaleReconciliationError, lockControls } from './solvency'
  * one of them wrong. So {@link closeLiveDrop} owns the whole transaction, both
  * callers hand it a reason and (for the sponsor) an authorization hook that runs
  * under the locks, and the refund amount is derived in exactly one place: the
- * seven lines below that count reserved claims and multiply the remainder. No
- * other code in this repository computes what a drop owes back.
+ * lines below that sum committed payouts and subtract them from the funded
+ * principal. No other code in this repository computes what a drop owes back.
  */
 
 /** Design §6.1: an unfunded draft may be collected after this long. */
@@ -289,14 +294,34 @@ export async function closeLiveDrop(
       [dropId],
     )
     const reservedClaims = counted[0].reserved
-    // THE refund amount. Counted inside the locked transaction, from the row
-    // this transaction holds: every slot nobody reserved, and not one that
-    // somebody did. `Math.max` is belt and braces — the claims table cannot
-    // hold more rows than `claim_count`, because `reserveClaim` refuses at the
-    // ceiling under this same lock — but a negative multiplier here would be an
-    // invented refund, so it is not left to that argument alone.
+    // `unclaimedSlots` stays a plain slot COUNT — the shape callers already read
+    // it as — even though it no longer drives the money below.
     const unclaimed = Math.max(0, drop.claim_count - reservedClaims)
-    const unallocatedLuna = BigInt(unclaimed) * BigInt(drop.amount_each_luna)
+
+    const { rows: committed } = await client.query<{ paid_luna: string }>(
+      `SELECT COALESCE(SUM(amount_luna), 0)::TEXT AS paid_luna
+       FROM outgoing_transfers
+       WHERE drop_id = $1 AND purpose = 'payout'`,
+      [dropId],
+    )
+    // THE refund amount. Funded principal minus every payout this drop has
+    // committed to, counted inside the locked transaction. On a drop with no
+    // scored grants this equals `unclaimed × amount_each_luna` exactly — every
+    // reserved claim pays its full share, so `SUM(payout amounts)` is just
+    // `reservedClaims × amount_each_luna`. With a scored (sub-full-share) claim
+    // it ALSO returns that slot's unpaid remainder: a slot nobody claimed and a
+    // slot claimed for less than its full share are refunded the same way,
+    // because both are luna the drop funded and nothing has been promised for.
+    // `> 0n ? … : 0n` is belt and braces, not the load-bearing guarantee: a
+    // payout can never exceed its slot's full share (`gate_grants`' permille
+    // CHECK constraint) and payout rows can never outnumber `claim_count`
+    // (`reserveClaim` refuses at the ceiling under this same lock), so the
+    // subtraction cannot go negative on this code path — but an invented refund
+    // from corrupted data would be worse than a clamped zero, so it is not left
+    // to that argument alone.
+    const refundBeforeClamp =
+      BigInt(drop.claim_count) * BigInt(drop.amount_each_luna) - BigInt(committed[0].paid_luna)
+    const unallocatedLuna = refundBeforeClamp > 0n ? refundBeforeClamp : 0n
 
     if (unallocatedLuna > 0n && !drop.refund_address) {
       // A live drop always has the verified funding sender recorded, so this is

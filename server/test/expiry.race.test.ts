@@ -5,6 +5,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { FakeChain } from '../src/chain/fake'
 import type { ChainClient } from '../src/chain/types'
 import { migrate } from '../src/db/migrate'
+import { issueGrant } from '../src/gates/grants'
 import type { AlertKind, Alerts } from '../src/services/alerts'
 import { ClaimRejectedError, issueChallenge, reserveClaim } from '../src/services/claims'
 import { createDraft, submitFunding } from '../src/services/drops'
@@ -187,6 +188,33 @@ async function reserveOne(publicId: string): Promise<string> {
   return claim.claimId
 }
 
+/** Reserve one slot for a SPECIFIC wallet — needed once a grant names an address. */
+async function reserveAs(publicId: string, wallet: Wallet): Promise<string> {
+  const issued = await issueChallenge(pool, publicId)
+  const claim = await reserveClaim(pool, {
+    publicId,
+    challengeId: issued.challengeId,
+    publicKeyHex: wallet.publicKeyHex,
+    signatureHex: wallet.sign(issued.message),
+    idemKey: randomUUID(),
+    requestHash: `request-${randomUUID()}`,
+  })
+  return claim.claimId
+}
+
+/** Attach a gate to a drop so a claim needs a grant to go through. */
+async function attachGate(dropId: string, kind = 'passphrase'): Promise<void> {
+  await pool.query(`INSERT INTO drop_gates (drop_id, kind, config) VALUES ($1, $2, '{}'::jsonb)`, [
+    dropId,
+    kind,
+  ])
+}
+
+/** Issue a grant the way a real kind does — through `issueGrant`, not raw SQL. */
+async function grantTo(dropId: string, walletAddress: string, payoutPermille?: number): Promise<void> {
+  await issueGrant(pool, { dropId, walletAddress, kind: 'passphrase', payoutPermille })
+}
+
 // ---- reads -------------------------------------------------------------------
 
 interface DropRow {
@@ -365,6 +393,43 @@ describe.skipIf(!hasDb)('expiry, exact refunds, settlement and draft GC (real Po
     // Every luna is accounted for exactly once: 3 payouts + 1 refund = principal.
     const total = (await readTransfers(publicId)).reduce((sum, t) => sum + BigInt(t.amount_luna), 0n)
     expect(total).toBe(AMOUNT_EACH * BigInt(CLAIM_COUNT))
+  })
+
+  /**
+   * A scored (sub-full-share) claim leaves an unpaid remainder on its own slot —
+   * a slot that IS reserved, so `unclaimedSlots × amountEach` cannot see it. The
+   * sweeper's refund has to be the funded principal minus every payout actually
+   * committed, or that remainder vanishes instead of returning to the sponsor
+   * (the same fix `closeLiveDrop` needs for the sponsor's own early close, since
+   * both paths are the one implementation in this file).
+   */
+  it('refunds the funded principal minus the scored payout on an expired drop', async () => {
+    const publicId = await liveDrop({ claimCount: 3 })
+    const dropId = (await readDrop(publicId)).id
+    const claimant = newWallet()
+    await attachGate(dropId)
+    await grantTo(dropId, claimant.address, 600)
+    await reserveAs(publicId, claimant)
+    await expireNow(publicId)
+
+    expect(await sweepExpiry(pool, alerts)).toBe(1)
+
+    const scoredPayout = (AMOUNT_EACH * 600n) / 1000n
+    const transfers = await readTransfers(publicId)
+    const payouts = transfers.filter((t) => t.purpose === 'payout')
+    const refunds = transfers.filter((t) => t.purpose === 'refund')
+
+    expect(payouts).toHaveLength(1)
+    expect(payouts[0].amount_luna).toBe(scoredPayout.toString())
+
+    // `unclaimedSlots × amountEach` would say `AMOUNT_EACH * 2n` (200_000):
+    // wrong, because it ignores the 40_000 luna unpaid on the reserved slot.
+    expect(refunds).toHaveLength(1)
+    expect(refunds[0].amount_luna).toBe((AMOUNT_EACH * 3n - scoredPayout).toString())
+
+    // Every luna accounted for exactly once, including the unpaid remainder.
+    const total = transfers.reduce((sum, t) => sum + BigInt(t.amount_luna), 0n)
+    expect(total).toBe(AMOUNT_EACH * 3n)
   })
 
   /**

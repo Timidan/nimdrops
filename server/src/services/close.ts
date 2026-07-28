@@ -123,7 +123,13 @@ export interface CloseDropResult {
   reservedClaims: number
   /** Shares nobody took. Zero means the drop was full and nothing is refunded. */
   unclaimedSlots: number
-  /** `unclaimedSlots × amount_each_luna`, heading back to the funding address. */
+  /**
+   * The funded principal minus every payout this drop has committed to
+   * (`claim_count × amount_each_luna − SUM(payout amounts)`), heading back to
+   * the funding address. Equals `unclaimedSlots × amount_each_luna` when every
+   * reserved claim paid its full share; on a scored (sub-full-share) claim it
+   * also returns that slot's unpaid remainder.
+   */
   refundLuna: bigint
 }
 
