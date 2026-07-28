@@ -91,7 +91,8 @@ describe('what a stranger is told', () => {
     mount()
     const h1s = document.querySelectorAll('h1')
     expect(h1s).toHaveLength(1)
-    expect(h1s[0]!.textContent).toMatch(/one link/i)
+    expect(h1s[0]!.textContent).toMatch(/real nim/i)
+    expect(h1s[0]!.textContent).toMatch(/from a link, or from five questions/i)
   })
   it('carries the app-store block for a reader with no Nimiq Pay', () => {
     installStats({ body: TINY })
@@ -368,28 +369,34 @@ describe('the trivia section describes a capability, not a running feature', () 
     expect(gate()).toBeTruthy()
   })
 
-  it('states the mechanics the design fixes', () => {
+  it('states the mechanics, all of which now exist', () => {
     installStats({ body: TINY })
     mount()
     const text = gate()!.textContent ?? ''
     expect(text).toMatch(/five questions, four options/i)
     expect(text).toMatch(/one at a time/i)
     expect(text).toMatch(/stamped and timed by the server/i)
-    expect(text).toMatch(/never which answer was wrong/i)
+    // Both of these replaced claims that were true of the first implementation
+    // and false by the time it shipped.
+    expect(text).toMatch(/never one a wallet has already seen/i)
+    expect(text).toMatch(/whether you got it/i)
   })
 
-  it('says on its face that nothing is running', () => {
+  /**
+   * The two sentences this page used to carry about trivia, pinned as absent.
+   *
+   * It said "Designed, not running yet" and "you are told a run failed, never
+   * which answer was wrong". The gate runs on mainnet and a finished session
+   * returns the verdict and the right option, so both were advertising the
+   * product as less than it is — the failure mode nobody goes looking for.
+   */
+  it('no longer claims trivia is unbuilt or silent about answers', () => {
     installStats({ body: TINY })
     mount()
-    expect(gate()!.textContent).toMatch(/designed, not running yet/i)
-  })
-
-  it('sends nobody anywhere: the section holds no link and no button', () => {
-    installStats({ body: TINY })
-    mount()
-    const section = gate()!
-    expect(section.querySelectorAll('a')).toHaveLength(0)
-    expect(section.querySelectorAll('button')).toHaveLength(0)
+    const text = document.body.textContent ?? ''
+    expect(text).not.toMatch(/not running yet/i)
+    expect(text).not.toMatch(/never which answer was wrong/i)
+    expect(text).not.toMatch(/no answers given back/i)
   })
 
   it('leaves the unmeasured figure unmeasured', async () => {

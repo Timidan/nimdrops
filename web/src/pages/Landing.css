@@ -204,6 +204,19 @@
   transition: transform var(--nd-t-press) var(--nd-ease-exit);
 }
 
+.nd-land-doors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+/* Each door takes an equal share of the row and never collapses below a
+   comfortable tap target. `1 1 10rem` rather than `1 1 0` so a long label wraps
+   instead of squeezing its neighbour to nothing. */
+.nd-land-doors > * {
+  flex: 1 1 10rem;
+}
+
 .nd-land-ctanote {
   margin: 0.75rem 0 0;
   font-size: 0.8125rem;
@@ -722,20 +735,6 @@
   margin: 0.875rem 0 0;
   font-size: 0.9375rem;
   line-height: 1.6;
-  color: var(--nd-on-surface-muted);
-}
-
-.nd-land-gate-head > .nd-land-gate-flag {
-  display: inline-flex;
-  align-items: center;
-  margin: 0 0 0.875rem;
-  padding: 0.3125rem 0.625rem;
-  border: 1px dashed var(--nd-rule-strong);
-  border-radius: 999px;
-  font-size: 0.75rem;
-  font-weight: 650;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
   color: var(--nd-on-surface-muted);
 }
 

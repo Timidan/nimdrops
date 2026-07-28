@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useState, type CSSProperties } from 'react'
-import { Link } from 'react-router-dom'
 import { getStats, type PublicStats, type StatKey } from '../api'
 import {
   ClaimIcon,
@@ -9,12 +8,14 @@ import {
   QuestionMarkIcon,
   RefundReturnIcon,
   ShareIcon,
+  SuccessCheckIcon,
   WalletIcon,
   type IconComponent,
 } from '../ui/icons'
 import { NimMark } from '../ui/Nim'
 import NimDropsPhotograph from '../ui/NimDropsPhotograph'
 import { GetNimiqPay } from '../ui/OpenInApp'
+import AppDoor from '../ui/AppDoor'
 import './Landing.css'
 
 interface Row {
@@ -206,7 +207,7 @@ const GATE_FACTS: { icon: IconComponent; title: string; body: string }[] = [
   {
     icon: QuestionMarkIcon,
     title: 'Five questions, four options',
-    body: 'One at a time, the next only after the last is committed.',
+    body: 'One at a time, the next after the last is committed.',
   },
   {
     icon: ClockExpiryIcon,
@@ -214,23 +215,38 @@ const GATE_FACTS: { icon: IconComponent; title: string; body: string }[] = [
     body: 'Stamped and timed by the server, not your device.',
   },
   {
-    icon: CustodyShieldIcon,
-    title: 'No answers given back',
-    body: 'You are told a run failed, never which answer was wrong.',
+    icon: RefundReturnIcon,
+    title: 'Never the same question twice',
+    body: 'Never one a wallet has already seen.',
+  },
+  {
+    icon: SuccessCheckIcon,
+    title: 'You find out how you did',
+    body: 'Afterwards: every question, and whether you got it.',
   },
 ]
 
-/** Trivia is designed, not built. Nothing here may read as an invitation. */
+/**
+ * The trivia entrance.
+ *
+ * This section used to carry a "Designed, not running yet" flag and the claim
+ * that no answers are given back. Both were true of the first implementation and
+ * neither survived it: the gate runs on mainnet, and a finished session returns
+ * every question with the player's choice, the verdict, and — for a bank whose
+ * answers are already published, which the shipped one is — the right option.
+ *
+ * A landing page that undersells the feature it exists to explain is worse than
+ * one that oversells it, because nobody goes looking for the correction.
+ */
 function TriviaBeat() {
   return (
     <section className="nd-land-sec nd-land-gate" aria-labelledby="gate">
       <div className="nd-land-wrap nd-land-gate-in">
         <div className="nd-land-gate-head nd-rise">
-          <p className="nd-land-gate-flag">Designed, not running yet</p>
-          <h2 id="gate">Some drops ask first</h2>
+          <h2 id="gate">Answer five questions</h2>
           <p>
-            A drop can hold its share behind five questions. Answer all five for the same fixed
-            share as everyone else.
+            Some drops hold their share behind five questions. Get them all and the share is the
+            same as everyone else&rsquo;s. Twelve hundred questions, four difficulties.
           </p>
         </div>
 
@@ -245,6 +261,7 @@ function TriviaBeat() {
             </div>
           ))}
         </dl>
+
       </div>
     </section>
   )
@@ -284,13 +301,9 @@ export default function Landing() {
           <p className="nd-land-brand nd-arrive" style={{ '--nd-in': '0ms' } as CSSProperties}>
             NimDrops
           </p>
-          <Link
-            to="/create"
-            className="nd-land-topcta nd-arrive"
-            style={{ '--nd-in': '70ms' } as CSSProperties}
-          >
-            Create a drop
-          </Link>
+          <span className="nd-arrive" style={{ '--nd-in': '70ms' } as CSSProperties}>
+            <AppDoor to="/games" label="Find a game" tone="secondary" />
+          </span>
         </div>
       </header>
 
@@ -302,24 +315,33 @@ export default function Landing() {
                 className="nd-land-h1-a nd-arrive"
                 style={{ '--nd-in': '150ms' } as CSSProperties}
               >
-                One link.
+                Real NIM.
               </span>
+              {/* Both entrances in the headline, because the page is read by
+                  people who have a link and by people who have neither a link
+                  nor any NIM to give away. */}
               <span
                 className="nd-land-h1-b nd-arrive"
                 style={{ '--nd-in': '260ms' } as CSSProperties}
               >
-                A fixed share of NIM for everyone who opens it.
+                From a link, or from five questions.
               </span>
             </h1>
             <p className="nd-land-lede nd-arrive" style={{ '--nd-in': '370ms' } as CSSProperties}>
-              A sponsor funds once in Nimiq Pay and gets one link. Everyone who opens it signs for
-              the same amount: one share per wallet, first come, first served.
+              A sponsor funds once and gets one link: a fixed share of NIM for everyone who opens
+              it. One share per wallet, first come, first served.
             </p>
+            {/* Two doors, and the earning one leads. This page exists for
+                somebody who arrived WITHOUT a link (PRODUCT.md), and that person
+                has no NIM to give away — so "fund a giveaway" is the wrong first
+                ask. Both are deeplinks: the page is a web explainer whose job is
+                to hand the visitor to the mini app. */}
             <div className="nd-land-cta nd-arrive" style={{ '--nd-in': '470ms' } as CSSProperties}>
-              <Link to="/create" className="nd-action">
-                Create a drop
-              </Link>
-              <p className="nd-land-ctanote">Signed in Nimiq Pay. No sign-up.</p>
+              <div className="nd-land-doors">
+                <AppDoor to="/games" label="Find a game" tone="primary" />
+                <AppDoor to="/create" label="Send a drop" tone="secondary" />
+              </div>
+              <p className="nd-land-ctanote">Opens in Nimiq Pay. No sign-up.</p>
             </div>
           </div>
 
@@ -427,9 +449,7 @@ export default function Landing() {
         <div className="nd-land-wrap nd-land-foot-in">
           <div className="nd-land-foot-copy">
             <p className="nd-land-foot-line">NimDrops runs inside Nimiq Pay as a mini app.</p>
-            <Link to="/create" className="nd-quiet nd-land-foot-cta">
-              Create a drop
-            </Link>
+            <AppDoor to="/create" label="Send a drop" tone="secondary" />
           </div>
           <GetNimiqPay />
         </div>
