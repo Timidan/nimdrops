@@ -267,7 +267,7 @@ function Confirm({
     <>
       {unclaimed ? (
         <div className="nd-money">
-          <Amount value={unclaimed} as="p" className="nd-amount" data-size="md" />
+          <Amount value={unclaimed} as="p" tone="ink" className="nd-amount" data-size="md" />
           <p className="nd-moneycap">unclaimed in this drop</p>
         </div>
       ) : null}
@@ -363,7 +363,7 @@ function Closed({ publicId, result }: { publicId: string; result: CloseAccepted 
   return (
     <>
       <div className="nd-money">
-        <Amount value={result.refund} as="p" className="nd-amount" data-size="md" />
+        <Amount value={result.refund} as="p" tone="ink" className="nd-amount" data-size="md" />
         <p className="nd-moneycap">
           {result.refundLuna === '0'
             ? 'nothing was left to send back'
