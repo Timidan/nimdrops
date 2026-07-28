@@ -10,6 +10,7 @@ import Drop from './pages/Drop'
 import Game from './pages/Game'
 import Games from './pages/Games'
 import Landing from './pages/Landing'
+import LandingNext from './pages/LandingNext'
 import Preview from './pages/Preview'
 import Spike from './pages/Spike'
 
@@ -49,6 +50,9 @@ export function AppRoutes() {
         Sponsors reach the form at `/create`.
       */}
       <Route path="/" element={<Landing />} />
+      {/* The rebuilt landing page, alongside the current one so the two can be
+          compared. One of them goes when that comparison is settled. */}
+      <Route path="/next" element={<LandingNext />} />
       <Route path="/create" element={<Create />} />
       <Route path="/drop/:publicId" element={<Drop />} />
       {/*

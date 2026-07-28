@@ -1,0 +1,548 @@
+/* ===========================================================================
+ * LIQUID GLASS — the brand register's surface, and its display voice
+ * ===========================================================================
+ *
+ * `PRODUCT.md` splits the product in two. The claim screen and the create flow
+ * are **product**: design there serves the transaction. The landing page at the
+ * root is **brand**: it has no job except to explain what NimDrops is to
+ * someone who arrived without a link. This file is the brand register's half of
+ * the surface system — a pair of glass panels and one display typeface — and it
+ * is deliberately a SEPARATE stylesheet from `index.css` so that importing it
+ * is a per-route decision rather than a global cost.
+ *
+ * Everything here extends `index.css` and nothing here competes with it. The
+ * fallback chain is the same chain, in the same order, keyed off the same
+ * runtime switch; the tokens are the same tokens; the blur is drawn from the
+ * same budget. What is new is exactly one technique — a gradient stroke drawn
+ * with a masked pseudo-element — and one typeface.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THESE CLASSES ARE NOT CALLED `.nd-glass`
+ * ---------------------------------------------------------------------------
+ *
+ * The brief asked for `.nd-glass` (subtle) and `.nd-glass-strong`. `.nd-glass`
+ * is already taken: it is the claim screen's card in `index.css`, and it is not
+ * a free name. It carries that card's geometry (padding, a top-only border, a
+ * split radius, a container-query column form at 54rem) and, decisively, its
+ * `::before` is ALREADY SPOKEN FOR — it is the sheet's grab handle. The
+ * gradient stroke below needs `::before` too. Redefining `.nd-glass` here would
+ * therefore not "extend" that card, it would silently delete its handle and
+ * re-pad the surface that hands out money, from a file the card's own tests do
+ * not read.
+ *
+ * So the pair is `.nd-glass-subtle` and `.nd-glass-strong`, which reads as the
+ * same family, collides with nothing, and leaves `.nd-glass` meaning what it
+ * has always meant. `glass.test.ts` asserts the two names are distinct from it.
+ *
+ * ---------------------------------------------------------------------------
+ * THE BLUR BUDGET, AND WHAT THIS FILE IS ALLOWED TO SPEND
+ * ---------------------------------------------------------------------------
+ *
+ * `index.css` states the rule this file inherits: `backdrop-filter` over a
+ * MOVING backdrop is the expensive case, because the blurred region is
+ * recomposited whenever anything behind it changes, and the bill is
+ * proportional to how many layers move rather than to how large they are. The
+ * claim path spends that budget on exactly one bounded element.
+ *
+ * Three things keep this file inside the same budget rather than beside it:
+ *
+ *   1. It is gated on the SAME runtime switch. Blur is applied only under
+ *      `:root[data-nd-glass='on']`, which `ui/surface.ts` sets — and clears for
+ *      reduced transparency, for Data Saver, and for a coarse-pointer device
+ *      reporting <=4 GiB or <=4 cores. The low-end Android in the risk
+ *      assessment never pays for anything below.
+ *   2. The subtle variant blurs 4px, not 40. A small radius over a small box is
+ *      close to free; the cost that matters is the re-read, and a nav bar or a
+ *      chip re-reads a few hundred square pixels.
+ *   3. The strong variant is a LANDING-PAGE surface. The usage rule, which CSS
+ *      cannot enforce and a reviewer must: one strong panel over the drifting
+ *      bloom at a time. Stacking six of them down a scrolling page is how this
+ *      technique becomes the jank it is famous for. If a page needs six, the
+ *      page needs the bloom paused, not more blur.
+ *
+ * ---------------------------------------------------------------------------
+ * CONTRAST IS COMPUTED, NEVER EYEBALLED
+ * ---------------------------------------------------------------------------
+ *
+ * Same rule, same method, same arithmetic as `ui/surface.contrast.test.ts`: the
+ * worst case is the brightest pixel the field can physically reach
+ * (`--nd-field-max`, `#bb431d`, which is the base radial's lightest stop plus
+ * the counter-light plus the bloom's core at its post-claim peak plus a fully
+ * lit grain pixel), pushed through `saturate()` the way `backdrop-filter` does,
+ * with the panel's fill composited over it at its THINNER end. Blur is not
+ * modelled and does not need to be — averaging can only move a pixel towards
+ * the mean, so the brightest unblurred pixel bounds the brightest blurred one.
+ *
+ * What that arithmetic decided, rather than what taste suggested:
+ *
+ *   `.nd-glass-strong`  near-white 9.87:1, secondary copy 4.96:1, Nimiq gold
+ *                       5.76:1. Everything is legal on it, which is why it is
+ *                       the one that may carry a paragraph.
+ *   `.nd-glass-subtle`  near-white 5.33:1 — BETTER than the 4.70:1 the bare
+ *                       field gives, because the fill subtracts light rather
+ *                       than adding it. Secondary copy is 3.04:1 and gold is
+ *                       3.11:1, so neither belongs there. The subtle panel is
+ *                       for full-strength labels and hairlines. It is a shape,
+ *                       not a page.
+ *
+ * Every fallback path is DARKER than the glass path it replaces (15.2:1 and
+ * 16.5:1 against 9.9:1), so degrading can only improve a ratio. That is not a
+ * coincidence, it is the direction the fallbacks were chosen in, and
+ * `glass.test.ts` asserts it pair by pair rather than trusting it.
+ * ======================================================================== */
+
+/* ===========================================================================
+ * The display face
+ * ===========================================================================
+ *
+ * Instrument Serif, italic, self-hosted, one file.
+ *
+ * The problem it solves is narrow and real: the product self-hosts exactly one
+ * family, and Mulish is a good UI sans and a flat headline. A landing page
+ * whose only hierarchy is "the same face, larger and heavier" reads as a
+ * template — `PRODUCT.md` names SaaS landing scaffolding as an anti-reference,
+ * and undifferentiated headings are the typographic half of that. Pairing for
+ * CONTRAST rather than similarity is the whole point: a serif headline over a
+ * sans body reads as deliberate where two near-identical sans-serifs read as a
+ * mistake.
+ *
+ * Italic, and only italic, on purpose. It is the single cheapest way to buy a
+ * voice — one 22 kB file — and Instrument Serif's italic has genuine
+ * personality in the ampersand, the `g` and the `y` where its roman is
+ * comparatively ordinary. It is also self-limiting: an italic display face is
+ * obviously wrong for body copy, for a button, and above all for the amount, so
+ * the constraint that keeps this to headings is built into the artefact rather
+ * than written in a comment nobody reads.
+ *
+ * Licensing: SIL Open Font License 1.1, and the licence travels with the file
+ * as `public/fonts/instrument-serif-OFL.txt`, exactly as `mulish-OFL.txt` does.
+ *
+ * SELF-HOSTED, with no Google Fonts `<link>`, and this is not a preference.
+ * The app runs inside the Nimiq Pay WebView on somebody's phone. A third-party
+ * font request there is a render-blocking dependency on a host we do not
+ * control, on a network we do not control, subject to a CSP we do not control —
+ * and it hands a third party a request-time log of every claimant. `index.css`
+ * already self-hosts Mulish for the same reason; this file does not weaken it.
+ *
+ * `font-display: swap`, matching Mulish's declaration. Text invisible for three
+ * seconds is worse than text in the fallback face for one frame. The swap
+ * cannot move anything VERTICALLY, because `.nd-display` sets a unitless
+ * line-height and a unitless line-height makes a box's height a multiple of its
+ * font-size rather than a function of the font's own metrics. It can reflow a
+ * heading horizontally, since Instrument Serif is a good deal narrower than
+ * Georgia — acceptable on a landing headline, and the reason this face is kept
+ * away from anything on the claim path.
+ *
+ * `unicode-range` is the latin subset's, copied from the subset the file
+ * actually contains. The latin-ext companion is deliberately NOT shipped: this
+ * face styles landing headings, which are our own English copy, whereas the
+ * text that is routinely not English is sponsor-supplied and renders in Mulish,
+ * which does ship latin-ext. Anything outside the range below falls through to
+ * the sans stack instead of dragging a second file down a phone connection.
+ *
+ * NOT preloaded, and the justification is the one preload actually requires —
+ * that the file is needed for the first paint of the route being loaded.
+ * `index.html` is shared by every route, so a preload there would fetch this on
+ * the claim path, where it is never used, to save a few hundred milliseconds on
+ * a page whose headline is legible in the fallback face the entire time. When
+ * the landing page gets its own document, or a route-level `<link rel=preload>`
+ * that only renders there, it earns one. Not before.
+ */
+@font-face {
+  font-family: 'Instrument Serif';
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url('/fonts/instrument-serif-latin-italic.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215,
+    U+FEFF, U+FFFD;
+}
+
+:root {
+  /**
+   * The display stack. Every name after the first is a concrete face or the
+   * generic, for the same reason `--font-sans` excludes `system-ui`: a token
+   * whose meaning the host decides is a token that resolved to a monospace face
+   * in review. `ui-serif` is first among the fallbacks because on iOS it is New
+   * York, which is a far closer match to Instrument Serif than Georgia is.
+   */
+  --nd-font-display: 'Instrument Serif', ui-serif, Georgia, 'Times New Roman', serif;
+
+  /* ---- the glass --------------------------------------------------------
+   *
+   * Two radii of blur, and the gap between them is the point. 4px is a frosting
+   * that lets you read what is behind it; 44px destroys the backdrop entirely
+   * and leaves only its light. There is nothing useful in between — a 16px
+   * panel is a 4px panel that costs more — so the system offers the two ends
+   * and no dial.
+   */
+  --nd-lg-blur: 4px;
+  --nd-lg-blur-strong: 44px;
+
+  /**
+   * The fills. Both SUBTRACT light, and on this palette that is the only
+   * direction with headroom in it: the field's brightest pixel is a lit
+   * vermilion, so a near-white lift there would take contrast down, not up.
+   * `index.css` reached the same conclusion for its fact tiles
+   * (`--nd-recess-field`) and its card (`--nd-barrier-*`); this is that rule
+   * applied to a landing surface.
+   *
+   * Literal `rgb(… / α)` rather than `rgb(from var(--color-field) …)`. Relative
+   * colour syntax is Chrome 119 / Safari 16.4 and up, and a WebView that does
+   * not know it drops the whole declaration — which would take the fill with it
+   * and leave transparent glass carrying text. `index.css` refuses it for the
+   * bloom for exactly this reason.
+   *
+   * `--nd-lg-fill` is `--color-field` (#0e0a09) lifted two points, at 14%: the
+   * thinnest fill that still holds near-white above 5:1 through the saturate.
+   * The strong pair is a gradient, thicker at the top where a panel catches
+   * more of the light, and 56% at its thin end — four points over the claim
+   * card's 52%, because that card sits at the foot of the field where the bloom
+   * is behind it, while a landing panel can sit anywhere including on the core.
+   */
+  --nd-lg-fill: rgb(12 7 6 / 0.14);
+  --nd-lg-fill-strong-top: rgb(30 20 18 / 0.62);
+  --nd-lg-fill-strong-bottom: rgb(26 17 15 / 0.56);
+
+  /**
+   * The gradient stroke.
+   *
+   * A real edge does not have one brightness. Light rakes across the top of a
+   * pane and pools again at the bottom lip, and the sides catch almost nothing;
+   * a uniform 1px outline is a drawn rectangle, which is what every generated
+   * glass card in the world looks like. Three stops rather than two, and the
+   * bottom is dimmer than the top because the bounce is always weaker than the
+   * source.
+   *
+   * `--nd-lg-edge-mid` is not zero. A literally transparent middle makes the
+   * left and right edges of a large panel dissolve into the field, which reads
+   * as a rendering bug rather than as glass; 2% is below the threshold of
+   * "there is a line here" and above the threshold of "the shape has a side".
+   * Chalk-tinted rather than pure white, matching `--nd-rule`, because a cool
+   * white edge on a warm field reads as a screen artefact.
+   *
+   * 1.4px, not 1px: the mask leaves the ring exactly as wide as the padding,
+   * and at 1 device pixel a gradient across a 1px band has nowhere to be a
+   * gradient. 1.4 gives it two rows on a 2x screen without reading as a border.
+   */
+  --nd-lg-stroke: 1.4px;
+  --nd-lg-edge-lit: rgb(245 240 238 / 0.5);
+  --nd-lg-edge-mid: rgb(245 240 238 / 0.02);
+  --nd-lg-edge-foot: rgb(245 240 238 / 0.26);
+
+  /**
+   * The lit top of the edge, catching the bloom, drawn INSIDE the box where the
+   * stroke is drawn on it. Pure white at 10% and not chalk: this one is a
+   * specular highlight rather than a material colour, and a specular highlight
+   * takes the colour of the light source, not of the surface.
+   */
+  --nd-lg-highlight: rgb(255 255 255 / 0.1);
+
+  /**
+   * Where Nimiq gold is allowed to appear on a glass panel, and it is one place
+   * only. Gold is 5.76:1 on `.nd-glass-strong`, 3.11:1 on `.nd-glass-subtle`
+   * and 2.74:1 on the bare field. The middle number clears the 3:1 non-text
+   * floor by eleven hundredths, which is not a margin, it is a rounding error
+   * with a hopeful expression — so the answer for the subtle panel is no, the
+   * same answer `index.css` gives for the field. This token exists so that a
+   * landing page reaching for the brand colour finds the arithmetic first.
+   */
+  --nd-lg-accent-ok: var(--color-gold);
+}
+
+/* ===========================================================================
+ * The display class
+ * ======================================================================== */
+
+/**
+ * Headings only. Never the amount, never a button, never body copy.
+ *
+ * `font-weight: 400` is load-bearing rather than tidy. `h1`–`h6` default to
+ * bold, and exactly one weight of this face is loaded, so an unpinned heading
+ * asks the browser for a bold that does not exist and gets a synthesised smear
+ * at 60px. Pinning the weight is also why `font-synthesis` is left alone here:
+ * the failure mode it would guard against is already gone, and switching it off
+ * globally would erase a nested `<em>` or `<b>` in a subheading instead.
+ *
+ * `line-height: 1.05` because display type at 3rem+ needs the lines to close
+ * up, and UNITLESS because that is what makes the box's height a multiple of
+ * its font-size — which is what lets `font-display: swap` land without moving
+ * anything vertically. `text-wrap: balance` because a two-line headline with
+ * one word on the second line is the most common typographic tell of a page
+ * nobody looked at.
+ *
+ * `-0.005em` of tracking, which is nearly nothing, because Instrument Serif is
+ * already tightly fitted; the usual "large type wants negative tracking" advice
+ * is calibrated for grotesques and over-applied here would close the counters.
+ */
+.nd-display {
+  font-family: var(--nd-font-display);
+  font-style: italic;
+  font-weight: 400;
+  line-height: 1.05;
+  letter-spacing: -0.005em;
+  text-wrap: balance;
+}
+
+/**
+ * Selection, on the one surface in the product that is allowed a voice.
+ *
+ * Chalk on chalk-ink is 16.64:1 — the pairing `index.css` already uses for the
+ * action button — so highlighting a headline stays more legible than the
+ * headline was, which is the only test a `::selection` rule has to pass.
+ */
+.nd-display::selection {
+  background-color: var(--color-chalk);
+  color: var(--color-chalk-ink);
+}
+
+/* ===========================================================================
+ * The glass panels
+ * ===========================================================================
+ *
+ * THE FALLBACK CHAIN, and it is the same chain `index.css` runs, in the same
+ * order, for the same reasons:
+ *
+ *   base rule              nearly opaque. This is what a renderer with NO
+ *                          `backdrop-filter` gets, and it gets it by default
+ *                          rather than by a `@supports not (…)` that restates
+ *                          the same fact in the opposite direction and can
+ *                          drift out of agreement with it. Progressive
+ *                          enhancement is not a style preference here: it is
+ *                          the only arrangement where a renderer nobody
+ *                          anticipated still lands on the legible path.
+ *   @supports + data-on    the glass. Additive, and gated twice.
+ *   prefers-reduced-       solid. Reduce Transparency means SOLID, not "a bit
+ *   transparency           less blur"; halving an opacity is the reading that
+ *                          misses what the setting is for.
+ *   [data-nd-glass='off']  solid. The runtime kill switch, set by
+ *                          `ui/surface.ts`. Redundant with the gate above — the
+ *                          `'on'` selector simply stops matching — and declared
+ *                          anyway, because the cost is four lines and the
+ *                          failure it guards against is a money screen washing
+ *                          out on a device that already said it could not
+ *                          afford this.
+ *
+ * Content is legible on all four, and it is MORE legible on three of them.
+ */
+
+.nd-glass-subtle,
+.nd-glass-strong {
+  position: relative;
+  border-radius: var(--nd-radius-plate);
+  /**
+   * The lit edge, drawn inside. Present on every path including the opaque
+   * ones — it is the top of a physical edge catching the light, and a solid
+   * panel has an edge too. The gradient stroke below is the outside of the
+   * same edge and is the part that needs a mask.
+   */
+  box-shadow: inset 0 1px 1px var(--nd-lg-highlight);
+  /**
+   * So an interactive panel — a nav bar going compact, a card under a pointer —
+   * gets the system's own curve for free instead of inventing one. Well under
+   * the 300ms `PRODUCT.md` allows outside the single reveal beat.
+   */
+  transition:
+    background-color var(--nd-t-state) var(--nd-ease),
+    border-color var(--nd-t-state) var(--nd-ease);
+}
+
+/**
+ * Subtle: a chip, a pill, a nav bar, a badge over the field. Full-strength ink
+ * and hairlines only — 3.04:1 is what secondary copy would get here, so
+ * secondary copy goes on the strong panel or on a recess.
+ *
+ * Its opaque form is `--color-field` rather than `--color-sheet`. A chip whose
+ * fallback is the card's dark plate stops being a chip and becomes a block; the
+ * page's own base colour plus a hairline keeps the shape reading as the same
+ * shape on every path, and at 15:1+ for near-white there is no contrast
+ * argument against it.
+ */
+.nd-glass-subtle {
+  border: 1px solid var(--nd-rule);
+  background-color: var(--color-field);
+}
+
+/**
+ * Strong: the one panel that may carry a paragraph. Secondary copy is 4.96:1
+ * and Nimiq gold is 5.76:1 on it, so the whole ink system is legal here.
+ *
+ * The flat fill is a GRADIENT and reuses the claim card's own barrier tokens,
+ * so the two surfaces degrade to within a hair of each other instead of to two
+ * different darks. `border-bottom` is not dropped the way the card's is — that
+ * card is anchored to the foot of the field and has no bottom edge to draw;
+ * this one is a free-floating object and needs all four sides.
+ */
+.nd-glass-strong {
+  border: 1px solid var(--nd-rule);
+  border-radius: var(--nd-radius-sheet);
+  background-image: linear-gradient(var(--nd-barrier-flat-top), var(--nd-barrier-flat-bottom));
+}
+
+/* ---------------------------------------------------------------------------
+ * The gradient stroke
+ * ---------------------------------------------------------------------------
+ *
+ * The technique this file exists to introduce, and the reason the panels have a
+ * `::before` at all.
+ *
+ * The problem: `border-image` cannot follow `border-radius`, and a gradient
+ * `background` on the element itself is behind the content rather than around
+ * it. So the ring is drawn as a filled, radius-inheriting pseudo-element and
+ * then its own middle is CUT OUT: two identical masks, one clipped to the
+ * content box and one to the border box, composited with `xor`/`exclude`. What
+ * survives is exactly the padding — a 1.4px band that follows every corner
+ * perfectly and carries a gradient along its length, which no `border` can do.
+ *
+ * `@supports` around it is not decoration. Without the mask this pseudo-element
+ * is a filled rectangle sitting ON TOP of the panel's content, which on a
+ * landing page is a headline that has vanished — the exact class of failure
+ * `PRODUCT.md` calls a visual costume. A renderer that cannot cut the hole does
+ * not get the ring; it keeps the plain `1px solid var(--nd-rule)` border the
+ * base rules already gave it, which is the same hairline `index.css` draws on
+ * the claim card. Both prefixes are tested because Firefox implements
+ * `mask-composite: exclude` and not `-webkit-mask-composite`, and WebKit the
+ * other way round; both properties are then declared for the same reason.
+ *
+ * `pointer-events: none` because the ring covers the panel's whole footprint as
+ * far as hit-testing is concerned, and a decorative edge must never eat a tap
+ * on a 44px target underneath it.
+ */
+@supports ((-webkit-mask-composite: xor) or (mask-composite: exclude)) {
+  .nd-glass-subtle::before,
+  .nd-glass-strong::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    border-radius: inherit;
+    padding: var(--nd-lg-stroke);
+    background: linear-gradient(
+      180deg,
+      var(--nd-lg-edge-lit) 0%,
+      var(--nd-lg-edge-mid) 34%,
+      var(--nd-lg-edge-mid) 66%,
+      var(--nd-lg-edge-foot) 100%
+    );
+    -webkit-mask:
+      linear-gradient(#fff 0 0) content-box,
+      linear-gradient(#fff 0 0);
+    mask:
+      linear-gradient(#fff 0 0) content-box,
+      linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    pointer-events: none;
+  }
+
+  /**
+   * The stroke replaces the hairline rather than doubling it. Two edges 1.4px
+   * apart is a bevel, and a bevel is the thing that makes glass look like 2013.
+   */
+  .nd-glass-subtle,
+  .nd-glass-strong {
+    border-color: transparent;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * The glass itself
+ * ---------------------------------------------------------------------------
+ *
+ * Gated twice: on the browser being able to do it at all, and on the runtime
+ * having decided this device should. `ui/surface.ts` owns the second gate and
+ * clears it for reduced transparency, Data Saver, and low-end hardware, so the
+ * phone in the risk assessment gets the opaque panels above and pays nothing.
+ *
+ * `saturate(var(--nd-saturate))` is 120%, and that number is a computed ceiling
+ * rather than a taste: `index.css` measured that 160% pushes the field's
+ * brightest pixel to `#f63600` with the blue channel clipped flat, which takes
+ * secondary copy on the card UNDER its floor. The same backdrop is behind these
+ * panels, so the same ceiling applies, and the contrast figures quoted at the
+ * top of this file are computed through it.
+ */
+@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :root[data-nd-glass='on'] .nd-glass-subtle {
+    background-color: var(--nd-lg-fill);
+    -webkit-backdrop-filter: blur(var(--nd-lg-blur)) saturate(var(--nd-saturate));
+    backdrop-filter: blur(var(--nd-lg-blur)) saturate(var(--nd-saturate));
+  }
+
+  :root[data-nd-glass='on'] .nd-glass-strong {
+    background-image: linear-gradient(
+      var(--nd-lg-fill-strong-top),
+      var(--nd-lg-fill-strong-bottom)
+    );
+    -webkit-backdrop-filter: blur(var(--nd-lg-blur-strong)) saturate(var(--nd-saturate));
+    backdrop-filter: blur(var(--nd-lg-blur-strong)) saturate(var(--nd-saturate));
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * Reduce Transparency
+ * ---------------------------------------------------------------------------
+ *
+ * Solid, and the gradient stroke goes back to being a hairline with it. A
+ * masked gradient edge is not transparency in the compositing sense, but it is
+ * transparency in the sense the SETTING means: an edge whose brightness varies
+ * because it is pretending to catch light off something behind it. Somebody who
+ * has asked for less of that has asked for less of this too.
+ *
+ * `ui/surface.ts` flips `data-nd-glass` on the same media query, so the runtime
+ * and the stylesheet cannot disagree about which path is live.
+ */
+@media (prefers-reduced-transparency: reduce) {
+  .nd-glass-subtle,
+  .nd-glass-strong {
+    background-image: none;
+    border-color: var(--nd-rule);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+
+  /* Each keeps the opaque colour its own base rule chose, so a panel does not
+     change which object it is depending on a system setting. */
+  .nd-glass-subtle {
+    background-color: var(--color-field);
+  }
+
+  .nd-glass-strong {
+    background-color: var(--color-sheet);
+  }
+
+  .nd-glass-subtle::before,
+  .nd-glass-strong::before {
+    display: none;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * The kill switch
+ * ---------------------------------------------------------------------------
+ *
+ * `ui/surface.ts` clears `data-nd-glass` before the first paint when the device
+ * cannot afford this. Redundant with the `'on'` gate — which stops matching —
+ * and declared explicitly anyway, so that the opaque path is a rule somebody
+ * can read and a test can assert, rather than an absence.
+ */
+:root[data-nd-glass='off'] .nd-glass-subtle,
+:root[data-nd-glass='off'] .nd-glass-strong {
+  background-image: none;
+  border-color: var(--nd-rule);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+:root[data-nd-glass='off'] .nd-glass-subtle {
+  background-color: var(--color-field);
+}
+
+:root[data-nd-glass='off'] .nd-glass-strong {
+  background-color: var(--color-sheet);
+}
+
+:root[data-nd-glass='off'] .nd-glass-subtle::before,
+:root[data-nd-glass='off'] .nd-glass-strong::before {
+  display: none;
+}

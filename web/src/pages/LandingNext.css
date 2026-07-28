@@ -1,0 +1,407 @@
+/**
+ * The rebuilt landing page.
+ *
+ * Two full-height sections and nothing else. The page it replaces had four
+ * sections sharing one 0.8fr/1.2fr split and one padding rhythm, which is what
+ * made it read as competent rather than considered — a single beat repeated
+ * until it stopped. Here the hero is a stage and the second section is a grid,
+ * and they are allowed to look like different kinds of thing.
+ *
+ * Every blurred surface comes from `ui/glass.css` and inherits its fallbacks:
+ * no `backdrop-filter`, `prefers-reduced-transparency: reduce`, and the runtime
+ * `data-nd-glass='off'` switch all land on a near-opaque panel. Nothing here
+ * re-implements that.
+ */
+
+.nd-next {
+  position: relative;
+  display: block;
+  min-height: 100dvh;
+  background: var(--color-field, #0e0a09);
+  color: var(--nd-on-surface, #f5f0ee);
+  /* The WebView is the constraint: a phone's notch and home indicator are the
+     page's edges, not the viewport's. */
+  padding-inline: env(safe-area-inset-left) env(safe-area-inset-right);
+  overflow: clip;
+}
+
+/* ---------------------------------------------------------------- the stage */
+
+.nd-next-hero {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 100dvh;
+  padding-block: calc(env(safe-area-inset-top) + 1rem) 3rem;
+}
+
+.nd-next-sky {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  /* Behind the content, above the field. */
+  z-index: 0;
+}
+
+/* One light source. It is the only thing on the page allowed to be soft-edged,
+   which is what lets the glass edges read as precise by contrast. */
+.nd-next-bloom {
+  position: absolute;
+  top: -18%;
+  left: 50%;
+  width: min(120vmax, 68rem);
+  aspect-ratio: 1;
+  translate: -50% 0;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle at 50% 50%,
+    rgb(214 74 26 / 0.5) 0%,
+    rgb(160 48 16 / 0.26) 34%,
+    rgb(90 26 10 / 0.1) 56%,
+    transparent 72%
+  );
+  filter: blur(38px);
+}
+
+.nd-next-hero-in,
+.nd-next-nav {
+  position: relative;
+  z-index: 1;
+  width: min(100% - 2.5rem, 68rem);
+  margin-inline: auto;
+}
+
+/* ---------------------------------------------------------------------- nav */
+
+.nd-next-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.nd-next-mark {
+  display: grid;
+  place-items: center;
+  width: 2.75rem;
+  height: 2.75rem;
+  border-radius: 50%;
+  font-size: 1.5rem;
+  line-height: 1;
+}
+
+.nd-next-pill {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.3125rem;
+  border-radius: 999px;
+}
+
+.nd-next-navlink {
+  padding: 0.5rem 0.75rem;
+  border-radius: 999px;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--nd-on-surface, #f5f0ee);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+/* The nav's links are a convenience on a page this short; on a phone the two
+   doors below are the whole navigation and these only take room from them. */
+@media (max-width: 46rem) {
+  .nd-next-navlink {
+    display: none;
+  }
+}
+
+.nd-next-navcta {
+  min-height: 2.25rem;
+  padding-inline: 1rem;
+  font-size: 0.875rem;
+}
+
+/* --------------------------------------------------------------- hero copy */
+
+.nd-next-hero-in {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  padding-block: 3rem 1rem;
+  text-align: left;
+}
+
+.nd-next-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4375rem 0.875rem;
+  border-radius: 999px;
+  font-size: 0.8125rem;
+  font-weight: 500;
+}
+
+/* Not a status light — the page cannot know the deployment's health from here.
+   It is a bullet, and it says so by never changing. */
+.nd-next-badge-dot {
+  width: 0.375rem;
+  height: 0.375rem;
+  border-radius: 50%;
+  background: var(--nd-accent, #e9b213);
+}
+
+.nd-next-h1 {
+  margin: 1.25rem 0 0;
+  max-width: 18ch;
+  font-size: clamp(2.75rem, 11vw, 5.5rem);
+  font-style: italic;
+  font-weight: 400;
+  line-height: 0.92;
+  letter-spacing: -0.03em;
+  text-wrap: balance;
+}
+
+.nd-next-lede {
+  margin: 1.25rem 0 0;
+  max-width: 46ch;
+  font-size: clamp(0.9375rem, 2.4vw, 1.0625rem);
+  font-weight: 300;
+  line-height: 1.55;
+  color: var(--nd-on-surface-muted, rgb(245 240 238 / 0.72));
+  text-wrap: pretty;
+}
+
+.nd-next-doors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 1.75rem;
+  width: 100%;
+  max-width: 26rem;
+}
+
+.nd-next-doors > * {
+  flex: 1 1 10rem;
+}
+
+.nd-next-note {
+  margin: 0.75rem 0 0;
+  font-size: 0.8125rem;
+  color: var(--nd-on-surface-muted, rgb(245 240 238 / 0.72));
+}
+
+/* ------------------------------------------------------------ the two facts */
+
+.nd-next-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.875rem;
+  margin-top: 2.25rem;
+}
+
+.nd-next-card {
+  flex: 1 1 15rem;
+  max-width: 20rem;
+  padding: 1.125rem;
+  border-radius: 1.25rem;
+}
+
+.nd-next-card-k {
+  margin: 0.875rem 0 0;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--nd-on-surface-muted, rgb(245 240 238 / 0.72));
+}
+
+/* The address is the point, so it gets the room. `break-all` rather than
+   `anywhere`: this is an identifier, and a reader checking it against an
+   explorer needs every character, wrapped wherever it must be. */
+.nd-next-card-v {
+  margin: 0.375rem 0 0;
+  font-size: 0.9375rem;
+  font-weight: 500;
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+  word-break: break-all;
+}
+
+.nd-next-card-v.nd-display {
+  font-size: 2rem;
+  font-style: italic;
+  line-height: 1;
+  word-break: normal;
+}
+
+.nd-next-card-n {
+  margin: 0.625rem 0 0;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+  color: var(--nd-on-surface-muted, rgb(245 240 238 / 0.72));
+}
+
+/* ----------------------------------------------------------- the instrument */
+
+.nd-next-manifold {
+  position: relative;
+  z-index: 1;
+  width: min(100% - 2.5rem, 30rem);
+  margin: 2rem auto 0;
+}
+
+@media (min-width: 62rem) {
+  /* On a wide screen it stops being a footnote and becomes the hero's right
+     half, which is the only width where both can be read at once. */
+  .nd-next-manifold {
+    position: absolute;
+    top: 50%;
+    right: max(2rem, calc((100% - 68rem) / 2));
+    width: min(34vw, 26rem);
+    margin: 0;
+    translate: 0 -50%;
+  }
+
+  .nd-next-h1,
+  .nd-next-lede,
+  .nd-next-cards {
+    max-width: 34rem;
+  }
+}
+
+/* -------------------------------------------------------------- second act */
+
+.nd-next-cap {
+  position: relative;
+  z-index: 1;
+  width: min(100% - 2.5rem, 68rem);
+  margin-inline: auto;
+  padding-block: clamp(4rem, 10vw, 7rem) 3rem;
+  border-top: 1px solid var(--nd-rule, rgb(245 240 238 / 0.1));
+}
+
+.nd-next-eyebrow {
+  margin: 0;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  color: var(--nd-on-surface-muted, rgb(245 240 238 / 0.72));
+}
+
+.nd-next-h2 {
+  margin: 1rem 0 0;
+  font-size: clamp(2.25rem, 8vw, 4.5rem);
+  font-style: italic;
+  font-weight: 400;
+  line-height: 0.95;
+  letter-spacing: -0.025em;
+}
+
+.nd-next-cap-lede {
+  margin: 1rem 0 0;
+  max-width: 46ch;
+  font-size: 1rem;
+  font-weight: 300;
+  line-height: 1.55;
+  color: var(--nd-on-surface-muted, rgb(245 240 238 / 0.72));
+}
+
+.nd-next-grid {
+  display: grid;
+  gap: 1rem;
+  margin-top: 3rem;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+@media (min-width: 52rem) {
+  .nd-next-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+.nd-next-cap-card {
+  display: flex;
+  flex-direction: column;
+  gap: 2.5rem;
+  min-height: 20rem;
+  padding: 1.25rem;
+  border-radius: 1.25rem;
+}
+
+.nd-next-cap-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.nd-next-cap-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 0.75rem;
+}
+
+.nd-next-tags {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.375rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.nd-next-tag {
+  padding: 0.25rem 0.625rem;
+  border-radius: 999px;
+  font-size: 0.6875rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.nd-next-cap-foot {
+  margin-top: auto;
+}
+
+.nd-next-cap-title {
+  margin: 0;
+  font-size: clamp(1.75rem, 3.4vw, 2.25rem);
+  font-style: italic;
+  font-weight: 400;
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
+
+.nd-next-cap-body {
+  margin: 0.75rem 0 0;
+  max-width: 34ch;
+  font-size: 0.875rem;
+  font-weight: 300;
+  line-height: 1.5;
+  color: var(--nd-on-surface-muted, rgb(245 240 238 / 0.72));
+}
+
+/* --------------------------------------------------------------------- foot */
+
+.nd-next-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1.25rem;
+  margin-top: 4rem;
+  padding-top: 1.75rem;
+  padding-bottom: env(safe-area-inset-bottom);
+  border-top: 1px solid var(--nd-rule, rgb(245 240 238 / 0.1));
+}
+
+.nd-next-foot-line {
+  margin: 0;
+  font-size: 0.875rem;
+  color: var(--nd-on-surface-muted, rgb(245 240 238 / 0.72));
+}
