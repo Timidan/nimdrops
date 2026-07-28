@@ -1702,10 +1702,16 @@ export class FloatAttestationError extends Error {}
  *
  * Two conditions, both fail-closed:
  *
- *  1. every attested deposit must name the chain this process is bound to; and
- *  2. `operator_float_luna` must equal the sum of those deposits — otherwise the
- *     books credit float that no deposit backs, which is what deleting the
- *     foreign rows and forgetting the number would leave behind.
+ *  1. every attested deposit AND every attested withdrawal must name the chain
+ *     this process is bound to; and
+ *  2. `operator_float_luna` must equal deposits minus withdrawals — the float is
+ *     what came in and was attested, less what verifiably left (migration 022).
+ *
+ * The withdrawal half was missing at first and the omission was found in the
+ * final pre-deploy review, one step from production: `float lower` reduced the
+ * declared float below gross deposits, this guard compared against gross
+ * deposits only, and the next boot of BOTH processes refused to start. The
+ * command built to unstick a paused deployment would have bricked it instead.
  *
  * Deliberately NOT inside `ensureChainBinding`: `recover.ts` binds through that
  * path, and the recovery CLI is the tool an operator fixes this with. A guard
@@ -1715,36 +1721,48 @@ export async function assertFloatAttestationIntact(
   pool: Pool,
   network: NetworkName,
 ): Promise<void> {
-  const { rows: foreign } = await pool.query<{ n: number; networks: string | null }>(
-    `SELECT count(*)::int AS n, string_agg(DISTINCT network, ', ') AS networks
-     FROM operator_float_deposits
-     WHERE network <> $1`,
+  const { rows: foreign } = await pool.query<{
+    deposits: number
+    withdrawals: number
+    networks: string | null
+  }>(
+    `SELECT
+       (SELECT count(*)::int FROM operator_float_deposits WHERE network <> $1) AS deposits,
+       (SELECT count(*)::int FROM operator_float_withdrawals WHERE network <> $1) AS withdrawals,
+       (SELECT string_agg(DISTINCT network, ', ')
+        FROM (SELECT network FROM operator_float_deposits WHERE network <> $1
+              UNION SELECT network FROM operator_float_withdrawals WHERE network <> $1) f
+       ) AS networks`,
     [network],
   )
-  if (foreign[0].n > 0) {
+  const foreignRows = foreign[0].deposits + foreign[0].withdrawals
+  if (foreignRows > 0) {
     throw new FloatAttestationError(
-      `${foreign[0].n} operator float deposit(s) on this database were proven on ` +
+      `${foreignRows} operator float row(s) on this database were proven on ` +
         `${foreign[0].networks} but this process is bound to ${network}. Refusing to start: that ` +
-        'money is not in this custody wallet, and the solvency invariant would authorise real ' +
+        'history is not this custody wallet\'s, and the solvency invariant would authorise real ' +
         'payouts against it. A mainnet run starts on a fresh database. If this database is being ' +
-        'reused on purpose, delete the foreign rows from operator_float_deposits, set ' +
-        'operator_float_luna to 0, and re-attest with "float set <luna> --tx <hash>" against a ' +
-        'deposit on this chain.',
+        'reused on purpose, delete the foreign rows from operator_float_deposits and ' +
+        'operator_float_withdrawals, set operator_float_luna to 0, and re-attest with ' +
+        '"float set <luna> --tx <hash>" against a deposit on this chain.',
     )
   }
 
   const { rows } = await pool.query<{ attested: string; declared: string }>(
-    `SELECT (SELECT COALESCE(SUM(value_luna), 0) FROM operator_float_deposits)::text AS attested,
+    `SELECT ((SELECT COALESCE(SUM(value_luna), 0) FROM operator_float_deposits)
+             - (SELECT COALESCE(SUM(value_luna), 0) FROM operator_float_withdrawals))::text
+              AS attested,
             (SELECT operator_float_luna FROM custody_controls WHERE singleton)::text AS declared`,
   )
   const attested = BigInt(rows[0].attested)
   const declared = BigInt(rows[0].declared)
   if (attested !== declared) {
     throw new FloatAttestationError(
-      `custody_controls.operator_float_luna is ${declared} luna but the deposits backing it total ` +
-        `${attested} luna. Refusing to start: the difference is float the books credit and no ` +
-        'transaction proves. Run "float show" to see what is counted, then "float set <luna> ' +
-        '--tx <hash>" to restate it against real deposits.',
+      `custody_controls.operator_float_luna is ${declared} luna but the attested history nets to ` +
+        `${attested} luna (deposits minus withdrawals). Refusing to start: the difference is ` +
+        'float the books credit and no transaction proves. Run "float show" to see what is ' +
+        'counted, then "float set <luna> --tx <hash>" or "float lower --tx <hash> --reason ..." ' +
+        'to restate it against real transactions.',
     )
   }
 }

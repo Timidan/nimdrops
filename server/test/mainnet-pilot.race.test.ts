@@ -104,7 +104,8 @@ describe.skipIf(!hasDb)('mainnet pilot posture (real Postgres)', () => {
   beforeEach(async () => {
     await pool.query(
       `TRUNCATE transaction_attempts, outgoing_transfers, wallet_challenges, claims, drops,
-       operator_float_deposits, custody_deposit_owners, http_idempotency RESTART IDENTITY CASCADE`,
+       operator_float_deposits, operator_float_withdrawals, custody_deposit_owners,
+       http_idempotency RESTART IDENTITY CASCADE`,
     )
     await resetControls()
   })
@@ -248,5 +249,74 @@ describe.skipIf(!hasDb)('mainnet pilot posture (real Postgres)', () => {
 
   it('a genuinely fresh database passes the float guard with nothing attested', async () => {
     await expect(assertFloatAttestationIntact(pool, 'MainAlbatross')).resolves.toBeUndefined()
+  })
+
+  // ---- the float is deposits MINUS withdrawals (migration 022) ----------------
+  //
+  // Found in the final pre-deploy review, one step from production. `float
+  // lower` reduced the declared float below gross deposits; this guard compared
+  // against gross deposits only; and the next boot of BOTH entrypoints refused
+  // to start. The command built to unstick a paused deployment would have
+  // bricked it. These three cases compose the lower path with the boot guard,
+  // which is exactly the composition the lower path's own tests missed.
+
+  it('accepts a lowered float: deposits minus withdrawals, to the luna', async () => {
+    // The production shape the fix exists for: 15 NIM attested in, 2 NIM
+    // verifiably out (the smoke drop's sponsor seed), declared float 13.
+    await pool.query(
+      `INSERT INTO operator_float_deposits (tx_hash, value_luna, included_height, network)
+       VALUES ($1, 1500000, 10, 'MainAlbatross')`,
+      [OTHER_HASH],
+    )
+    await pool.query(
+      `INSERT INTO operator_float_withdrawals (tx_hash, value_luna, included_height, network, reason)
+       VALUES ('seed-tx-hash', 200000, 20, 'MainAlbatross', 'sponsor seed for smoke drop')`,
+    )
+    await pool.query('UPDATE custody_controls SET operator_float_luna = 1300000 WHERE singleton')
+
+    await expect(assertFloatAttestationIntact(pool, 'MainAlbatross')).resolves.toBeUndefined()
+  })
+
+  it('refuses a float still declared at gross deposits after a withdrawal', async () => {
+    // The bug itself, pinned: if the guard read only the deposits table, this
+    // state — withdrawal recorded, float never lowered — would pass, and the
+    // books would credit 2 NIM that verifiably left custody.
+    await pool.query(
+      `INSERT INTO operator_float_deposits (tx_hash, value_luna, included_height, network)
+       VALUES ($1, 1500000, 10, 'MainAlbatross')`,
+      [OTHER_HASH],
+    )
+    await pool.query(
+      `INSERT INTO operator_float_withdrawals (tx_hash, value_luna, included_height, network, reason)
+       VALUES ('seed-tx-hash', 200000, 20, 'MainAlbatross', 'sponsor seed for smoke drop')`,
+    )
+    await pool.query('UPDATE custody_controls SET operator_float_luna = 1500000 WHERE singleton')
+
+    await expect(assertFloatAttestationIntact(pool, 'MainAlbatross')).rejects.toBeInstanceOf(
+      FloatAttestationError,
+    )
+  })
+
+  it('refuses to start on a withdrawal attested against another chain', async () => {
+    // The mirror of the foreign-deposit case: a testnet withdrawal must not be
+    // able to lower a mainnet float any more than a testnet deposit could raise
+    // one. Same carry-over risk, opposite direction.
+    await pool.query(
+      `INSERT INTO operator_float_deposits (tx_hash, value_luna, included_height, network)
+       VALUES ($1, 1500000, 10, 'MainAlbatross')`,
+      [OTHER_HASH],
+    )
+    await pool.query(
+      `INSERT INTO operator_float_withdrawals (tx_hash, value_luna, included_height, network, reason)
+       VALUES ('foreign-out', 200000, 20, 'TestAlbatross', 'testnet history')`,
+    )
+    await pool.query('UPDATE custody_controls SET operator_float_luna = 1300000 WHERE singleton')
+
+    const err = await assertFloatAttestationIntact(pool, 'MainAlbatross').then(
+      () => null,
+      (e: unknown) => e,
+    )
+    expect(err).toBeInstanceOf(FloatAttestationError)
+    expect((err as Error).message).toContain('TestAlbatross')
   })
 })
