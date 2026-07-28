@@ -119,6 +119,15 @@ describe('motionAllowed', () => {
     stubMotion(false)
     expect(motionAllowed()).toBe(true)
   })
+
+  it('treats the runtime motion budget as a refusal', () => {
+    document.documentElement.dataset.ndMotion = 'off'
+    try {
+      expect(motionAllowed()).toBe(false)
+    } finally {
+      delete document.documentElement.dataset.ndMotion
+    }
+  })
 })
 
 /* -------------------------------------------------------------------------

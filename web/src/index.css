@@ -178,9 +178,11 @@
    * with where the bloom sits, so the base darkens away from the light instead
    * of arguing with it.
    */
-  --nd-field-image: radial-gradient(130% 120% at bottom right, #16100e 0%, #120c0b 46%, #0e0a09 100%);
+  --nd-field-image: radial-gradient(130% 120% at bottom right, var(--nd-field-base-max) 0%, var(--nd-field-base-mid) 46%, var(--nd-field-base-deep) 100%);
   /** The lightest stop of the image above. Every contrast floor starts here. */
   --nd-field-base-max: #16100e;
+  --nd-field-base-mid: #120c0b;
+  --nd-field-base-deep: #0e0a09;
 
   /**
    * ONE bloom, and a counter-light behind it.

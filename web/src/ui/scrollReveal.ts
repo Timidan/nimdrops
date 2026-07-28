@@ -48,6 +48,11 @@ function query(): MediaQueryList | null {
  * hides content in an environment we cannot measure.
  */
 export function motionAllowed(): boolean {
+  // ui/surface.ts flips this for devices that should not pay for motion.
+  // The media query below only hears the user's setting; both must refuse.
+  if (typeof document !== 'undefined' && document.documentElement.dataset.ndMotion === 'off') {
+    return false
+  }
   const list = query()
   return list === null ? false : !list.matches
 }

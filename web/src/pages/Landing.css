@@ -59,8 +59,8 @@
      rather than as a flat fill that happens to stop. */
   --edge-shade: rgb(6 3 3 / 0.44);
   /* The one warm accent, spent only where the money is. */
-  --gold-line: rgb(233 178 19 / 0.36);
-  --gold-wash: rgb(233 178 19 / 0.05);
+  --gold-line: color-mix(in srgb, var(--color-gold) 36%, transparent);
+  --gold-wash: color-mix(in srgb, var(--color-gold) 5%, transparent);
 
   position: relative;
   overflow: clip;
@@ -77,7 +77,7 @@
      lightest stop is `--nd-field-base-max` exactly, because every contrast
      floor in `surface.contrast.test.ts` starts from that number. */
   background-color: var(--color-field);
-  background-image: radial-gradient(140vw 85vh at 88% 0%, #16100e 0%, #120c0b 46%, #0e0a09 100%);
+  background-image: radial-gradient(140vw 85vh at 88% 0%, var(--nd-field-base-max) 0%, var(--nd-field-base-mid) 46%, var(--nd-field-base-deep) 100%);
   color: var(--nd-on-surface);
   /* Light text on a dark field: subpixel AA over-thickens it. */
   -webkit-font-smoothing: antialiased;
@@ -208,11 +208,9 @@
   color: var(--nd-on-surface);
 }
 
-/* The masthead door and the (currently unused) hand-rolled pill share one
-   shape. `.nd-quiet` from index.css is a 3.25rem full-width sheet control,
-   which is the wrong object in a header — this is the pill it should be here,
-   and it holds whichever of the two markups the page carries. */
-.nd-land .nd-land-topcta,
+/* The masthead door's shape. `.nd-quiet` from index.css is a 3.25rem
+   full-width sheet control, which is the wrong object in a header — this is
+   the pill it should be here instead. */
 .nd-land-top-in .nd-action,
 .nd-land-top-in .nd-quiet {
   display: inline-flex;
@@ -233,7 +231,6 @@
   white-space: nowrap;
 }
 
-.nd-land .nd-land-topcta:hover,
 .nd-land-top-in .nd-action:hover,
 .nd-land-top-in .nd-quiet:hover {
   border-color: rgb(245 240 238 / 0.5);
@@ -483,7 +480,6 @@
 .nd-land-how,
 .nd-land-gate,
 .nd-land-figures,
-.nd-land-plain,
 .nd-land-foot {
   border-top: 1px solid var(--crease-dark);
   box-shadow: inset 0 1px 0 var(--crease-lit);
@@ -796,166 +792,6 @@
   }
 }
 
-/* ---- the custody disclosure --------------------------------------------
- *
- * The one elevated surface on the page, and the only blurred one.
- *
- * Glass is defensible here for the reason index.css gives and nowhere else:
- * exactly ONE bounded element is ever blurred, never the page. It earns the
- * elevation because "NimDrops holds the NIM" is the sentence a stranger has to
- * read before signing anything, and this is the page's only surface that comes
- * FORWARD instead of receding.
- *
- * It is also the safe place for it. The bloom's mask ends at 62% of the sky, so
- * the backdrop behind this panel is static: a blurred region only re-reads its
- * backdrop when something behind it moves, and nothing behind this does. Three
- * fallbacks, in the order index.css established: no `backdrop-filter` support,
- * Reduce Transparency, and the runtime's own `data-nd-glass='off'` for a
- * low-memory phone — each lands on the same opaque sheet.
- */
-
-.nd-land-plain {
-  padding-block: clamp(2.5rem, 6.5vw, 4.75rem);
-}
-
-.nd-land-plain-in {
-  display: grid;
-  gap: clamp(1.25rem, 3vw, 3rem);
-  padding: clamp(1.375rem, 3.2vw, 2.5rem);
-  border: 1px solid rgb(245 240 238 / 0.12);
-  border-radius: var(--nd-radius-sheet);
-  background-color: var(--color-sheet);
-  box-shadow:
-    inset 0 1px 0 rgb(255 238 228 / 0.1),
-    0 1.5rem 3.5rem -1.5rem rgb(0 0 0 / 0.8);
-}
-
-@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-  .nd-land-plain-in {
-    background-color: rgb(28 18 16 / 0.62);
-    -webkit-backdrop-filter: blur(16px) saturate(115%);
-    backdrop-filter: blur(16px) saturate(115%);
-  }
-}
-
-/* Reduce Transparency means SOLID, not "a bit less blur". */
-@media (prefers-reduced-transparency: reduce) {
-  .nd-land-plain-in {
-    background-color: var(--color-sheet);
-    -webkit-backdrop-filter: none;
-    backdrop-filter: none;
-  }
-}
-
-/* `ui/surface.ts` sets this on a coarse pointer with low memory or few cores. */
-:root[data-nd-glass='off'] .nd-land-plain-in {
-  background-color: var(--color-sheet);
-  -webkit-backdrop-filter: none;
-  backdrop-filter: none;
-}
-
-.nd-land-plain-head {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 1rem;
-}
-
-.nd-land-plain-mark {
-  display: grid;
-  place-items: center;
-  flex: 0 0 auto;
-  width: 2.75rem;
-  height: 2.75rem;
-  border: 1px solid var(--nd-rule-strong);
-  border-radius: 50%;
-  background-color: var(--nd-recess-field);
-  box-shadow: inset 0 1px 0 var(--lip);
-  color: var(--nd-accent);
-}
-
-.nd-land-plain-lead {
-  max-width: 40ch;
-  margin: 0;
-  font-size: var(--t-lead);
-  font-weight: 500;
-  line-height: 1.45;
-  letter-spacing: -0.014em;
-  color: var(--nd-on-surface);
-  text-wrap: pretty;
-}
-
-.nd-land-plain-more {
-  margin-top: 1.25rem;
-}
-
-.nd-land-plain-more > summary {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.5rem;
-  min-height: 2.75rem;
-  padding-inline-end: 0.25rem;
-  color: var(--nd-on-surface);
-  font-size: var(--t-body);
-  font-weight: 650;
-  cursor: pointer;
-  list-style: none;
-  text-underline-offset: 0.25em;
-  text-decoration: underline;
-  text-decoration-thickness: from-font;
-  text-decoration-color: rgb(245 240 238 / 0.3);
-}
-
-.nd-land-plain-more > summary::-webkit-details-marker {
-  display: none;
-}
-
-.nd-land-plain-more > summary::before {
-  content: '';
-  width: 0.5rem;
-  height: 0.5rem;
-  border-right: 1.5px solid var(--nd-accent);
-  border-bottom: 1.5px solid var(--nd-accent);
-  transform: rotate(45deg) translate(-0.0625rem, -0.0625rem);
-}
-
-.nd-land-plain-more[open] > summary::before {
-  transform: rotate(-135deg) translate(-0.125rem, -0.125rem);
-}
-
-.nd-land-plain-more > summary:hover {
-  text-decoration-color: var(--nd-on-surface);
-}
-
-.nd-land-plain-more > summary:focus-visible {
-  outline: 2px solid var(--nd-accent);
-  outline-offset: 3px;
-  border-radius: 0.25rem;
-}
-
-.nd-land-plain-detail {
-  padding-top: 0.625rem;
-}
-
-.nd-land-plain-detail > p {
-  max-width: 60ch;
-  margin: 0;
-  font-size: var(--t-body);
-  line-height: 1.65;
-  color: var(--nd-on-surface-muted);
-}
-
-.nd-land-plain-detail > p + p {
-  margin-top: 0.875rem;
-}
-
-@media (min-width: 60rem) {
-  .nd-land-plain-in {
-    grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
-    align-items: start;
-  }
-}
-
 /* ---- footer ------------------------------------------------------------- */
 
 /* The page sinks at the end rather than stopping. One static gradient, and it
@@ -980,9 +816,7 @@
   color: var(--nd-on-surface-muted);
 }
 
-/* Whether the footer door carries `.nd-land-foot-cta` or is a bare `AppDoor`,
-   it needs to stop being a full-bleed sheet control down here. */
-.nd-land .nd-land-foot-cta,
+/* The footer door needs to stop being a full-bleed sheet control down here. */
 .nd-land-foot-copy > .nd-action,
 .nd-land-foot-copy > .nd-quiet {
   display: flex;
@@ -1361,9 +1195,7 @@
     transition-duration: var(--nd-t-press);
   }
 
-  .nd-land .nd-land-topcta,
   .nd-land-top-in .nd-quiet,
-  .nd-land .nd-land-foot-cta,
   .nd-land-foot-copy > .nd-quiet {
     transition:
       border-color var(--nd-t-state) var(--nd-ease),
@@ -1371,9 +1203,7 @@
       transform var(--nd-t-press) var(--nd-ease-exit);
   }
 
-  .nd-land .nd-land-topcta:active,
   .nd-land-top-in .nd-quiet:active,
-  .nd-land .nd-land-foot-cta:active,
   .nd-land-foot-copy > .nd-quiet:active {
     transform: scale(0.96);
   }
@@ -1420,16 +1250,6 @@
   /* Composed with the optical nudge above, not replacing it. */
   .nd-land-gate-facts > div:hover dt svg {
     transform: translateY(0.1875rem) scale(1.2) rotate(8deg);
-  }
-
-  /* The custody disclosure. The caret's OPEN position is a plain state rule, so
-     with motion off it still flips — it just stops sweeping there. */
-  .nd-land-plain-more > summary {
-    transition: text-decoration-color var(--nd-t-state) var(--nd-ease);
-  }
-
-  .nd-land-plain-more > summary::before {
-    transition: transform var(--nd-t-state) var(--nd-ease);
   }
 }
 
@@ -1478,14 +1298,6 @@
       --rise-y: 34px;
       --rise-s: 0.985;
     }
-
-    /* Translate only, no scale. This is the page's one `backdrop-filter`
-       element, and a blurred region being scaled while it samples its backdrop
-       is where engines disagree. The offset is the legible part anyway. */
-    .nd-land-plain-in {
-      --rise-y: 58px;
-      --rise-s: 1;
-    }
   }
 }
 
@@ -1520,4 +1332,14 @@
   .nd-land-packet-float {
     will-change: auto;
   }
+}
+
+/* The runtime budget. `ui/surface.ts` flips this attribute for devices that
+   should not pay for motion; the reduced-motion media query above only hears
+   the user's setting, so both must silence the page. Entrances use
+   `backwards` fill, so with the animation removed every element simply rests
+   in its final, fully visible state. */
+:root[data-nd-motion='off'] :is(.nd-arrive, .nd-settle, .nd-land-sky, .nd-land-bloom, .nd-land-counter, .nd-land-packet, .nd-land-packet-float),
+:root[data-nd-motion='off'] .nd-land-glint::before {
+  animation: none;
 }
