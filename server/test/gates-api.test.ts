@@ -586,6 +586,10 @@ describe.skipIf(!hasDb)('gate HTTP surface', () => {
     // wasCorrect is not `answerIndex === correctIndex`. Without wasLate a player
     // who picked the right option one second late is shown their own correct
     // answer labelled "not correct", which reads as a scoring bug.
+    //
+    // Four of the five answers land correct and on time, one lands correct-but-
+    // late (counted wrong) — a 4/5 score, which clears PASS_MIN_CORRECT and
+    // passes at 800 permille rather than failing.
     const publicId = await game()
     const sessionId = await startSession(publicId)
     const bank = testBank()
@@ -616,7 +620,7 @@ describe.skipIf(!hasDb)('gate HTTP surface', () => {
       'SELECT state FROM trivia_sessions WHERE id = $1',
       [sessionId],
     )
-    expect(finished[0].state).toBe('failed')
+    expect(finished[0].state).toBe('passed')
   })
 
   it('answers 500 for an operator misconfiguration, not 4xx', async () => {

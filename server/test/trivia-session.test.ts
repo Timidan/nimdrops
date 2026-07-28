@@ -6,6 +6,7 @@ import { issueGrant } from '../src/gates/grants'
 import { type Bank, parseBank } from '../src/gates/trivia/bank'
 import {
   COOLDOWN_MINUTES,
+  PASS_MIN_CORRECT,
   SESSION_TTL_MINUTES,
   makeTrivia,
   parseTriviaConfig,
@@ -179,11 +180,15 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
       ])
     ).rows[0].state
 
-  /** Answer the whole set, using the bank's own answer indices as the truth. */
-  async function answerAll(
+  /**
+   * Answer the set with exactly `correctCount` of five right, truth-first: the
+   * first `correctCount` questions delivered are answered correctly, the rest
+   * wrong. `answerAll` is the two extremes of this (5 and 0).
+   */
+  async function answerN(
     svc: ReturnType<typeof service>,
     sessionId: string,
-    correct: boolean,
+    correctCount: number,
   ) {
     const bank = testBank()
     let last!: Awaited<ReturnType<typeof svc.submitAnswer>>
@@ -191,16 +196,29 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
       const q = await svc.currentQuestion(sessionId)
       const id = (await questionIds(sessionId))[q.questionIndex]
       const truth = bank.questions.find((x) => x.id === id)!.answerIndex
-      const answer = correct ? truth : (truth + 1) % 4
+      const answer = i < correctCount ? truth : (truth + 1) % 4
       last = await svc.submitAnswer(sessionId, q.questionIndex, answer)
       if (last.state !== 'in_progress') break
     }
     return last
   }
 
+  /** Answer the whole set, using the bank's own answer indices as the truth. */
+  async function answerAll(
+    svc: ReturnType<typeof service>,
+    sessionId: string,
+    correct: boolean,
+  ) {
+    return answerN(svc, sessionId, correct ? 5 : 0)
+  }
+
   it('ships a ten-minute session and a ten-minute gap between attempts', () => {
     expect(SESSION_TTL_MINUTES).toBe(10)
     expect(COOLDOWN_MINUTES).toBe(10)
+  })
+
+  it('ships a pass bar of three of five', () => {
+    expect(PASS_MIN_CORRECT).toBe(3)
   })
 
   it('starts a session with the configured shape', async () => {
@@ -696,6 +714,54 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
     expect(rows[0].count).toBe('0')
   })
 
+  it('passes at three correct and grants 600 permille', async () => {
+    const svc = service()
+    const gate = await gateFor()
+    const s = await svc.startOrResume(gate, PLAYER)
+    const outcome = await answerN(svc, s.sessionId, 3)
+
+    expect(outcome).toMatchObject({ state: 'passed', correctCount: 3 })
+    const { rows } = await pool.query<{ payout_permille: number }>(
+      'SELECT payout_permille FROM gate_grants WHERE drop_id = $1 AND wallet_address = $2',
+      [gate.dropId, PLAYER],
+    )
+    expect(rows[0].payout_permille).toBe(600)
+  })
+
+  it('grants 800 permille at four correct', async () => {
+    const svc = service()
+    const gate = await gateFor()
+    const s = await svc.startOrResume(gate, PLAYER)
+    const outcome = await answerN(svc, s.sessionId, 4)
+
+    expect(outcome).toMatchObject({ state: 'passed', correctCount: 4 })
+    const { rows } = await pool.query<{ payout_permille: number }>(
+      'SELECT payout_permille FROM gate_grants WHERE drop_id = $1 AND wallet_address = $2',
+      [gate.dropId, PLAYER],
+    )
+    expect(rows[0].payout_permille).toBe(800)
+  })
+
+  it('fails at two correct', async () => {
+    const svc = service()
+    const s = await svc.startOrResume(await gateFor(), PLAYER)
+    const outcome = await answerN(svc, s.sessionId, 2)
+    expect(outcome.state).toBe('failed')
+  })
+
+  it('grants 1000 permille for a perfect run', async () => {
+    const svc = service()
+    const gate = await gateFor()
+    const s = await svc.startOrResume(gate, PLAYER)
+    await answerAll(svc, s.sessionId, true)
+
+    const { rows } = await pool.query<{ payout_permille: number }>(
+      'SELECT payout_permille FROM gate_grants WHERE drop_id = $1 AND wallet_address = $2',
+      [gate.dropId, PLAYER],
+    )
+    expect(rows[0].payout_permille).toBe(1000)
+  })
+
   it('records a late answer as wrong and lets play continue', async () => {
     const svc = service()
     const s = await svc.startOrResume(await gateFor(), PLAYER)
@@ -726,9 +792,12 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
     await expect(svc.currentQuestion(s.sessionId)).resolves.toMatchObject({ questionIndex: 1 })
   })
 
-  it('fails a session at the end when one answer was late', async () => {
+  it('still passes at four correct when one answer was late, at 800 permille', async () => {
+    // Four right, one right-but-late (counted wrong): a 4/5 score, which clears
+    // `PASS_MIN_CORRECT` and pays 800 permille rather than the full share.
     const svc = service()
-    const s = await svc.startOrResume(await gateFor(), PLAYER)
+    const gate = await gateFor()
+    const s = await svc.startOrResume(gate, PLAYER)
     const bank = testBank()
     for (let i = 0; i < 5; i += 1) {
       const q = await svc.currentQuestion(s.sessionId)
@@ -748,13 +817,13 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
       }
       const outcome = await svc.submitAnswer(s.sessionId, q.questionIndex, truth)
       if (i < 4) expect(outcome.state).toBe('in_progress')
-      else expect(outcome.state).toBe('failed')
+      else expect(outcome.state).toBe('passed')
     }
-    const { rows } = await pool.query<{ count: string }>(
-      'SELECT count(*) FROM gate_grants WHERE wallet_address = $1',
-      [PLAYER],
+    const { rows } = await pool.query<{ payout_permille: number }>(
+      'SELECT payout_permille FROM gate_grants WHERE drop_id = $1 AND wallet_address = $2',
+      [gate.dropId, PLAYER],
     )
-    expect(rows[0].count).toBe('0')
+    expect(rows[0].payout_permille).toBe(800)
   })
 
   it('returns the outcome when it is the FIFTH answer that arrives late', async () => {
@@ -781,15 +850,16 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
       last = await svc.submitAnswer(s.sessionId, q.questionIndex, truth)
     }
 
-    // Four right, the fifth right but late — so the session fails, and says so.
-    expect(last.state).toBe('failed')
+    // Four right, the fifth right but late — a 4/5 score, so the session
+    // passes at 800 permille, and says so.
+    expect(last.state).toBe('passed')
     expect(last.review).toHaveLength(5)
     // The lateness is carried here rather than by a rejection, which is where the
     // rest of the session's lateness already lived.
     expect(last.review?.map((r) => r.wasLate)).toEqual([false, false, false, false, true])
-    // Four right and the fifth right-but-late, so the count is four and the
-    // session still fails. Lateness is not correctness, and it is not withheld
-    // either — it says nothing about which option was right.
+    // Four right and the fifth right-but-late, so the count is four. Lateness is
+    // not correctness, and it is not withheld either — it says nothing about
+    // which option was right.
     expect(last.correctCount).toBe(4)
     // ...while the index the player picked IS the right one, which is exactly why
     // `wasLate` has to be reported: without it a screen shows somebody their own

@@ -68,6 +68,14 @@ export const SESSION_LOCK_TIMEOUT_MS = 5_000
 export const COOLDOWN_MINUTES = 10
 
 /**
+ * A session passes at this many correct answers. Below it, failing works
+ * exactly as it always has. The payout scales with the score (spec:
+ * 2026-07-28-trivia-scored-payouts-design.md), so a bare pass is not a full
+ * share and the perfect run still stands apart.
+ */
+export const PASS_MIN_CORRECT = 3
+
+/**
  * The only `questionCount` this kind will serve.
  *
  * Not a tuning knob. The eligibility argument in spec §3 is that pure guessing
@@ -872,7 +880,14 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
       // The cost is that a player who knows they got question two wrong still
       // answers three more. That is the right trade — the alternative hands the
       // answer key to anyone patient enough to ask for it five times.
+      //
+      // The pass bar is `PASS_MIN_CORRECT`, not a perfect run: the score itself
+      // sets the grant's payout fraction below, so a bare pass and a perfect run
+      // are both "passed" but not both worth the same share.
       let state: AnswerOutcome['state'] = 'in_progress'
+      // Named apart from `correct` above (that one is this single answer's
+      // verdict; this is the tally the whole session is scored on).
+      let score = 0
       if (answered >= config.questionCount) {
         const { rows: tally } = await client.query<{ wrong: string }>(
           `SELECT count(*)::text AS wrong
@@ -880,7 +895,8 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
            WHERE session_id = $1 AND is_correct IS NOT TRUE`,
           [sessionId],
         )
-        state = tally[0].wrong === '0' ? 'passed' : 'failed'
+        score = config.questionCount - Number(tally[0].wrong)
+        state = score >= PASS_MIN_CORRECT ? 'passed' : 'failed'
       }
 
       await client.query(
@@ -901,6 +917,8 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
           dropId: session.drop_id,
           walletAddress: session.wallet_address,
           kind: 'trivia',
+          // Exact for questionCount 5: 600, 800, 1000. Integer math, floors.
+          payoutPermille: Math.floor((score * 1000) / config.questionCount),
         })
       }
 

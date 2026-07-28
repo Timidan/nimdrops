@@ -121,6 +121,24 @@ describe.skipIf(!hasDb)('issueGrant', () => {
     expect(rows[0].consumed_claim_id).toBeNull()
   })
 
+  it('stores the payout fraction when given one', async () => {
+    await issueGrant(pool, { dropId, walletAddress: WALLET, kind: 'trivia', payoutPermille: 600 })
+    const { rows } = await pool.query<{ payout_permille: number | null }>(
+      'SELECT payout_permille FROM gate_grants WHERE wallet_address = $1',
+      [WALLET],
+    )
+    expect(rows[0].payout_permille).toBe(600)
+  })
+
+  it('leaves the payout fraction null when omitted', async () => {
+    await grant()
+    const { rows } = await pool.query<{ payout_permille: number | null }>(
+      'SELECT payout_permille FROM gate_grants WHERE wallet_address = $1',
+      [WALLET],
+    )
+    expect(rows[0].payout_permille).toBeNull()
+  })
+
   it('returns the existing grant even after it has been consumed', async () => {
     // A wallet that already claimed may still re-submit the condition — the
     // page it is on does not know the claim happened. It must not get a second

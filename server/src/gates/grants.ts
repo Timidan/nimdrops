@@ -41,7 +41,13 @@ export interface IssuedGrant {
  */
 export async function issueGrant(
   db: Queryable,
-  o: { dropId: string; walletAddress: string; kind: GateKind },
+  o: {
+    dropId: string
+    walletAddress: string
+    kind: GateKind
+    /** Permille of the full share this grant pays; omitted (or null) means full. */
+    payoutPermille?: number
+  },
 ): Promise<IssuedGrant> {
   // The last checkpoint, and the reason it is here rather than only in the kinds:
   // this is the choke point every kind already funnels through, so a kind added
@@ -52,11 +58,11 @@ export async function issueGrant(
   const walletAddress = requireGateWallet(o.walletAddress)
 
   const { rows: inserted } = await db.query<{ id: string }>(
-    `INSERT INTO gate_grants (drop_id, wallet_address, kind)
-     VALUES ($1, $2, $3)
+    `INSERT INTO gate_grants (drop_id, wallet_address, kind, payout_permille)
+     VALUES ($1, $2, $3, $4)
      ON CONFLICT (drop_id, wallet_address) DO NOTHING
      RETURNING id`,
-    [o.dropId, walletAddress, o.kind],
+    [o.dropId, walletAddress, o.kind, o.payoutPermille ?? null],
   )
   if (inserted[0]) return { grantId: inserted[0].id, fresh: true }
 
