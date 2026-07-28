@@ -939,10 +939,29 @@ async function committedOutflowLuna(db: Queryable): Promise<bigint> {
   return BigInt(rows[0].luna)
 }
 
-/** Total of the finalized deposits `float set` has attributed the float to. */
+/**
+ * What the float is attributed to: deposits in, minus withdrawals out.
+ *
+ * `float set` keeps `operator_float_luna` equal to this, so it is the definition
+ * of "the float is fully backed by transactions an auditor can open".
+ *
+ * The withdrawal half exists because money can leave custody through something
+ * that is neither a payout nor a refund — `spike/fund-one-drop.ts` seeds a
+ * throwaway sponsor exactly that way — and until migration 022 the books had no
+ * row for it. The float could then only ratchet up, so an overstated float
+ * paused the deployment with nothing able to correct it. See `float lower`.
+ *
+ * Both halves are subtracted rather than signed: a row in either table is
+ * well-formed when its `value_luna > 0`, and the direction lives in the table
+ * name. One table holding negative "deposits" would have made the cheaper
+ * migration and a worse schema.
+ */
 export async function attestedFloatDepositsLuna(db: Queryable): Promise<bigint> {
   const { rows } = await db.query<{ luna: string }>(
-    'SELECT COALESCE(SUM(value_luna), 0)::BIGINT AS luna FROM operator_float_deposits',
+    `SELECT (
+       (SELECT COALESCE(SUM(value_luna), 0) FROM operator_float_deposits)
+       - (SELECT COALESCE(SUM(value_luna), 0) FROM operator_float_withdrawals)
+     )::BIGINT AS luna`,
   )
   return BigInt(rows[0].luna)
 }
@@ -1467,6 +1486,280 @@ export async function setOperatorFloat(
   }
 }
 
+/** Why a `--tx` hash cannot back a float REDUCTION. */
+export type WithdrawalAttestationReason =
+  | 'missing_tx'
+  | 'missing_reason'
+  | 'not_found'
+  | 'execution_failed'
+  /** The transaction did not come OUT of custody. */
+  | 'wrong_sender'
+  /** Money custody paid to itself left nothing. */
+  | 'self_transfer'
+  | 'not_final'
+  /** A payout or refund. The ledger already debits those; this would double it. */
+  | 'already_ledgered'
+  | 'already_attested'
+  /** The reduction would take the float below zero. */
+  | 'below_zero'
+
+export class WithdrawalAttestationError extends RecoverError {
+  constructor(
+    readonly reason: WithdrawalAttestationReason,
+    message: string,
+  ) {
+    super(message)
+  }
+}
+
+export interface FloatLowerResult {
+  command: 'float lower'
+  network: NetworkName
+  headHeight: number
+  withdrawal: { txHash: string; valueLuna: string; includedHeight: number; reason: string }
+  attestedFloatDepositsLuna: string
+  operatorFloatLuna: { before: string; after: string }
+  ledgerBalanceLuna: { before: string; after: string }
+  solvencyHeadroomLuna: { before: string; after: string }
+  chainConfirmedBalanceLuna: string
+  ledgerMinusChainLuna: { before: string; after: string }
+}
+
+/**
+ * Prove `txHash` is a finalized transaction that really took money OUT of custody.
+ *
+ * The mirror of {@link proveFloatDeposit}, predicate for predicate, and the
+ * asymmetries are the interesting part:
+ *
+ *  - **sender**, not recipient, must be custody — this is money leaving;
+ *  - **self-transfer is still refused**, for the opposite reason. Custody paying
+ *    itself moves nothing out, so debiting the float for it would invent a loss
+ *    the way the deposit check refuses to invent a gain;
+ *  - **a memo is not checked.** A drop memo makes a DEPOSIT drop money rather
+ *    than float, which is why the deposit path refuses it. On the way out it
+ *    says nothing: whatever custody sent, it is gone from the float either way;
+ *  - **`already_ledgered` is new, and it is the one that matters.** A payout or
+ *    a refund is already subtracted by `ledgerMovementsLuna`, so attesting one
+ *    here would debit the same luna twice and understate the float — pushing the
+ *    deployment toward a false shortfall instead of a false surplus. Failing
+ *    conservative is the wrong direction when the consequence is a pause.
+ */
+async function proveFloatWithdrawal(
+  db: Queryable,
+  chain: ChainClient,
+  txHash: string,
+  head: number,
+): Promise<ChainTx> {
+  let tx: ChainTx | null
+  try {
+    tx = await chain.getTransaction(txHash)
+  } catch (err) {
+    throw new ChainUnavailableError(
+      `refusing to lower the operator float: could not look up ${txHash} ` +
+        `(${errorMessage(err)}). An inconclusive lookup is not evidence that money left.`,
+    )
+  }
+
+  if (!tx) {
+    throw new WithdrawalAttestationError(
+      'not_found',
+      `no included transaction ${txHash} on ${chain.network()}. Money the chain cannot show ` +
+        'leaving custody has not left it.',
+    )
+  }
+  if (!tx.executionOk) {
+    throw new WithdrawalAttestationError(
+      'execution_failed',
+      `transaction ${txHash} is on chain but did not execute: it moved nothing out of custody.`,
+    )
+  }
+  if (tx.sender !== chain.custodyAddress()) {
+    throw new WithdrawalAttestationError(
+      'wrong_sender',
+      `transaction ${txHash} was sent by ${tx.sender}, not the custody address ` +
+        `${chain.custodyAddress()}. The float may only be lowered against money paid OUT of custody.`,
+    )
+  }
+  if (tx.recipient === chain.custodyAddress()) {
+    throw new WithdrawalAttestationError(
+      'self_transfer',
+      `transaction ${txHash} was paid by custody to itself: nothing left, so the float did not fall.`,
+    )
+  }
+  if (!chain.isFinal(tx, head)) {
+    throw new WithdrawalAttestationError(
+      'not_final',
+      `transaction ${txHash} was included at height ${tx.includedHeight} and is not final at head ` +
+        `${head}. A debit a reorg can still remove must not reduce the books.`,
+    )
+  }
+
+  // The ledger already knows about every payout and refund, by hash. Debiting
+  // one here as well would subtract the same luna twice.
+  const { rows: ledgered } = await db.query<{ purpose: string }>(
+    `SELECT t.purpose
+     FROM transaction_attempts a
+     JOIN outgoing_transfers t ON t.id = a.transfer_id
+     WHERE a.tx_hash = $1
+     LIMIT 1`,
+    [txHash],
+  )
+  if (ledgered[0]) {
+    throw new WithdrawalAttestationError(
+      'already_ledgered',
+      `transaction ${txHash} is this system's own ${ledgered[0].purpose}: the ledger already ` +
+        'subtracts it. Attesting it here would debit the same luna twice and understate the float.',
+    )
+  }
+  return tx
+}
+
+/**
+ * Lower the operator float against a finalized custody-outgoing transaction.
+ *
+ * The counterpart to `float set`, and deliberately a SEPARATE command rather
+ * than `float set` learning to accept a smaller number. Raising invents
+ * spendable capacity if it is wrong, so it is guarded by "one new deposit, and
+ * the float must equal the sum". Lowering can only ever make the system more
+ * conservative, so it needs a different guard: that the money really did leave.
+ * Collapsing them into one command would mean one set of checks doing two
+ * opposite jobs.
+ *
+ * Same lock discipline as `float set` — `custody_controls` first, the mandated
+ * order for every money path — and the same refusal on an unreachable chain. It
+ * deliberately does NOT go through `lockControls`: lowering the float is exactly
+ * what an operator does while the deployment is paused on a shortfall, so a
+ * fail-closed read here would make the system unable to unstick itself.
+ */
+export async function lowerOperatorFloat(
+  pool: Pool,
+  chain: ChainClient,
+  o: { txHash?: string; reason?: string },
+): Promise<FloatLowerResult> {
+  await ensureNetworkBinding(pool, chain)
+
+  const txHash = o.txHash?.trim()
+  if (!txHash) {
+    throw new WithdrawalAttestationError(
+      'missing_tx',
+      'refusing to lower the operator float without --tx <hash>. The float names specific money ' +
+        'in custody; taking money off it requires the transaction that removed it. ' +
+        'Usage: float lower --tx <hash> --reason <text>.',
+    )
+  }
+  const reason = o.reason?.trim()
+  if (!reason) {
+    throw new WithdrawalAttestationError(
+      'missing_reason',
+      'refusing to lower the operator float without --reason. A withdrawal asserts that money ' +
+        'left for something the ledger has no row for; if that cannot be written down, it is not ' +
+        'a reason an auditor can check.',
+    )
+  }
+
+  // Probe OUTSIDE the lock, exactly as `float set` does: an unreachable node
+  // must not be discovered while holding the row every payout needs.
+  try {
+    await chain.headHeight()
+  } catch (err) {
+    throw new ChainUnavailableError(
+      `refusing to lower the operator float: the chain is unreachable (${errorMessage(err)}).`,
+    )
+  }
+
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    await client.query('SELECT 1 FROM custody_controls WHERE singleton FOR UPDATE')
+
+    const before = await readControls(client)
+    const headHeight = await chain.headHeight()
+    const withdrawal = await proveFloatWithdrawal(client, chain, txHash, headHeight)
+
+    const nextFloatLuna = before.operatorFloatLuna - withdrawal.valueLuna
+    if (nextFloatLuna < 0n) {
+      throw new WithdrawalAttestationError(
+        'below_zero',
+        `transaction ${txHash} moved ${withdrawal.valueLuna} luna out of custody, but the float is ` +
+          `only ${before.operatorFloatLuna} luna. A negative float is not a smaller float — it ` +
+          'means the money that left was never the operator\'s to begin with, which is a ' +
+          'reconciliation to do by hand rather than a number to write.',
+      )
+    }
+
+    const inserted = await client.query(
+      `INSERT INTO operator_float_withdrawals (tx_hash, value_luna, included_height, network, reason)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (tx_hash) DO NOTHING`,
+      [
+        txHash,
+        withdrawal.valueLuna.toString(),
+        withdrawal.includedHeight.toString(),
+        chain.network(),
+        reason,
+      ],
+    )
+    if (inserted.rowCount === 0) {
+      throw new WithdrawalAttestationError(
+        'already_attested',
+        `transaction ${txHash} has already been taken off the operator float. Debiting it twice ` +
+          'would understate custody. Run "float show" to see what backs the float now.',
+      )
+    }
+
+    const attestedLuna = await attestedFloatDepositsLuna(client)
+    await client.query('UPDATE custody_controls SET operator_float_luna = $1 WHERE singleton', [
+      nextFloatLuna.toString(),
+    ])
+
+    const outstandingLuna = await outstandingPrincipalLuna(client)
+    const movementsLuna = await ledgerMovementsLuna(client)
+    const beforeLedgerLuna = before.operatorFloatLuna + movementsLuna
+    const afterLedgerLuna = nextFloatLuna + movementsLuna
+    const chainConfirmedLuna = await chain.confirmedBalanceLuna(chain.custodyAddress())
+
+    await client.query('COMMIT')
+
+    const headroom = (ledger: bigint): string =>
+      (ledger - outstandingLuna - before.configuredFeeReserveLuna).toString()
+
+    return {
+      command: 'float lower',
+      network: chain.network(),
+      headHeight,
+      withdrawal: {
+        txHash,
+        valueLuna: withdrawal.valueLuna.toString(),
+        includedHeight: withdrawal.includedHeight,
+        reason,
+      },
+      attestedFloatDepositsLuna: attestedLuna.toString(),
+      operatorFloatLuna: {
+        before: before.operatorFloatLuna.toString(),
+        after: nextFloatLuna.toString(),
+      },
+      ledgerBalanceLuna: {
+        before: beforeLedgerLuna.toString(),
+        after: afterLedgerLuna.toString(),
+      },
+      solvencyHeadroomLuna: {
+        before: headroom(beforeLedgerLuna),
+        after: headroom(afterLedgerLuna),
+      },
+      chainConfirmedBalanceLuna: chainConfirmedLuna.toString(),
+      ledgerMinusChainLuna: {
+        before: (beforeLedgerLuna - chainConfirmedLuna).toString(),
+        after: (afterLedgerLuna - chainConfirmedLuna).toString(),
+      },
+    }
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw err
+  } finally {
+    client.release()
+  }
+}
+
 // ---- status ---------------------------------------------------------------------------
 
 /** `state -> row count` for one table. States with no rows are absent. */
@@ -1668,6 +1961,21 @@ commands:
       value that would push the ledger balance above the on-chain custody
       balance, and refuses outright when the chain cannot be read.
       example: pnpm tsx src/recover.ts float set 100000 --tx 9f3c...e1
+
+  float lower --tx <hash> --reason <text>
+      Take money OFF the operator float, against a finalized transaction that
+      really left custody. Takes NO amount — the amount is whatever the chain
+      says that transaction moved, so it cannot be chosen. Refuses a hash that
+      custody did not send, that is not final, that paid custody itself, that
+      this system already recorded as a payout or refund (the ledger subtracts
+      those already), or that would take the float below zero.
+
+      This exists because "float set" can only ratchet UP: it needs a new deposit
+      and insists the float equal the sum of them. When custody pays out through
+      something that is neither a payout nor a refund (spike/fund-one-drop.ts
+      seeding a sponsor is the case that found this) the float is overstated,
+      reconcile() pauses on chain-below-ledger, and nothing could correct it.
+      example: pnpm tsx src/recover.ts float lower --tx c3f6...a8 --reason "sponsor seed for smoke drop"
 
   pause <reason>
       Engage the global kill switch: every new money path fails closed. Needs no
@@ -2176,7 +2484,7 @@ export async function main(argv: string[]): Promise<RecoverOutcome> {
   if (NEEDS_ARGUMENT.has(command) && !argument) {
     return rejectedUsage(name)
   }
-  if (command === 'float' && argument !== 'show' && argument !== 'set') {
+  if (command === 'float' && argument !== 'show' && argument !== 'set' && argument !== 'lower') {
     return rejectedUsage(name)
   }
   // The amount is positional and must not be a flag: `float set --tx <hash>`
@@ -2185,7 +2493,12 @@ export async function main(argv: string[]): Promise<RecoverOutcome> {
     return rejectedUsage(name)
   }
 
-  const wantsChain = NEEDS_CHAIN.has(command) || (command === 'float' && argument === 'set')
+  // `lower` needs a chain for the same reason `set` does: it attests against a
+  // hash, and a debit written from a guess is no better than a credit written
+  // from one.
+  const wantsChain =
+    NEEDS_CHAIN.has(command) ||
+    (command === 'float' && (argument === 'set' || argument === 'lower'))
   const mayUseChain = OPTIONAL_CHAIN.has(command) || (command === 'float' && argument === 'show')
 
   let pool: Pool
@@ -2235,7 +2548,12 @@ export async function main(argv: string[]): Promise<RecoverOutcome> {
       result =
         argument === 'show'
           ? await floatShow(pool, chain, chainUnavailableReason)
-          : await setOperatorFloat(pool, needChain(), third as string, flagValue(argv, '--tx'))
+          : argument === 'lower'
+            ? await lowerOperatorFloat(pool, needChain(), {
+                txHash: flagValue(argv, '--tx'),
+                reason: flagValue(argv, '--reason'),
+              })
+            : await setOperatorFloat(pool, needChain(), third as string, flagValue(argv, '--tx'))
     } else if (command === 'resume') {
       result = await resumeTransfer(pool, needChain(), alerts, argument)
     } else if (command === 'replace') {
@@ -2265,7 +2583,7 @@ export async function main(argv: string[]): Promise<RecoverOutcome> {
 function commandName(argv: string[]): string {
   const [command, argument] = argv
   if (!command) return '(none)'
-  if (command === 'float' && (argument === 'show' || argument === 'set')) {
+  if (command === 'float' && (argument === 'show' || argument === 'set' || argument === 'lower')) {
     return `float ${argument}`
   }
   return command

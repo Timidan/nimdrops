@@ -25,6 +25,8 @@ import {
   flagValue,
   floatShow,
   main,
+  WithdrawalAttestationError,
+  lowerOperatorFloat,
   setOperatorFloat,
   statusReport,
   succeeded,
@@ -273,6 +275,7 @@ describe('recover CLI help', () => {
     'deposits',
     'float show',
     'float set',
+    'float lower',
     'pause',
     'unpause',
   ]
@@ -772,7 +775,8 @@ describe.skipIf(!hasDb)('operator float and status (real Postgres)', () => {
   beforeEach(async () => {
     await pool.query(
       `TRUNCATE transaction_attempts, outgoing_transfers, wallet_challenges, claims, drops,
-       operator_float_deposits, custody_deposit_owners, http_idempotency RESTART IDENTITY CASCADE`,
+       operator_float_deposits, operator_float_withdrawals, custody_deposit_owners,
+       http_idempotency RESTART IDENTITY CASCADE`,
     )
     await pool.query(
       `UPDATE custody_controls SET network = NULL, custody_address = '${CUSTODY}' WHERE singleton`,
@@ -1347,6 +1351,168 @@ describe.skipIf(!hasDb)('operator float and status (real Postgres)', () => {
     expect(report.manualReviewTransfers).toEqual([])
     expect(report.oldestOpenAttempt).toBeNull()
     expect(report.chain).toMatchObject({ available: false, degraded: true })
+  })
+
+
+  // ---- float lower --------------------------------------------------------
+  //
+  // The command that did not exist when the mainnet pilot paused itself. `float
+  // set` can only ratchet UP — it demands a new deposit hash and insists the
+  // float equal the sum of them — so an overstated float had no correction and
+  // the deployment could not unstick itself.
+
+  /** A finalized transaction that really left custody, and its hash. */
+  function custodyPaidOut(luna: bigint, o: { to?: string; final?: boolean } = {}): string {
+    const hash = `out-${randomUUID()}`
+    chain.deposit({
+      hash,
+      sender: CUSTODY,
+      recipient: o.to ?? 'NQ07 SOMEBODY ELSE',
+      valueLuna: luna,
+      includedHeight: 1,
+    })
+    if (o.final !== false) chain.setHead(1_000)
+    return hash
+  }
+
+  async function lower(txHash: string, reason = 'sponsor seed for a smoke drop') {
+    return lowerOperatorFloat(pool, chain, { txHash, reason })
+  }
+
+  it('takes money off the float against a transaction that really left custody', async () => {
+    await setOperatorFloat(pool, chain, '1000', topUpCustody(1_000n))
+    const out = custodyPaidOut(200n)
+
+    const result = await lower(out)
+
+    expect(result.operatorFloatLuna).toEqual({ before: '1000', after: '800' })
+    // The amount is NOT an argument. It is whatever the chain says moved, which
+    // is the whole reason this cannot be used to write a number of one's choice.
+    expect(result.withdrawal.valueLuna).toBe('200')
+    expect((await readControls(pool)).operatorFloatLuna).toBe(800n)
+    // And the float still equals what backs it: deposits minus withdrawals.
+    expect(await attestedFloatDepositsLuna(pool)).toBe(800n)
+  })
+
+  it('closes the gap that paused the pilot: ledger comes back down to chain', async () => {
+    // The exact shape of 2026-07-27. Custody holds 1000. All of it is attested
+    // as float. 200 leaves as a sponsor seed and returns as a drop's funding, so
+    // the books count the same 200 twice and reconcile pauses on
+    // chain-below-ledger. Lowering the float by the seed squares them.
+    await setOperatorFloat(pool, chain, '1000', topUpCustody(1_000n))
+    await insertDrop(pool, { claimCount: 2, amountEachLuna: 100n })
+    const seed = custodyPaidOut(200n)
+
+    const result = await lower(seed)
+
+    // Ledger and float both fall by exactly what left custody — never by an
+    // amount anybody chose.
+    expect(BigInt(result.ledgerBalanceLuna.before) - BigInt(result.ledgerBalanceLuna.after)).toBe(
+      200n,
+    )
+    expect(BigInt(result.operatorFloatLuna.before) - BigInt(result.operatorFloatLuna.after)).toBe(
+      200n,
+    )
+    // Which closes the books-versus-chain gap by the same 200. On the pilot the
+    // gap was exactly the seed, because the seed came back as the drop's funding
+    // and so never showed up as a fall in the chain balance — the books were the
+    // only thing that was wrong.
+    expect(
+      BigInt(result.ledgerMinusChainLuna.before) - BigInt(result.ledgerMinusChainLuna.after),
+    ).toBe(200n)
+  })
+
+  it('refuses a hash custody did not send', async () => {
+    await setOperatorFloat(pool, chain, '1000', topUpCustody(1_000n))
+    // An INCOMING deposit. Lowering the float against money arriving would be
+    // the same arithmetic in the wrong direction.
+    const incoming = topUpCustody(50n)
+    await expect(lower(incoming)).rejects.toMatchObject({ reason: 'wrong_sender' })
+    expect((await readControls(pool)).operatorFloatLuna).toBe(1_000n)
+  })
+
+  it('refuses custody paying itself, which moved nothing out', async () => {
+    await setOperatorFloat(pool, chain, '1000', topUpCustody(1_000n))
+    const self = custodyPaidOut(200n, { to: CUSTODY })
+    await expect(lower(self)).rejects.toMatchObject({ reason: 'self_transfer' })
+  })
+
+  it('refuses a transaction that is not final yet', async () => {
+    await setOperatorFloat(pool, chain, '1000', topUpCustody(1_000n))
+    const pending = custodyPaidOut(200n, { final: false })
+    chain.setHead(2)
+    await expect(lower(pending)).rejects.toMatchObject({ reason: 'not_final' })
+  })
+
+  it('refuses this system’s OWN payout, which the ledger already subtracts', async () => {
+    // The finding that matters most here. `ledgerMovementsLuna` already debits
+    // every payout and refund by hash, so attesting one as a withdrawal too
+    // would subtract the same luna twice — understating custody and pushing the
+    // deployment toward a FALSE shortfall. Failing conservative is the wrong
+    // direction when the consequence is a pause.
+    await setOperatorFloat(pool, chain, '1000', topUpCustody(1_000n))
+    const drop = await insertDrop(pool, { claimCount: 2, amountEachLuna: 100n })
+    const payoutHash = custodyPaidOut(100n)
+    const claimId = randomUUID()
+    await pool.query(
+      `INSERT INTO claims (id, drop_id, slot_index, recipient_address, status_token_hash, state)
+       VALUES ($1, $2, 0, 'NQ07 CLAIMANT', 'hash-lower', 'paid')`,
+      [claimId, drop.id],
+    )
+    const { rows: transfer } = await pool.query<{ id: string }>(
+      `INSERT INTO outgoing_transfers
+         (idempotency_key, purpose, drop_id, claim_id, recipient_address, amount_luna, state)
+       VALUES ($1, 'payout', $2, $3, 'NQ07 CLAIMANT', 100, 'confirmed') RETURNING id`,
+      [randomUUID(), drop.id, claimId],
+    )
+    await pool.query(
+      `INSERT INTO transaction_attempts
+         (transfer_id, sequence, state, raw_signed_tx, tx_hash, validity_start_height, fee_luna)
+       VALUES ($1, 1, 'confirmed', '\\x00', $2, 1, 0)`,
+      [transfer[0].id, payoutHash],
+    )
+
+    await expect(lower(payoutHash)).rejects.toMatchObject({ reason: 'already_ledgered' })
+    expect((await readControls(pool)).operatorFloatLuna).toBe(1_000n)
+  })
+
+  it('refuses the same withdrawal twice', async () => {
+    await setOperatorFloat(pool, chain, '1000', topUpCustody(1_000n))
+    const out = custodyPaidOut(200n)
+    await lower(out)
+    await expect(lower(out)).rejects.toMatchObject({ reason: 'already_attested' })
+    expect((await readControls(pool)).operatorFloatLuna).toBe(800n)
+  })
+
+  it('refuses to take the float below zero', async () => {
+    await setOperatorFloat(pool, chain, '100', topUpCustody(100n))
+    const tooBig = custodyPaidOut(500n)
+    await expect(lower(tooBig)).rejects.toMatchObject({ reason: 'below_zero' })
+    expect((await readControls(pool)).operatorFloatLuna).toBe(100n)
+  })
+
+  it('demands a hash and a written reason', async () => {
+    await setOperatorFloat(pool, chain, '1000', topUpCustody(1_000n))
+    await expect(
+      lowerOperatorFloat(pool, chain, { reason: 'no hash' }),
+    ).rejects.toMatchObject({ reason: 'missing_tx' })
+    // A withdrawal asserts money left for something the ledger has no row for.
+    // If that cannot be written down, it is not a reason an auditor can check.
+    await expect(
+      lowerOperatorFloat(pool, chain, { txHash: custodyPaidOut(10n), reason: '   ' }),
+    ).rejects.toMatchObject({ reason: 'missing_reason' })
+  })
+
+  it('records the reason, for the audit question that is not "how much"', async () => {
+    await setOperatorFloat(pool, chain, '1000', topUpCustody(1_000n))
+    const out = custodyPaidOut(200n)
+    await lower(out, 'seeded the throwaway sponsor for drop frNN…')
+    const { rows } = await pool.query<{ reason: string; value_luna: string }>(
+      'SELECT reason, value_luna FROM operator_float_withdrawals WHERE tx_hash = $1',
+      [out],
+    )
+    expect(rows[0].reason).toContain('throwaway sponsor')
+    expect(rows[0].value_luna).toBe('200')
   })
 
   it('is JSON-printable: no bigint escapes into the report', async () => {
