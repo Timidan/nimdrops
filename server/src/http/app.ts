@@ -1218,7 +1218,7 @@ export function makeApp(deps: AppDeps): Hono {
     const questionIndex = wholeNumberIn(body, 'questionIndex', 0, 9)
     const answerIndex = wholeNumberIn(body, 'answerIndex', 0, 3)
     // Required, for the reason in `requireWalletQuery`: a wrong answer costs the
-    // session's wallet a ten-minute cooldown, so submitting one must take more
+    // session's wallet a three-minute cooldown, so submitting one must take more
     // than a session id somebody left in a log.
     const walletAddress = requireWalletAddress(body)
     enforce(gateAttemptBucket, clientIp(c))

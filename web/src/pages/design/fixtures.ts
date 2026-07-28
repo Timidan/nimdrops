@@ -21,7 +21,7 @@ export const DROP = {
 
 export const TRIVIA = {
   question: 'How long does a Nimiq block take to confirm?',
-  options: ['About one second', 'About one minute', 'About ten minutes'],
+  options: ['About one second', 'About one minute', 'About three minutes'],
   /** Index of the answer the mockups render as chosen. Not a real answer key. */
   chosen: 0,
 } as const

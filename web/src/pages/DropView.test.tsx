@@ -595,7 +595,7 @@ describe('the trivia slot', () => {
    * trivia-specific prop and will not grow one.
    */
   it('takes a question and solid-fill answers with no new API', () => {
-    const OPTIONS = ['About one second', 'About one minute', 'About ten minutes', 'About an hour']
+    const OPTIONS = ['About one second', 'About one minute', 'About three minutes', 'About an hour']
     render(
       <GlassSheet
         testId="gated"
