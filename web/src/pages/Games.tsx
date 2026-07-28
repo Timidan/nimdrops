@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { listGames, type GateKind, type ListedGame } from '../api'
 import { formatNim } from '../money'
-import Screen from '../ui/Screen'
+import Field from '../ui/Field'
 
 /**
  * Every drop that asks something of you, grouped by what it asks.
@@ -60,8 +60,9 @@ export default function Games() {
   }, [])
 
   return (
-    <Screen>
-      <div className="flex flex-1 flex-col px-5 pt-9 pb-12 text-chalk">
+    <Field tone="live">
+      <div className="nd-column">
+        <div className="flex flex-1 flex-col px-5 pt-9 pb-12 text-chalk">
         <h1 className="text-2xl font-semibold tracking-tight">Games you can earn from</h1>
         <p className="mt-2 text-sm leading-relaxed text-chalk/65">
           Each of these asks one thing of you first. Meet it and you claim a fixed share on the
@@ -95,8 +96,9 @@ export default function Games() {
               )
             })
           : null}
+        </div>
       </div>
-    </Screen>
+    </Field>
   )
 }
 

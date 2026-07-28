@@ -574,9 +574,9 @@ body {
 }
 
 /**
- * The gate screens' reading column (`ui/Screen.tsx`).
+ * The gate screens' reading column.
  *
- * Folded in from the gates branch, which owns the only surfaces that use it.
+ * Composed inline by `pages/Game.tsx` and `pages/Games.tsx`, inside `Field`.
  * Without it `/games` and `/game/:publicId` run edge to edge on a desktop
  * width; every other screen gets its measure from its own layout.
  */

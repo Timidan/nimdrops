@@ -73,6 +73,9 @@ describe('Games', () => {
     expect(body.indexOf('Answer five questions')).toBeLessThan(
       body.indexOf('Confirmed by the organiser'),
     )
+    // The gate pages sit on the lit field, not a flat gradient (s4).
+    expect(document.querySelector('.nd-field-light.is-bloom')).not.toBeNull()
+    expect(document.querySelector('.nd-field-texture')).not.toBeNull()
   })
 
   it('shows the exact payout, the shares left, the expiry and the hint', async () => {

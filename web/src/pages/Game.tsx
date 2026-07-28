@@ -6,7 +6,7 @@ import { ADDRESS_RE, PASSPHRASE_MAX_ATTEMPTS, useGate } from '../state/gate'
 import { TRIVIA_COOLDOWN_MINUTES, TRIVIA_QUESTION_COUNT, useTriviaSession } from '../state/trivia'
 import { BridgeError, getBridge, nimiqPayDeeplink, resolveBridge } from '../sdk/adapter'
 import { openInNimiqPay } from '../sdk/openApp'
-import Screen from '../ui/Screen'
+import Field from '../ui/Field'
 import { GetNimiqPay } from '../ui/OpenInApp'
 
 /**
@@ -123,8 +123,9 @@ export default function Game({ walletAddress }: GameProps) {
   const met = gate.granted || metJustNow
 
   return (
-    <Screen>
-      <div className="flex flex-1 flex-col px-5 pt-9 pb-12 text-chalk">
+    <Field tone="live">
+      <div className="nd-column">
+        <div className="flex flex-1 flex-col px-5 pt-9 pb-12 text-chalk">
         {gate.loading && gate.kind === null ? (
           <Loading />
         ) : gate.kind === null ? (
@@ -171,8 +172,9 @@ export default function Game({ walletAddress }: GameProps) {
             )}
           </>
         )}
+        </div>
       </div>
-    </Screen>
+    </Field>
   )
 }
 

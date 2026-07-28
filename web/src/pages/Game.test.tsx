@@ -263,6 +263,9 @@ describe('Game — trivia before play', () => {
     expect(card.textContent).toMatch(/the server times each question/i)
     // How many are left, before spending five questions to find out.
     expect(screen.getByTestId('game-slots').textContent).toMatch(/7 shares left/)
+    // The gate pages sit on the lit field, not a flat gradient (s4).
+    expect(document.querySelector('.nd-field-light.is-bloom')).not.toBeNull()
+    expect(document.querySelector('.nd-field-texture')).not.toBeNull()
   })
 
   it('never promises one tap and never says anything about luck', async () => {
