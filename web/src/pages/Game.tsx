@@ -4,8 +4,9 @@ import { ApiError, submitPassphrase, type GateKind, type ReviewedQuestion } from
 import { formatNim } from '../money'
 import { ADDRESS_RE, PASSPHRASE_MAX_ATTEMPTS, useGate } from '../state/gate'
 import { TRIVIA_COOLDOWN_MINUTES, TRIVIA_QUESTION_COUNT, useTriviaSession } from '../state/trivia'
-import { BridgeError, getBridge } from '../sdk/adapter'
+import { BridgeError, getBridge, nimiqPayDeeplink, resolveBridge } from '../sdk/adapter'
 import Screen from '../ui/Screen'
+import { GetNimiqPay } from '../ui/OpenInApp'
 
 /**
  * One page, three conditions: answer five questions, know a phrase, or be
@@ -122,7 +123,7 @@ export default function Game({ walletAddress }: GameProps) {
 
   return (
     <Screen>
-      <div className="nd-gate-surface flex flex-1 flex-col bg-chalk px-5 pt-9 pb-12 text-chalk-ink">
+      <div className="flex flex-1 flex-col px-5 pt-9 pb-12 text-chalk">
         {gate.loading && gate.kind === null ? (
           <Loading />
         ) : gate.kind === null ? (
@@ -202,9 +203,9 @@ function Offer({
   return (
     <div>
       <div className="flex flex-wrap items-center justify-center gap-2">
-        <p className="text-sm font-semibold text-chalk-ink/70">{KIND_TITLES[kind]}</p>
+        <p className="text-sm font-semibold text-chalk/70">{KIND_TITLES[kind]}</p>
         {tier ? (
-          <span className="rounded-full border border-chalk-ink/15 px-2 py-0.5 text-[0.6875rem] font-medium text-chalk-ink/55">
+          <span className="rounded-full border border-chalk/15 px-2 py-0.5 text-[0.6875rem] font-medium text-chalk/55">
             {tier}
           </span>
         ) : null}
@@ -213,12 +214,12 @@ function Offer({
       <p data-testid="game-amount" className="nd-amount mt-6 text-center text-[2.75rem]">
         {amount} NIM
       </p>
-      <p className="mt-3 text-center text-xs leading-relaxed text-chalk-ink/55">
+      <p className="mt-3 text-center text-xs leading-relaxed text-chalk/55">
         The same fixed amount for everyone who meets this drop&rsquo;s condition.
       </p>
 
       {slotsRemaining === null ? null : (
-        <p data-testid="game-slots" className="mt-4 text-center text-xs tabular-nums text-chalk-ink/55">
+        <p data-testid="game-slots" className="mt-4 text-center text-xs tabular-nums text-chalk/55">
           {slotsRemaining} {slotsRemaining === 1 ? 'share' : 'shares'} left
         </p>
       )}
@@ -256,15 +257,15 @@ function Pass({
   return (
     <div data-testid="gate-passed" className="mt-9">
       <h1 className="text-2xl font-semibold tracking-tight">You can claim {amount} NIM</h1>
-      <p className="mt-3 text-sm leading-relaxed text-chalk-ink/65">
+      <p className="mt-3 text-sm leading-relaxed text-chalk/65">
         This drop&rsquo;s condition is met for the wallet you named. Nothing has been sent yet. You
         claim on the drop&rsquo;s own page: tap and approve one signature there, and the NIM goes to
         the wallet that signed.
       </p>
-      <Link to={`/drop/${publicId}`} className="nd-primary mt-8 block w-full text-center">
+      <Link to={`/drop/${publicId}`} className="nd-action mt-8 block w-full text-center">
         Go to the claim
       </Link>
-      <p className="mt-3 text-center text-xs leading-relaxed text-chalk-ink/50">
+      <p className="mt-3 text-center text-xs leading-relaxed text-chalk/50">
         One share per wallet. It has to be the wallet you named here.
       </p>
 
@@ -322,14 +323,14 @@ function Review({
     <section
       data-testid="trivia-review"
       aria-labelledby="trivia-review-heading"
-      className="mt-10 border-t border-chalk-ink/10 pt-6"
+      className="mt-10 border-t border-chalk/10 pt-6"
     >
-      <h2 id="trivia-review-heading" className="text-sm font-semibold tracking-tight text-chalk-ink/75">
+      <h2 id="trivia-review-heading" className="text-sm font-semibold tracking-tight text-chalk/75">
         Question by question
       </h2>
       {score === null ? null : (
-        <p data-testid="trivia-score" className="mt-2 text-sm leading-relaxed text-chalk-ink/65">
-          You got <span className="font-medium text-chalk-ink">{score}</span> of {questions.length} right.
+        <p data-testid="trivia-score" className="mt-2 text-sm leading-relaxed text-chalk/65">
+          You got <span className="font-medium text-chalk">{score}</span> of {questions.length} right.
           This set does not publish its answers, so we cannot say which.
         </p>
       )}
@@ -393,7 +394,7 @@ function ReviewRow({ question }: { question: ReviewedQuestion }) {
   return (
     <li data-testid={`review-${question.questionIndex}`}>
       <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-        <p className="text-xs font-semibold tabular-nums text-chalk-ink/55">
+        <p className="text-xs font-semibold tabular-nums text-chalk/55">
           Question {question.questionIndex + 1}
         </p>
         {/**
@@ -403,7 +404,7 @@ function ReviewRow({ question }: { question: ReviewedQuestion }) {
          */}
         <p
           data-testid={`review-${question.questionIndex}-outcome`}
-          className="text-xs font-semibold text-chalk-ink/75"
+          className="text-xs font-semibold text-chalk/75"
         >
           <span aria-hidden="true" className="mr-1">
             {mark}
@@ -412,22 +413,22 @@ function ReviewRow({ question }: { question: ReviewedQuestion }) {
         </p>
       </div>
 
-      <p className="mt-2 text-sm leading-snug font-medium text-chalk-ink">{question.prompt}</p>
+      <p className="mt-2 text-sm leading-snug font-medium text-chalk">{question.prompt}</p>
 
       {outOfTime ? (
-        <p className="mt-2 text-sm leading-relaxed text-chalk-ink/65">
+        <p className="mt-2 text-sm leading-relaxed text-chalk/65">
           You ran out of time on this one, so no answer was recorded.
         </p>
       ) : chosen === undefined ? null : (
-        <p className="mt-2 text-sm leading-relaxed text-chalk-ink/65">
-          You chose <span className="font-medium text-chalk-ink">{chosen}</span>
+        <p className="mt-2 text-sm leading-relaxed text-chalk/65">
+          You chose <span className="font-medium text-chalk">{chosen}</span>
           {late ? ', but the clock had already run out.' : '.'}
         </p>
       )}
 
       {correct === undefined ? null : (
-        <p className="mt-1 text-sm leading-relaxed text-chalk-ink/65">
-          The right answer is <span className="font-medium text-chalk-ink">{correct}</span>.
+        <p className="mt-1 text-sm leading-relaxed text-chalk/65">
+          The right answer is <span className="font-medium text-chalk">{correct}</span>.
         </p>
       )}
     </li>
@@ -453,9 +454,37 @@ function ReviewRow({ question }: { question: ReviewedQuestion }) {
  * called from `ready()`, and the ordinary claim path never calls it at all, so a
  * claimant on an ungated drop still meets exactly one prompt in the whole flow.
  */
+/** The current page as an https URL, or null when there is no window (SSR). */
+function selfUrl(): string | null {
+  if (typeof window === 'undefined') return null
+  return window.location.href.replace(/^http:/, 'https:')
+}
+
 function WalletStep({ onSubmit }: { onSubmit: (address: string) => void }) {
   const [busy, setBusy] = useState(false)
   const [problem, setProblem] = useState('')
+  // Set once we know this page is open OUTSIDE Nimiq Pay. The wallet bridge only
+  // exists inside the app, so a browser tab cannot read an address at all — the
+  // honest next step is to reopen this exact page in Nimiq Pay, not to prompt for
+  // a wallet that is not there. Held in state rather than read at render because
+  // `getBridge()` is the same probe `ask()` already uses.
+  const [needsApp, setNeedsApp] = useState(false)
+  const url = selfUrl()
+
+  // Probe once on mount, so a reader who arrived in a browser sees "Open in
+  // Nimiq Pay" straight away rather than a wallet button that leads nowhere.
+  // `resolveBridge` waits out the provider-injection race instead of trusting a
+  // synchronous snapshot, and it only detects presence — it does not read an
+  // address, so nothing prompts the wallet here.
+  useEffect(() => {
+    let alive = true
+    void resolveBridge().then((r) => {
+      if (alive && r.kind === 'unavailable') setNeedsApp(true)
+    })
+    return () => {
+      alive = false
+    }
+  }, [])
 
   async function ask() {
     setBusy(true)
@@ -463,7 +492,10 @@ function WalletStep({ onSubmit }: { onSubmit: (address: string) => void }) {
     try {
       const result = getBridge()
       if (result.kind === 'unavailable') {
-        setProblem('Open this link inside Nimiq Pay to play. Your wallet is what identifies you.')
+        // Was a dead end: a line of copy telling the reader to open in Nimiq Pay
+        // and no way to do it. The deeplink reopens THIS url inside the app,
+        // where the bridge exists and the wallet can answer.
+        setNeedsApp(true)
         return
       }
       onSubmit(await result.bridge.address())
@@ -483,45 +515,62 @@ function WalletStep({ onSubmit }: { onSubmit: (address: string) => void }) {
   return (
     <div data-testid="wallet-step" className="mt-8">
       <h1 className="text-lg font-semibold tracking-tight">Which wallet is playing?</h1>
-      <p className="mt-2 text-sm leading-relaxed text-chalk-ink/65">
+      <p className="mt-2 text-sm leading-relaxed text-chalk/65">
         Whatever this drop asks of you is recorded against your wallet, and only that wallet can
         claim the share.
       </p>
-      <p className="mt-2 text-sm leading-relaxed text-chalk-ink/65">
+      <p className="mt-2 text-sm leading-relaxed text-chalk/65">
         Your wallet will ask you to share your address. Nothing is signed here and nothing leaves
         your wallet. The signature comes later, on the claim.
       </p>
 
       {problem ? (
-        <p data-testid="wallet-problem" role="alert" className="mt-4 text-xs leading-relaxed text-chalk-ink/75">
+        <p data-testid="wallet-problem" role="alert" className="mt-4 text-xs leading-relaxed text-chalk/75">
           {problem}
         </p>
       ) : null}
 
-      <button
-        type="button"
-        data-testid="connect-wallet"
-        disabled={busy}
-        onClick={() => void ask()}
-        className="nd-primary mt-6 w-full disabled:opacity-60"
-      >
-        {busy ? 'Waiting for your wallet…' : 'Use my wallet'}
-      </button>
+      {needsApp ? (
+        <div data-testid="open-in-app" className="mt-6">
+          <p className="text-sm leading-relaxed text-chalk/65">
+            This page needs Nimiq Pay to read your wallet. Open it there and this same page loads,
+            ready to play.
+          </p>
+          {url ? (
+            <a href={nimiqPayDeeplink(url)} className="nd-action mt-4 w-full text-center">
+              Open in Nimiq Pay
+            </a>
+          ) : null}
+          <div className="mt-6">
+            <GetNimiqPay />
+          </div>
+        </div>
+      ) : (
+        <button
+          type="button"
+          data-testid="connect-wallet"
+          disabled={busy}
+          onClick={() => void ask()}
+          className="nd-action mt-6 w-full disabled:opacity-60"
+        >
+          {busy ? 'Waiting for your wallet…' : 'Use my wallet'}
+        </button>
+      )}
     </div>
   )
 }
 
 function PlayingAs({ address, onChange }: { address: string; onChange: () => void }) {
   return (
-    <div className="mt-6 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 border-t border-chalk-ink/10 pt-4">
-      <p className="min-w-0 text-xs leading-relaxed text-chalk-ink/55 [overflow-wrap:anywhere]">
-        Playing as <span className="font-medium text-chalk-ink/75">{address}</span>
+    <div className="mt-6 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 border-t border-chalk/10 pt-4">
+      <p className="min-w-0 text-xs leading-relaxed text-chalk/55 [overflow-wrap:anywhere]">
+        Playing as <span className="font-medium text-chalk/75">{address}</span>
       </p>
       <button
         type="button"
         data-testid="change-wallet"
         onClick={onChange}
-        className="shrink-0 text-xs font-semibold text-chalk-ink/60 underline"
+        className="shrink-0 text-xs font-semibold text-chalk/60 underline"
       >
         Use a different wallet
       </button>
@@ -572,15 +621,15 @@ function Trivia({
          * refused submission never carries one, so that path still says nothing
          * about the answers rather than inventing them.
          */}
-        <p className="mt-3 text-sm leading-relaxed text-chalk-ink/65">
+        <p className="mt-3 text-sm leading-relaxed text-chalk/65">
           {session.error ??
             `One answer was wrong, so the round stopped there. You answered ${session.answered} of ${session.questionCount}.`}
         </p>
-        <p className="mt-3 text-sm leading-relaxed text-chalk-ink/65">
+        <p className="mt-3 text-sm leading-relaxed text-chalk/65">
           You can try this drop again in {TRIVIA_COOLDOWN_MINUTES} minutes. Nothing was signed and
           nothing was sent, so nothing has been lost.
         </p>
-        <Link to="/games" className="nd-secondary mt-8 block w-full text-center">
+        <Link to="/games" className="nd-quiet mt-8 block w-full text-center">
           See the other drops
         </Link>
 
@@ -595,10 +644,10 @@ function Trivia({
     return (
       <div data-testid="trivia-playing" className="mt-8">
         <div className="flex items-baseline justify-between gap-3">
-          <p data-testid="question-progress" className="text-sm font-semibold tabular-nums text-chalk-ink/70">
+          <p data-testid="question-progress" className="text-sm font-semibold tabular-nums text-chalk/70">
             {question.questionIndex + 1} of {session.questionCount || question.questionCount}
           </p>
-          <p className="text-xs font-medium text-chalk-ink/55">{question.category}</p>
+          <p className="text-xs font-medium text-chalk/55">{question.category}</p>
         </div>
 
         <Countdown secondsLeft={session.secondsLeft} />
@@ -616,7 +665,7 @@ function Trivia({
                 setSubmitting(true)
                 void session.submit(index).finally(() => setSubmitting(false))
               }}
-              className="nd-secondary w-full text-left"
+              className="nd-quiet w-full text-left"
             >
               {option}
             </button>
@@ -630,13 +679,13 @@ function Trivia({
          * choose. So the buttons stay live and the screen says where they stand.
          */}
         {timeUp ? (
-          <p data-testid="time-up" className="mt-4 text-sm leading-relaxed text-chalk-ink/65">
+          <p data-testid="time-up" className="mt-4 text-sm leading-relaxed text-chalk/65">
             Time is up on this question. You can still answer, but the server may not accept it.
           </p>
         ) : null}
 
         {session.error ? (
-          <p role="alert" className="mt-4 text-sm leading-relaxed text-chalk-ink/75">
+          <p role="alert" className="mt-4 text-sm leading-relaxed text-chalk/75">
             {session.error}
           </p>
         ) : null}
@@ -649,7 +698,7 @@ function Trivia({
       <h1 className="text-lg font-semibold tracking-tight">
         {TRIVIA_QUESTION_COUNT} questions, four options each
       </h1>
-      <p className="mt-2 text-sm leading-relaxed text-chalk-ink/65">
+      <p className="mt-2 text-sm leading-relaxed text-chalk/65">
         Answer all {TRIVIA_QUESTION_COUNT} correctly and this drop&rsquo;s share is yours to claim.
         One wrong answer ends the attempt{tier ? ` at ${tier}` : ''}, and you can try again in{' '}
         {TRIVIA_COOLDOWN_MINUTES} minutes.
@@ -660,10 +709,10 @@ function Trivia({
        * line says the question is timed, which is true, rather than a number
        * that would be a guess.
        */}
-      <p className="mt-2 text-sm leading-relaxed text-chalk-ink/65">
+      <p className="mt-2 text-sm leading-relaxed text-chalk/65">
         The server times each question, and the seconds are on screen while you answer.
       </p>
-      <p className="mt-2 text-sm leading-relaxed text-chalk-ink/65">
+      <p className="mt-2 text-sm leading-relaxed text-chalk/65">
         Nothing is signed while you play. If you pass, you claim on this drop&rsquo;s own page. The
         wallet approval comes after, not now.
       </p>
@@ -671,13 +720,13 @@ function Trivia({
       <button
         type="button"
         onClick={() => void session.start()}
-        className="nd-primary mt-8 w-full"
+        className="nd-action mt-8 w-full"
       >
         Start
       </button>
 
       {session.error ? (
-        <p data-testid="trivia-start-error" role="alert" className="mt-4 text-sm leading-relaxed text-chalk-ink/75">
+        <p data-testid="trivia-start-error" role="alert" className="mt-4 text-sm leading-relaxed text-chalk/75">
           {session.error}
         </p>
       ) : null}
@@ -701,11 +750,11 @@ function Countdown({ secondsLeft }: { secondsLeft: number }) {
       <span
         data-testid="countdown"
         role="timer"
-        className="text-sm font-semibold tabular-nums text-chalk-ink"
+        className="text-sm font-semibold tabular-nums text-chalk"
       >
         {secondsLeft}s
       </span>
-      <div className="mt-2 h-1 w-full overflow-hidden rounded-full bg-chalk-ink/10">
+      <div className="mt-2 h-1 w-full overflow-hidden rounded-full bg-chalk/10">
         <div
           aria-hidden="true"
           className="h-full rounded-full bg-gold transition-[width] duration-300 ease-linear"
@@ -783,16 +832,16 @@ function Passphrase({
     >
       <h1 className="text-lg font-semibold tracking-tight">Know the phrase, claim a share</h1>
       {hint ? (
-        <p data-testid="passphrase-hint" className="mt-3 border-l-2 border-gold/45 pl-4 text-sm leading-relaxed text-chalk-ink/70">
+        <p data-testid="passphrase-hint" className="mt-3 border-l-2 border-gold/45 pl-4 text-sm leading-relaxed text-chalk/70">
           {hint}
         </p>
       ) : null}
-      <p className="mt-3 text-sm leading-relaxed text-chalk-ink/65">
+      <p className="mt-3 text-sm leading-relaxed text-chalk/65">
         Capital letters and extra spaces do not matter. Nothing is signed here. If the phrase is
         right, you claim on the drop&rsquo;s own page.
       </p>
 
-      <label htmlFor="gate-phrase" className="mt-6 block text-sm font-medium text-chalk-ink/70">
+      <label htmlFor="gate-phrase" className="mt-6 block text-sm font-medium text-chalk/70">
         The phrase
       </label>
       <input
@@ -802,15 +851,15 @@ function Passphrase({
         autoComplete="off"
         spellCheck={false}
         onChange={(event) => setPhrase(event.target.value)}
-        className="mt-2 w-full rounded-2xl border border-chalk-ink/12 bg-white px-4 py-3 text-base text-chalk-ink outline-none placeholder:text-chalk-ink/45 focus:border-gold"
+        className="mt-2 w-full rounded-2xl border border-chalk/12 bg-white px-4 py-3 text-base text-chalk outline-none placeholder:text-chalk/45 focus:border-gold"
       />
 
-      <button type="submit" disabled={busy || phrase.trim() === ''} className="nd-primary mt-6 w-full">
+      <button type="submit" disabled={busy || phrase.trim() === ''} className="nd-action mt-6 w-full">
         Check the phrase
       </button>
 
       {notice ? (
-        <p data-testid="passphrase-notice" role="alert" className="mt-4 text-sm leading-relaxed text-chalk-ink/75">
+        <p data-testid="passphrase-notice" role="alert" className="mt-4 text-sm leading-relaxed text-chalk/75">
           {notice}
         </p>
       ) : null}
@@ -829,11 +878,11 @@ function Attested({ onCheckAgain, checking }: { onCheckAgain: () => void; checki
   return (
     <div data-testid="attested" className="mt-8">
       <h1 className="text-lg font-semibold tracking-tight">The organiser confirms this one</h1>
-      <p className="mt-3 text-sm leading-relaxed text-chalk-ink/65">
+      <p className="mt-3 text-sm leading-relaxed text-chalk/65">
         Whoever runs this drop decides who can claim it and confirms it themselves. There is nothing
         here to answer and nothing to sign.
       </p>
-      <p className="mt-3 text-sm leading-relaxed text-chalk-ink/65">
+      <p className="mt-3 text-sm leading-relaxed text-chalk/65">
         For the wallet you named, that confirmation has not happened yet. When it does, this page
         says you can claim.
       </p>
@@ -842,7 +891,7 @@ function Attested({ onCheckAgain, checking }: { onCheckAgain: () => void; checki
         data-testid="attested-recheck"
         disabled={checking}
         onClick={onCheckAgain}
-        className="nd-secondary mt-8 w-full"
+        className="nd-quiet mt-8 w-full"
       >
         Check again
       </button>
@@ -856,7 +905,7 @@ function Loading() {
   return (
     <div className="flex flex-1 flex-col items-center justify-center pb-24 text-center">
       <div className="nd-pulse h-1.5 w-16 rounded-full bg-gold" aria-hidden="true" />
-      <p className="mt-6 text-sm text-chalk-ink/55">Opening…</p>
+      <p className="mt-6 text-sm text-chalk/55">Opening…</p>
     </div>
   )
 }
@@ -882,11 +931,11 @@ function LoadFailure({
     return (
       <div data-testid="not-a-game" className="flex flex-1 flex-col justify-center pb-16">
         <h1 className="text-2xl font-semibold tracking-tight">Nothing to meet here</h1>
-        <p className="mt-3 text-sm leading-relaxed text-chalk-ink/65">
+        <p className="mt-3 text-sm leading-relaxed text-chalk/65">
           This drop does not ask anything of you. If it is still live, you can claim from its own
           page.
         </p>
-        <Link to={`/drop/${publicId}`} className="nd-primary mt-8 block w-full text-center">
+        <Link to={`/drop/${publicId}`} className="nd-action mt-8 block w-full text-center">
           Open the drop
         </Link>
       </div>
@@ -896,13 +945,13 @@ function LoadFailure({
   return (
     <div data-testid="game-unavailable" className="flex flex-1 flex-col justify-center pb-16">
       <h1 className="text-2xl font-semibold tracking-tight">We could not open this</h1>
-      <p className="mt-3 text-sm leading-relaxed text-chalk-ink/65">
+      <p className="mt-3 text-sm leading-relaxed text-chalk/65">
         {message ?? 'Something went wrong on our side.'}
       </p>
-      <p className="mt-3 text-sm leading-relaxed text-chalk-ink/65">
+      <p className="mt-3 text-sm leading-relaxed text-chalk/65">
         Nothing has been lost and nothing was signed.
       </p>
-      <button type="button" onClick={onRetry} className="nd-primary mt-8 w-full">
+      <button type="button" onClick={onRetry} className="nd-action mt-8 w-full">
         Try again
       </button>
     </div>

@@ -17,7 +17,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { BridgeError, getBridge } from '../sdk/adapter'
+import { BridgeError, getBridge, resolveBridge } from '../sdk/adapter'
 import Game, { WALLET_STORAGE_KEY } from './Game'
 
 // The wallet boundary is mocked, never the SDK: `getBridge` is the seam the page
@@ -25,6 +25,7 @@ import Game, { WALLET_STORAGE_KEY } from './Game'
 vi.mock('../sdk/adapter', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../sdk/adapter')>()),
   getBridge: vi.fn(() => ({ kind: 'unavailable' as const })),
+  resolveBridge: vi.fn(async () => ({ kind: 'unavailable' as const })),
 }))
 
 const PUBLIC_ID = 'Ab3Cd4Ef5Gh6Ij7Kl8Mn9O'
@@ -183,10 +184,14 @@ describe('Game — which wallet is playing', () => {
   it('reads the address from the wallet rather than asking anyone to type it', async () => {
     installFetch({ game: { status: 200, body: gameBody() } })
     const address = vi.fn().mockResolvedValue(PLAYER)
-    vi.mocked(getBridge).mockReturnValue({
-      kind: 'real',
+    const realBridge = {
+      kind: 'real' as const,
       bridge: { ready: async () => {}, address, sign: async () => ({ publicKey: '', signature: '' }), sendWithData: async () => ({ txHash: '' }) },
-    })
+    }
+    vi.mocked(getBridge).mockReturnValue(realBridge)
+    // Inside the wallet the mount probe resolves real too, so the page keeps the
+    // "Use my wallet" button rather than the deeplink fallback.
+    vi.mocked(resolveBridge).mockResolvedValue(realBridge)
     mount(null)
 
     // There is no address field to type into. That is the point of the change.
@@ -223,14 +228,22 @@ describe('Game — which wallet is playing', () => {
     expect(screen.queryByTestId('trivia-idle')).toBeNull()
   })
 
-  it('tells a plain browser to open the link in the wallet', async () => {
+  it('offers a Nimiq Pay deeplink to a plain browser, not a dead end', async () => {
+    // Opened outside the wallet, the page cannot read an address at all. The old
+    // behaviour was a line of copy telling the reader to open in Nimiq Pay and no
+    // way to do it. On mount now, `resolveBridge` reports unavailable and the
+    // page shows a deeplink that reopens THIS url inside the app.
     installFetch({ game: { status: 200, body: gameBody() } })
     vi.mocked(getBridge).mockReturnValue({ kind: 'unavailable' })
+    vi.mocked(resolveBridge).mockResolvedValue({ kind: 'unavailable' })
     mount(null)
 
-    fireEvent.click(await screen.findByTestId('connect-wallet'))
-    const problem = await screen.findByTestId('wallet-problem')
-    expect(problem.textContent).toMatch(/nimiq pay/i)
+    const open = await screen.findByTestId('open-in-app')
+    const link = open.querySelector('a')!
+    // A real Nimiq Pay deeplink carrying this page's own https url, encoded.
+    expect(link.getAttribute('href')).toMatch(/^nimiqpay:\/\/miniapp\?url=https%3A/)
+    // And no wallet button, because there is no wallet to reach here.
+    expect(screen.queryByTestId('connect-wallet')).toBeNull()
   })
 })
 

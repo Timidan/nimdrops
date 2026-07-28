@@ -61,16 +61,16 @@ export default function Games() {
 
   return (
     <Screen>
-      <div className="nd-gate-surface flex flex-1 flex-col bg-chalk px-5 pt-9 pb-12 text-chalk-ink">
+      <div className="flex flex-1 flex-col px-5 pt-9 pb-12 text-chalk">
         <h1 className="text-2xl font-semibold tracking-tight">Drops you can earn</h1>
-        <p className="mt-2 text-sm leading-relaxed text-chalk-ink/65">
+        <p className="mt-2 text-sm leading-relaxed text-chalk/65">
           Each of these asks one thing of you first. Meet it and you claim a fixed share on the
           drop&rsquo;s own page, where you tap and approve one signature.
         </p>
 
         {games === null && error === null ? <Loading /> : null}
         {error !== null ? (
-          <p data-testid="games-error" className="mt-8 text-sm leading-relaxed text-chalk-ink/65">
+          <p data-testid="games-error" className="mt-8 text-sm leading-relaxed text-chalk/65">
             {error} Nothing has been lost. This is only a list.
           </p>
         ) : null}
@@ -83,7 +83,7 @@ export default function Games() {
               return (
                 <section key={kind} data-testid={`group-${kind}`} className="mt-10">
                   <h2 className="text-base font-semibold tracking-tight">{KIND_HEADINGS[kind]}</h2>
-                  <p className="mt-1 text-xs leading-relaxed text-chalk-ink/55">{KIND_BLURBS[kind]}</p>
+                  <p className="mt-1 text-xs leading-relaxed text-chalk/55">{KIND_BLURBS[kind]}</p>
                   <ul className="mt-4 flex flex-col gap-3">
                     {group.map((game) => (
                       <li key={game.publicId}>
@@ -118,24 +118,24 @@ function GameCard({ game }: { game: ListedGame }) {
     <Link
       to={`/game/${game.publicId}`}
       data-testid={`game-${game.publicId}`}
-      className="block rounded-2xl border border-chalk-ink/10 bg-chalk-ink/4 p-4"
+      className="block rounded-2xl border border-chalk/10 bg-chalk/4 p-4"
     >
       <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
         {/* Exact, never rounded, tabular so a column of them cannot jitter. */}
         <span className="nd-amount text-2xl">{amount} NIM</span>
         {game.tier ? (
-          <span className="rounded-full border border-chalk-ink/15 px-2 py-0.5 text-[0.6875rem] font-medium text-chalk-ink/55">
+          <span className="rounded-full border border-chalk/15 px-2 py-0.5 text-[0.6875rem] font-medium text-chalk/55">
             {game.tier}
           </span>
         ) : null}
       </div>
 
-      <p className="mt-1 text-xs text-chalk-ink/55">each</p>
+      <p className="mt-1 text-xs text-chalk/55">each</p>
 
       {game.hint ? (
         <p
           data-testid={`hint-${game.publicId}`}
-          className="mt-3 border-l-2 border-gold/45 pl-3 text-sm leading-relaxed text-chalk-ink/70"
+          className="mt-3 border-l-2 border-gold/45 pl-3 text-sm leading-relaxed text-chalk/70"
         >
           {game.hint}
         </p>
@@ -144,20 +144,20 @@ function GameCard({ game }: { game: ListedGame }) {
       {locked ? (
         <p
           data-testid={`locked-${game.publicId}`}
-          className="mt-3 rounded-xl bg-chalk-ink/6 px-3 py-2 text-xs leading-relaxed text-chalk-ink/70"
+          className="mt-3 rounded-xl bg-chalk/6 px-3 py-2 text-xs leading-relaxed text-chalk/70"
         >
           Locked until a {game.unlockRequiresTier} round has been passed. The share stays this size
           when it opens.
         </p>
       ) : null}
 
-      <p className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs tabular-nums text-chalk-ink/55">
+      <p className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs tabular-nums text-chalk/55">
         <span data-testid={`slots-${game.publicId}`}>
           {game.slotsRemaining} {game.slotsRemaining === 1 ? 'share' : 'shares'} left
         </span>
         {game.expiresAt ? (
           <>
-            <span aria-hidden="true" className="text-chalk-ink/25">
+            <span aria-hidden="true" className="text-chalk/25">
               ·
             </span>
             <Expiry expiresAt={game.expiresAt} />
@@ -199,13 +199,13 @@ function Loading() {
  */
 function Empty() {
   return (
-    <div data-testid="games-empty" className="mt-12 rounded-2xl bg-chalk-ink/5 p-4">
-      <p className="text-sm leading-relaxed text-chalk-ink/75">There is nothing to earn right now.</p>
-      <p className="mt-3 text-sm leading-relaxed text-chalk-ink/60">
+    <div data-testid="games-empty" className="mt-12 rounded-2xl bg-chalk/5 p-4">
+      <p className="text-sm leading-relaxed text-chalk/75">There is nothing to earn right now.</p>
+      <p className="mt-3 text-sm leading-relaxed text-chalk/60">
         These are put up one at a time, usually around an event, and they end after 24 hours. Nothing
         is wrong with this page.
       </p>
-      <Link to="/create" className="nd-secondary mt-6 block w-full text-center">
+      <Link to="/create" className="nd-quiet mt-6 block w-full text-center">
         Send a NimDrop instead
       </Link>
     </div>
