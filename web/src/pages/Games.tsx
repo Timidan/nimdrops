@@ -37,7 +37,8 @@ const KIND_HEADINGS: Record<GateKind, string> = {
 
 const KIND_BLURBS: Record<GateKind, string> = {
   passphrase: 'Somebody said a phrase out loud. Type it and the share is yours to claim.',
-  trivia: 'Five questions, four options each. All five right and the share is yours to claim.',
+  trivia:
+    'Five questions, four options each. Three or more right and a share is yours: your score sets how much of it you claim.',
   attested: 'Whoever runs the drop confirms who is eligible. There is nothing to answer.',
 }
 
