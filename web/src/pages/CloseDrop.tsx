@@ -264,118 +264,140 @@ function Confirm({
   const claimed = drop ? drop.claimCount - drop.remaining : 0
 
   return (
-    <GlassSheet
-      testId="close-confirm"
-      header={
-        <div className="nd-headline">
-          <h1>Close this drop</h1>
+    <>
+      {unclaimed ? (
+        <div className="nd-money">
+          <Amount value={unclaimed} as="p" className="nd-amount" data-size="md" />
+          <p className="nd-moneycap">unclaimed in this drop</p>
         </div>
-      }
-      caption={
-        drop
-          ? `${drop.sponsorLabel} · ${drop.remaining} of ${drop.claimCount} shares are still unclaimed`
-          : 'Reading this drop…'
-      }
-    >
-      {unclaimed ? <Amount value={unclaimed} className="nd-amount" data-size="md" /> : null}
-
-      <div className="nd-panel mt-3">
-        <p className="nd-note">
-          {claimed === 0
-            ? 'Nobody has claimed a share yet.'
-            : `${claimed} ${claimed === 1 ? 'person has' : 'people have'} already claimed. They are still paid in full — closing never takes a claimed share back.`}
-        </p>
-        <p className="nd-note mt-3">
-          {unclaimed
-            ? `The ${unclaimed} NIM nobody has claimed goes back to the wallet that funded this drop.`
-            : 'Every share has been claimed, so there is nothing left to refund.'}
-        </p>
-        <p className="nd-note mt-3">
-          Anyone who opens the link after this finds the drop closed. The link keeps working; there
-          is nothing left to claim.
-        </p>
-      </div>
-
-      <div data-testid="close-irreversible" className="nd-panel nd-panel--warn mt-4">
-        <p className="text-[0.9375rem] leading-relaxed text-pretty">
-          <WarningIcon size={16} /> This cannot be undone. A closed drop cannot be reopened, and
-          starting another one means funding it again.
-        </p>
-      </div>
-
-      {notice ? (
-        <div data-testid="close-notice" className="nd-panel mt-3">
-          <p className="nd-note" role="status">
-            {notice}
+      ) : null}
+      <GlassSheet
+        testId="close-confirm"
+        header={
+          <div className="nd-headline">
+            <h1>Close this drop</h1>
+          </div>
+        }
+        caption={
+          drop
+            ? `${drop.sponsorLabel} · ${drop.remaining} of ${drop.claimCount} shares are still unclaimed`
+            : 'Reading this drop…'
+        }
+      >
+        <div className="nd-panel mt-3">
+          <p className="nd-note">
+            {claimed === 0
+              ? 'Nobody has claimed a share yet.'
+              : `${claimed} ${claimed === 1 ? 'person has' : 'people have'} already claimed. They are still paid in full — closing never takes a claimed share back.`}
+          </p>
+          <p className="nd-note mt-3">
+            {unclaimed
+              ? `The ${unclaimed} NIM nobody has claimed goes back to the wallet that funded this drop.`
+              : 'Every share has been claimed, so there is nothing left to refund.'}
+          </p>
+          <p className="nd-note mt-3">
+            Anyone who opens the link after this finds the drop closed. The link keeps working; there
+            is nothing left to claim.
           </p>
         </div>
-      ) : null}
 
-      <button type="button" className="nd-action mt-5" onClick={onClose} disabled={busy || !drop}>
-        {stage === 'checking'
-          ? 'Checking what is left…'
-          : stage === 'signing'
-            ? 'Waiting for your wallet…'
-            : stage === 'closing'
-              ? 'Closing…'
-              : unclaimed
-                ? `Close and send back ${unclaimed} NIM`
-                : 'Close this drop'}
-      </button>
+        <div data-testid="close-irreversible" className="nd-panel nd-panel--warn mt-4">
+          <p className="text-[0.9375rem] leading-relaxed text-pretty">
+            <WarningIcon size={16} /> This cannot be undone. A closed drop cannot be reopened, and
+            starting another one means funding it again.
+          </p>
+        </div>
 
-      <p className="nd-note">
-        You will be asked to approve with the wallet that funded this drop. No other wallet can
-        close it.
-      </p>
+        {notice ? (
+          <div data-testid="close-notice" className="nd-panel mt-3">
+            <p className="nd-note" role="status">
+              {notice}
+            </p>
+          </div>
+        ) : null}
 
-      {unclaimed ? (
-        <p className="nd-note mt-3">
-          The amount is checked again before your wallet opens. Anyone who claims after that is
-          still paid, so what comes back can be less than {unclaimed} NIM.
+        <button type="button" className="nd-action mt-5" onClick={onClose} disabled={busy || !drop}>
+          {stage === 'checking'
+            ? 'Checking what is left…'
+            : stage === 'signing'
+              ? 'Waiting for your wallet…'
+              : stage === 'closing'
+                ? 'Closing…'
+                : unclaimed
+                  ? `Close and send back ${unclaimed} NIM`
+                  : 'Close this drop'}
+        </button>
+
+        <p className="nd-note">
+          You will be asked to approve with the wallet that funded this drop. No other wallet can
+          close it.
         </p>
-      ) : null}
 
-      <p className="nd-note mt-3">
-        <Link to={`/drop/${publicId}`}>Leave it running</Link>
-      </p>
+        {unclaimed ? (
+          <p className="nd-note mt-3">
+            The amount is checked again before your wallet opens. Anyone who claims after that is
+            still paid, so what comes back can be less than {unclaimed} NIM.
+          </p>
+        ) : null}
 
-      {/* The deep link reopens THIS page inside Nimiq Pay, so a sponsor who
-          followed their own share link in an ordinary browser can still sign. */}
-      <p className="nd-note mt-3">
-        <a href={nimiqPayDeeplink(pageUrl(publicId))}>Open this page in Nimiq Pay</a>
-      </p>
-      <GetNimiqPay className="nd-gate-getapp" />
-    </GlassSheet>
+        <p className="mt-1 text-center">
+          <Link className="nd-textlink" to={`/drop/${publicId}`}>
+            Leave it running
+          </Link>
+        </p>
+
+        {/* The deep link reopens THIS page inside Nimiq Pay, so a sponsor who
+            followed their own share link in an ordinary browser can still sign. */}
+        <p className="mt-1 text-center">
+          <a className="nd-textlink" href={nimiqPayDeeplink(pageUrl(publicId))}>
+            Open this page in Nimiq Pay
+          </a>
+        </p>
+        <GetNimiqPay className="nd-gate-getapp" />
+      </GlassSheet>
+    </>
   )
 }
 
 function Closed({ publicId, result }: { publicId: string; result: CloseAccepted }) {
   return (
-    <GlassSheet
-      testId="close-done"
-      header={
-        <div className="nd-headline">
-          <h1>Drop closed</h1>
-        </div>
-      }
-      caption="Nobody else can claim from this drop."
-    >
-      <Amount value={result.refund} className="nd-amount" data-size="md" />
-      <p className="nd-note">
-        {result.refundLuna === '0'
-          ? 'Every share had been claimed, so there was nothing left to send back.'
-          : 'is on its way back to the wallet that funded this drop. It is sent as an ordinary transaction, so it lands once the network confirms it.'}
-      </p>
-      {result.claimedShares > 0 ? (
-        <p className="nd-note">
-          The {result.claimedShares} {result.claimedShares === 1 ? 'share' : 'shares'} already
-          claimed {result.claimedShares === 1 ? 'is' : 'are'} still being paid out in full.
+    <>
+      <div className="nd-money">
+        <Amount value={result.refund} as="p" className="nd-amount" data-size="md" />
+        <p className="nd-moneycap">
+          {result.refundLuna === '0'
+            ? 'nothing was left to send back'
+            : 'on its way back to the wallet that funded this drop'}
         </p>
-      ) : null}
-      <p className="nd-note">
-        <Link to={`/drop/${publicId}`}>See the drop</Link>
-      </p>
-    </GlassSheet>
+      </div>
+      <GlassSheet
+        testId="close-done"
+        dip
+        header={
+          <div className="nd-headline">
+            <h1>Drop closed</h1>
+          </div>
+        }
+        caption="Nobody else can claim from this drop."
+      >
+        {result.refundLuna === '0' ? null : (
+          <p className="nd-note">
+            The refund is sent as an ordinary transaction, so it lands once the network confirms it.
+          </p>
+        )}
+        {result.claimedShares > 0 ? (
+          <p className="nd-note">
+            The {result.claimedShares} {result.claimedShares === 1 ? 'share' : 'shares'} already
+            claimed {result.claimedShares === 1 ? 'is' : 'are'} still being paid out in full.
+          </p>
+        ) : null}
+        <p className="mt-1 text-center">
+          <Link className="nd-textlink" to={`/drop/${publicId}`}>
+            See the drop
+          </Link>
+        </p>
+      </GlassSheet>
+    </>
   )
 }
 
@@ -390,8 +412,10 @@ function Unavailable({ publicId, notice }: { publicId: string; notice: string })
       }
       caption={notice || 'This drop cannot be closed.'}
     >
-      <p className="nd-note">
-        <Link to={`/drop/${publicId}`}>See the drop</Link>
+      <p className="mt-1 text-center">
+        <Link className="nd-textlink" to={`/drop/${publicId}`}>
+          See the drop
+        </Link>
       </p>
     </GlassSheet>
   )

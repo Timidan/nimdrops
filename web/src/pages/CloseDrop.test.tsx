@@ -144,6 +144,15 @@ describe('CloseDrop — before the wallet', () => {
     expect(screen.getByText(/goes back to the wallet that funded this drop/i)).toBeTruthy()
     expect(screen.getByText(/finds the drop closed/i)).toBeTruthy()
     expect(screen.getByTestId('close-irreversible').textContent).toMatch(/cannot be undone/i)
+
+    // One h1 per screen: the headline. The money renders as a paragraph here.
+    expect(document.querySelectorAll('h1')).toHaveLength(1)
+    // The money sits on the open field, not inside the sheet (s4 two-zone form).
+    const sheet = screen.getByTestId('close-confirm')
+    expect(sheet.querySelector('[data-testid="amount-hero"]')).toBeNull()
+    expect(document.querySelector('.nd-money [data-testid="amount-hero"]')).not.toBeNull()
+    // Secondary actions are controls, not muted prose.
+    expect(screen.getByText('Leave it running').className).toContain('nd-textlink')
   })
 
   it('offers a way out that is not closing', async () => {
@@ -199,6 +208,10 @@ describe('CloseDrop — closing', () => {
     expect(screen.getByText(/2 shares already\s+claimed are still being paid out/i)).toBeTruthy()
     // The one word this screen may never say about a refund it has not seen land.
     expect(screen.queryByText(/\brefunded\b|\bpaid back\b|\barrived\b/i)).toBeNull()
+
+    expect(screen.getByTestId('close-done').getAttribute('data-dip')).toBe('true')
+    expect(screen.getByText('See the drop').className).toContain('nd-textlink')
+    expect(document.querySelectorAll('h1')).toHaveLength(1)
   })
 
   it('keeps the drop running when the wallet closes without approving', async () => {

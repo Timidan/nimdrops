@@ -248,7 +248,9 @@ export default function DropView({
           */}
           {sponsorCloseHref && !outcome ? (
             <p className="nd-note mt-4 text-center" data-testid="sponsor-close-link">
-              <Link to={sponsorCloseHref}>You funded this drop — close it early</Link>
+              <Link className="nd-textlink" to={sponsorCloseHref}>
+                You funded this drop — close it early
+              </Link>
             </p>
           ) : null}
         </GlassSheet>

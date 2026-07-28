@@ -29,7 +29,7 @@ import type { ReactNode } from 'react'
  * ## The form: a bottom sheet, not a centred card
  *
  * On a phone the sheet is anchored to the foot of the field, edge to edge, with
- * 30px top corners; at 54rem of the FIELD's own width it becomes a right-hand
+ * 28px top corners (`--nd-radius-sheet`); at 54rem of the FIELD's own width it becomes a right-hand
  * column of 27rem. That is the s4 "Stack" layout the owner chose. The blurred
  * region is bounded on both: bounded in height on a phone, bounded in width on
  * a poster, and never the page.

@@ -94,6 +94,12 @@ export interface AmountProps {
   className?: string
   /** Passed straight through, so a surface can step the type by length. */
   'data-size'?: string
+  /**
+   * The element the lockup renders as. The money is the h1 on the claim
+   * surface; a sponsor page whose sheet already carries the headline passes
+   * 'p' so the document keeps exactly one h1.
+   */
+  as?: 'h1' | 'p'
 }
 
 /**
@@ -137,11 +143,12 @@ export function Amount({
   tone = 'gold',
   className,
   'data-size': size,
+  as: Tag = 'h1',
 }: AmountProps) {
   const height = `${CAP * markScale}em`
   const lift = `${((CAP / 2) * (markScale - 1)).toFixed(4)}em`
   return (
-    <h1 className={className} aria-label={`${value} NIM`} data-testid="amount-hero" data-size={size}>
+    <Tag className={className} aria-label={`${value} NIM`} data-testid="amount-hero" data-size={size}>
       <span className="nim-figure" aria-hidden="true">
         {value}
       </span>
@@ -156,7 +163,7 @@ export function Amount({
           NIM
         </span>
       ) : null}
-    </h1>
+    </Tag>
   )
 }
 
