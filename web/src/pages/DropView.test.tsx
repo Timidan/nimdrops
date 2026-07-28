@@ -572,6 +572,25 @@ describe('the trivia slot', () => {
   })
 
   /**
+   * A trivia-gated drop's payout is a score-derived fraction of the amount
+   * shown, so the label under the figure and the sentence in the caption may
+   * only promise "up to" it — never state it as fixed and equal, which is
+   * true of every other kind but this one.
+   */
+  it('says "up to" beside the amount when the drop is trivia-gated', () => {
+    view('ready', { drop: { ...DROP, gateKind: 'trivia' } })
+    expect(document.querySelector('.nd-moneycap')!.textContent).toMatch(/up to/i)
+    expect(document.querySelector('.nd-caption')!.textContent).toMatch(/up to/i)
+  })
+
+  /** Every other kind, and the common case of not knowing the kind at all, keeps the fixed-and-equal wording. */
+  it('keeps the fixed-and-equal wording when the drop is not trivia-gated', () => {
+    view('ready', { drop: { ...DROP, gateKind: 'passphrase' } })
+    expect(document.querySelector('.nd-moneycap')!.textContent).toMatch(/each, fixed and equal/i)
+    expect(document.querySelector('.nd-caption')!.textContent).not.toMatch(/up to/i)
+  })
+
+  /**
    * The load-bearing half of the contract. Hiding the amount behind a question
    * would turn a fixed share into a prize for a correct answer, which is the
    * framing the competition rules and the product both push away from.

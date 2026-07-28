@@ -285,6 +285,17 @@ describe('Game — trivia before play', () => {
     await screen.findByTestId('trivia-idle')
     expect(screen.getByTestId('game-amount').textContent).toMatch(/0\.12345\s*NIM/)
   })
+
+  it('promises only up to the amount, since the score decides the share', async () => {
+    installFetch({ game: { status: 200, body: gameBody() } })
+    mount()
+
+    await screen.findByTestId('trivia-idle')
+    const body = document.body.textContent ?? ''
+    expect(body).toMatch(/up to this amount/i)
+    expect(body).toMatch(/3 of 5 pays 60%, 4 pays 80%, 5 pays all of it/i)
+    expect(body).not.toMatch(/the same fixed amount for everyone/i)
+  })
 })
 
 describe('Game — trivia in play', () => {
@@ -408,6 +419,17 @@ describe('Game — trivia outcomes', () => {
     expect(document.querySelector('.nd-keyline')).toBe(null)
     expect(document.querySelector('.nd-bloom')).toBe(null)
     expect(document.body.textContent ?? '').not.toMatch(/one[\s-]?tap/i)
+  })
+
+  it('prints the scored fraction and share on the passed screen', async () => {
+    await play({
+      status: 200,
+      body: { state: 'passed', answered: 5, questionCount: 5, correctCount: 4 },
+    })
+
+    const pass = await screen.findByTestId('gate-passed')
+    expect(pass.textContent).toMatch(/4 of 5/)
+    expect(pass.textContent).toMatch(/80% of the share/)
   })
 
   /**
@@ -723,6 +745,15 @@ describe('Game — passphrase', () => {
         ...over,
       }),
     },
+  })
+
+  it('keeps the fixed-amount sentence, since only trivia scores a share', async () => {
+    installFetch(gate())
+    mount()
+
+    await screen.findByTestId('passphrase-form')
+    expect(document.body.textContent ?? '').toMatch(/the same fixed amount for everyone/i)
+    expect(document.body.textContent ?? '').not.toMatch(/up to this amount/i)
   })
 
   it('shows the hint, one field and one button', async () => {

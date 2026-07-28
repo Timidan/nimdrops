@@ -215,7 +215,7 @@ export default function DropView({
           testId="claim-sheet"
           dip={opened}
           header={<Sender state={state} drop={drop} sponsor={sponsor} />}
-          caption={<Caption state={state} amount={amount} />}
+          caption={<Caption state={state} amount={amount} drop={drop} />}
         >
           {outcome ? (
             <Outcome
@@ -333,7 +333,9 @@ function Upper({
               ? 'sent to the wallet that signed'
               : inFlight
                 ? 'reserved for the wallet that signed'
-                : 'each, fixed and equal'}
+                : drop?.gateKind === 'trivia'
+                  ? 'up to, by your score'
+                  : 'each, fixed and equal'}
           </p>
           {/* The one celebratory mark, and it is earned only after the backend
               has said `paid`. */}
@@ -481,12 +483,22 @@ function Sender({
  * the transaction is, and it is the sentence a gated drop replaces with its
  * question.
  */
-function Caption({ state, amount }: { state: ClaimUiState; amount: string }) {
+function Caption({
+  state,
+  amount,
+  drop,
+}: {
+  state: ClaimUiState
+  amount: string
+  drop: DropPublic | null
+}) {
   if (state === 'paid') return null
   if (state === 'reserved' || state === 'confirming')
     return <p className="nd-note">{amount} NIM is on its way.</p>
   if (OUTCOMES.includes(state)) return null
   if (state === 'loading' || state === 'awaiting-funding') return null
+  if (drop?.gateKind === 'trivia')
+    return <p className="nd-note">Up to {amount} NIM. Your score decides your share.</p>
   return <p className="nd-note">A fixed share of NIM, the same for everyone who opens this link.</p>
 }
 

@@ -132,7 +132,9 @@ function GameCard({ game }: { game: ListedGame }) {
         ) : null}
       </div>
 
-      <p className="mt-1 text-xs text-chalk/55">each</p>
+      <p className="mt-1 text-xs text-chalk/55">
+        {game.kind === 'trivia' ? 'up to, by your score' : 'each'}
+      </p>
 
       {game.hint ? (
         <p

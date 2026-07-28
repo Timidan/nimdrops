@@ -154,6 +154,19 @@ export interface DropPublic {
    */
   closingReason?: 'expired' | 'exhausted' | 'closed_by_sponsor' | null
   fundingTxHash?: string
+  /**
+   * The condition this drop is gated behind, or `null` for a drop with no
+   * gate. Used only to phrase the amount honestly before a claim exists:
+   * `'trivia'` is the one kind whose payout is a score-derived fraction, so it
+   * is the one kind a pre-claim screen may promise only "up to".
+   *
+   * Optional in the type for the same reason `expiryHours` is: the public
+   * drop endpoint does not send this field yet, so every reader of it today
+   * sees `undefined` and must treat that as "unknown", never as "ungated" —
+   * `undefined` and `null` both mean "say nothing kind-specific" until the
+   * server starts sending the real value.
+   */
+  gateKind?: GateKind | null
 }
 
 /** `POST /api/drops/:publicId/challenge` — the exact bytes the wallet signs. */

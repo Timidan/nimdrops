@@ -111,6 +111,26 @@ describe('Games', () => {
     expect(card.getAttribute('href')).toBe('/game/phrase-one')
   })
 
+  it('says "up to" beside a trivia amount, since the score sets the share', async () => {
+    installFetch({
+      status: 200,
+      body: {
+        games: [
+          game({ publicId: 'trivia-one', kind: 'trivia' }),
+          game({ publicId: 'phrase-one', kind: 'passphrase', tier: null, hint: 'said at 3pm' }),
+        ],
+      },
+    })
+    mount()
+
+    const trivia = await screen.findByTestId('game-trivia-one')
+    expect(trivia.textContent).toMatch(/up to, by your score/i)
+
+    const phrase = screen.getByTestId('game-phrase-one')
+    expect(phrase.textContent).toMatch(/each/i)
+    expect(phrase.textContent).not.toMatch(/up to/i)
+  })
+
   it('keeps a locked card visible, with its payout and its requirement', async () => {
     installFetch({
       status: 200,

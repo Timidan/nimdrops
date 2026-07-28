@@ -99,6 +99,12 @@ export default function Game({ walletAddress }: GameProps) {
    */
   const [review, setReview] = useState<ReviewedQuestion[] | null>(null)
   const [correctCount, setCorrectCount] = useState<number | null>(null)
+  /**
+   * Threaded alongside `correctCount` for the same reason and by the same
+   * path: it lives on the same finished-session outcome, and the pass screen
+   * needs both to print "N of M right" rather than a bare count.
+   */
+  const [questionCount, setQuestionCount] = useState<number | null>(null)
 
   const rememberWallet = useCallback((address: string) => {
     writeStoredWallet(address)
@@ -110,14 +116,18 @@ export default function Game({ walletAddress }: GameProps) {
     setWallet(null)
   }, [])
 
-  const onMet = useCallback((reviewed?: ReviewedQuestion[] | null, count?: number | null) => {
-    setMetJustNow(true)
-    // Never cleared by a caller that has none: `Passphrase` and `Attested` pass
-    // nothing, and a trivia pass can arrive in two renders if the phase lands
-    // before the review does.
-    if (reviewed && reviewed.length > 0) setReview(reviewed)
-    if (typeof count === 'number') setCorrectCount(count)
-  }, [])
+  const onMet = useCallback(
+    (reviewed?: ReviewedQuestion[] | null, count?: number | null, total?: number | null) => {
+      setMetJustNow(true)
+      // Never cleared by a caller that has none: `Passphrase` and `Attested` pass
+      // nothing, and a trivia pass can arrive in two renders if the phase lands
+      // before the review does.
+      if (reviewed && reviewed.length > 0) setReview(reviewed)
+      if (typeof count === 'number') setCorrectCount(count)
+      if (typeof total === 'number') setQuestionCount(total)
+    },
+    [],
+  )
 
   const amount = gate.amountEachLuna === null ? null : formatNim(BigInt(gate.amountEachLuna))
   const met = gate.granted || metJustNow
@@ -141,6 +151,7 @@ export default function Game({ walletAddress }: GameProps) {
             amount={amount ?? ''}
             review={review}
             correctCount={correctCount}
+            questionCount={questionCount}
           />
         ) : (
           <>
@@ -218,7 +229,11 @@ function Offer({
         {amount} NIM
       </p>
       <p className="mt-3 text-center text-xs leading-relaxed text-chalk/55">
-        The same fixed amount for everyone who meets this drop&rsquo;s condition.
+        {kind === 'trivia' ? (
+          <>Up to this amount. Your score sets your share: 3 of 5 pays 60%, 4 pays 80%, 5 pays all of it.</>
+        ) : (
+          <>The same fixed amount for everyone who meets this drop&rsquo;s condition.</>
+        )}
       </p>
 
       {slotsRemaining === null ? null : (
@@ -251,15 +266,24 @@ function Pass({
   amount,
   review,
   correctCount,
+  questionCount,
 }: {
   publicId: string
   amount: string
   review: ReviewedQuestion[] | null
   correctCount: number | null
+  questionCount: number | null
 }) {
   return (
     <div data-testid="gate-passed" className="mt-9">
       <h1 className="text-2xl font-semibold tracking-tight">You can claim {amount} NIM</h1>
+      {correctCount !== null ? (
+        <p className="mt-2 text-sm leading-relaxed text-chalk/75">
+          {correctCount} of {questionCount ?? TRIVIA_QUESTION_COUNT} right: you claim{' '}
+          {Math.floor((correctCount / (questionCount ?? TRIVIA_QUESTION_COUNT)) * 100)}% of the
+          share.
+        </p>
+      ) : null}
       <p className="mt-3 text-sm leading-relaxed text-chalk/65">
         This drop&rsquo;s condition is met for the wallet you named. Nothing has been sent yet. You
         claim on the drop&rsquo;s own page: tap and approve one signature there, and the NIM goes to
@@ -597,7 +621,11 @@ function Trivia({
   publicId: string
   walletAddress: string
   tier: string | null
-  onPass: (review: ReviewedQuestion[] | null, correctCount: number | null) => void
+  onPass: (
+    review: ReviewedQuestion[] | null,
+    correctCount: number | null,
+    questionCount: number | null,
+  ) => void
 }) {
   const session = useTriviaSession(publicId, walletAddress)
   const [submitting, setSubmitting] = useState(false)
@@ -611,9 +639,12 @@ function Trivia({
   // Travels with the review, because it IS the review when the bank withholds
   // its per-question verdicts — see `ReviewedQuestion.wasCorrect`.
   const passedCount = passed ? session.correctCount : null
+  // Same object, same reason: the fraction on the pass screen needs both the
+  // count and the total it is out of.
+  const passedTotal = passed ? session.questionCount : null
   useEffect(() => {
-    if (passed) onPass(passedReview, passedCount)
-  }, [onPass, passed, passedReview, passedCount])
+    if (passed) onPass(passedReview, passedCount, passedTotal)
+  }, [onPass, passed, passedReview, passedCount, passedTotal])
   if (passed) return null
 
   if (session.phase === 'failed') {
