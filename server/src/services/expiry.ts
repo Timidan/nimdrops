@@ -71,8 +71,13 @@ export const SWEEP_BATCH = 50
  * `drops_closing_reason_allowed` (migration 017 added the third).
  *
  * `exhausted` is written by `claims.ts` when the last slot is taken, and is not
- * a {@link closeLiveDrop} reason: that close allocates the final slot rather
- * than refunding anything, so it belongs to the allocation transaction.
+ * a {@link closeLiveDrop} reason: that close allocates the final slot, so it
+ * belongs to the allocation transaction rather than this one. Note that
+ * "every slot taken" is no longer the same fact as "nothing left to refund":
+ * a scored (sub-full-share) claim can take the last slot while still leaving
+ * an unpaid remainder, and nothing in this file writes a refund for it — the
+ * exhausted path never calls {@link closeLiveDrop} at all. That gap is a known
+ * open item, not something this comment should paper over.
  */
 export type ClosingReason = 'expired' | 'closed_by_sponsor'
 
