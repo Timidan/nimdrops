@@ -76,6 +76,10 @@ describe('Games', () => {
     // The gate pages sit on the lit field, not a flat gradient (s4).
     expect(document.querySelector('.nd-field-light.is-bloom')).not.toBeNull()
     expect(document.querySelector('.nd-field-texture')).not.toBeNull()
+    // Surfaces on the field recess; they never lift, and gold never sits here.
+    expect(document.querySelector('.bg-gold')).toBeNull()
+    expect(document.querySelector('[class*="border-gold"]')).toBeNull()
+    expect(document.querySelector('[class*="bg-chalk/4"]')).toBeNull()
   })
 
   it('shows the exact payout, the shares left, the expiry and the hint', async () => {

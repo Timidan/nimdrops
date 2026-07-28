@@ -120,11 +120,11 @@ function GameCard({ game }: { game: ListedGame }) {
     <Link
       to={`/game/${game.publicId}`}
       data-testid={`game-${game.publicId}`}
-      className="block rounded-2xl border border-chalk/10 bg-chalk/4 p-4"
+      className="block rounded-2xl border border-chalk/10 bg-(--nd-recess-field) p-4"
     >
       <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
         {/* Exact, never rounded, tabular so a column of them cannot jitter. */}
-        <span className="nd-amount text-2xl">{amount} NIM</span>
+        <span className="nd-amount nd-num text-2xl">{amount} NIM</span>
         {game.tier ? (
           <span className="rounded-full border border-chalk/15 px-2 py-0.5 text-[0.6875rem] font-medium text-chalk/55">
             {game.tier}
@@ -137,7 +137,7 @@ function GameCard({ game }: { game: ListedGame }) {
       {game.hint ? (
         <p
           data-testid={`hint-${game.publicId}`}
-          className="mt-3 border-l-2 border-gold/45 pl-3 text-sm leading-relaxed text-chalk/70"
+          className="mt-3 border-l-2 border-chalk/25 pl-3 text-sm leading-relaxed text-chalk/70"
         >
           {game.hint}
         </p>
@@ -146,7 +146,7 @@ function GameCard({ game }: { game: ListedGame }) {
       {locked ? (
         <p
           data-testid={`locked-${game.publicId}`}
-          className="mt-3 rounded-xl bg-chalk/6 px-3 py-2 text-xs leading-relaxed text-chalk/70"
+          className="mt-3 rounded-xl bg-(--nd-recess-field) px-3 py-2 text-xs leading-relaxed text-chalk/70"
         >
           Locked until a {game.unlockRequiresTier} round has been passed. The share stays this size
           when it opens.
@@ -190,7 +190,7 @@ function Expiry({ expiresAt }: { expiresAt: string }) {
 function Loading() {
   return (
     <div className="mt-16 flex flex-col items-center">
-      <div className="nd-pulse h-1.5 w-16 rounded-full bg-gold" aria-hidden="true" />
+      <div className="nd-beacon nd-pulse" aria-hidden="true" />
     </div>
   )
 }
@@ -201,7 +201,7 @@ function Loading() {
  */
 function Empty() {
   return (
-    <div data-testid="games-empty" className="mt-12 rounded-2xl bg-chalk/5 p-4">
+    <div data-testid="games-empty" className="mt-12 rounded-2xl border border-chalk/10 bg-(--nd-recess-field) p-4">
       <p className="text-sm leading-relaxed text-chalk/75">There is nothing to earn right now.</p>
       <p className="mt-3 text-sm leading-relaxed text-chalk/60">
         These are put up one at a time, usually around an event, and they end after 24 hours. Nothing
