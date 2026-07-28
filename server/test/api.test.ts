@@ -1000,6 +1000,12 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
     // argument for itself: it says only WHY the holder of this link cannot
     // claim, which is the one thing they are owed, and it names no address, no
     // amount and no time of the decision.
+    // `gateKind` is argued for on the same terms as `expiryHours`: it is the
+    // SPONSOR's published choice of condition, one word from a closed set. It
+    // names no claimant, no hint, no question, and not whether the reader's
+    // own wallet holds a grant. It exists so a scored gate's claim screen can
+    // say "up to" instead of promising a full share a 3-of-5 score will not
+    // receive.
     expect(Object.keys(pub).sort()).toEqual([
       'amountEach',
       'claimCount',
@@ -1007,6 +1013,7 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
       'expiresAt',
       'expiryHours',
       'fundingTxHash',
+      'gateKind',
       'message',
       'publicId',
       'remaining',

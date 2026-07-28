@@ -594,6 +594,9 @@ function publicBody(drop: DropPublic): Record<string, unknown> {
     // not send one" are different facts and a claimant screen distinguishes
     // them: the first is a live drop, the second is nothing it may conclude.
     closingReason: drop.closingReason,
+    // Kind only, so a pre-claim screen can say "up to" on a scored gate. Never
+    // the hint, the bank, or whether this reader holds a grant.
+    gateKind: drop.gateKind,
     ...(drop.fundingTxHash === undefined ? {} : { fundingTxHash: drop.fundingTxHash }),
   }
 }

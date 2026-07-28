@@ -302,6 +302,16 @@ export interface DropPublic {
    */
   closingReason: PublicClosingReason | null
   fundingTxHash?: string
+  /**
+   * The kind of condition gating this drop, or `null` for an ungated one.
+   *
+   * Served so a pre-claim screen can phrase the amount honestly: `'trivia'` is
+   * the one kind whose payout is a score-derived fraction of the share, so it
+   * is the one kind the claim surface promises only "up to". It names the
+   * KIND alone — never the passphrase hint, the question bank, or whether the
+   * reader's own wallet holds a grant.
+   */
+  gateKind: string | null
 }
 
 export interface CreateDraftInput {
@@ -446,13 +456,15 @@ interface DropRow {
   expires_at: Date | null
   closing_reason: string | null
   claims_reserved: string
+  gate_kind: string | null
 }
 
 const SELECT_DROP = `
   SELECT d.id, d.public_id, d.sponsor_label, d.message, d.claim_count,
          d.amount_each_luna, d.expected_funding_luna, d.state, d.funding_tx_hash,
          d.activated_height, d.expiry_hours, d.expires_at, d.closing_reason,
-         (SELECT count(*) FROM claims c WHERE c.drop_id = d.id)::text AS claims_reserved
+         (SELECT count(*) FROM claims c WHERE c.drop_id = d.id)::text AS claims_reserved,
+         (SELECT g.kind FROM drop_gates g WHERE g.drop_id = d.id) AS gate_kind
   FROM drops d
   WHERE d.public_id = $1
 `
@@ -477,6 +489,7 @@ function toPublic(row: DropRow): DropPublic {
     expiryHours: row.expiry_hours,
     expiresAt: row.expires_at,
     closingReason: toClosingReason(row.closing_reason),
+    gateKind: row.gate_kind,
     ...(row.funding_tx_hash === null ? {} : { fundingTxHash: row.funding_tx_hash }),
   }
 }

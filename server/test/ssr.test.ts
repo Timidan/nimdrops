@@ -38,6 +38,7 @@ const knownDrop: DropPublic = {
   expiryHours: 24,
   expiresAt: new Date('2026-07-26T12:00:00.000Z'),
   closingReason: null,
+  gateKind: null,
   fundingTxHash: 'a'.repeat(64),
 }
 

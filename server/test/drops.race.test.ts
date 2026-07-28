@@ -1173,6 +1173,9 @@ describe.skipIf(!hasDb)('drop drafts and exact funding activation (real Postgres
     // only why the holder of the link cannot claim, and names no address, no
     // amount and no time. Every other addition has to be argued for here too.
     expect(pub.closingReason, 'an open drop reports no reason, not a default').toBeNull()
+    // `gateKind` joins on the same terms: the sponsor's own published choice
+    // of condition, one word from a closed set, naming no claimant and no gate
+    // content — served so a scored gate's claim screen can say "up to".
     expect(Object.keys(pub).sort()).toEqual(
       [
         'amountEach',
@@ -1181,6 +1184,7 @@ describe.skipIf(!hasDb)('drop drafts and exact funding activation (real Postgres
         'expiresAt',
         'expiryHours',
         'fundingTxHash',
+        'gateKind',
         'message',
         'publicId',
         'remaining',
