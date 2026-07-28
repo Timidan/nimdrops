@@ -505,8 +505,14 @@ describe.skipIf(!hasDb)('public stats (real Postgres)', () => {
       uniqueWalletsPaid: 0,
       dropsFunded: 0,
       sharesClaimed: 0,
+      // Zero, not absent. This suite was written before the gates migrations
+      // landed, when `trivia_answers` genuinely did not exist and the honest
+      // answer was "cannot measure". Migration 015 creates the table on every
+      // deployment now, so nobody has answered a question yet is a MEASURED
+      // zero — which is the distinction `unavailable` exists to preserve.
+      questionsAnswered: 0,
     })
-    expect(snapshot.unavailable).toEqual([QUESTIONS_ANSWERED])
+    expect(snapshot.unavailable).toEqual([])
   })
 
   it('reports a single settled payout exactly', async () => {
@@ -684,13 +690,16 @@ describe.skipIf(!hasDb)('public stats (real Postgres)', () => {
     expect(Object.keys(body).sort()).toEqual(['generatedAt', 'stats', 'unavailable'])
     expect(Object.keys(body.stats).sort()).toEqual([
       'dropsFunded',
+      'questionsAnswered',
       'sharesClaimed',
       'totalPaidOut',
       'totalPaidOutLuna',
       'uniqueWalletsPaid',
     ])
     expect(body.stats.totalPaidOutLuna).toBe('40000')
-    expect(body.unavailable).toEqual([QUESTIONS_ANSWERED])
+    // Empty since the gates migrations landed: `trivia_answers` exists on every
+    // deployment, so there is nothing this endpoint cannot measure.
+    expect(body.unavailable).toEqual([])
   })
 
   it('publishes no address and no per-wallet detail', async () => {
@@ -751,18 +760,22 @@ describe.skipIf(!hasDb)('public stats (real Postgres)', () => {
       },
     ])
 
-    // 1. Absent — the state this deployment is actually in today. No 500, no
-    //    invented zero, and the money figures are all correct.
+    // 1. Absent. This used to be the state the deployment was actually in; the
+    //    gates migrations now create `trivia_answers` everywhere, so absence has
+    //    to be simulated by dropping it. The BEHAVIOUR is still worth pinning —
+    //    a deployment reads stats for one TTL after a migration lands, and any
+    //    future table this service learns to read starts out missing.
+    await pool.query(`DROP TABLE IF EXISTS ${SCHEMA}.trivia_answers CASCADE`)
     const before = (await (await app.request('/api/stats')).json()) as PublicStats
     expect(before.stats.totalPaidOutLuna).toBe('40000')
     expect(before.unavailable).toEqual([QUESTIONS_ANSWERED])
     expect(QUESTIONS_ANSWERED in before.stats).toBe(false)
 
-    // 2. Present. A stand-in for the table the conditional-claims migration will
-    //    add, carrying only the two things `services/stats.ts` reads: the name
-    //    `trivia_answers` and an `answered_at` that is NULL until the player
-    //    submits. If the real migration names either differently, THIS TEST is
-    //    where that is caught, before the landing page under-reports in silence.
+    // 2. Present. A stand-in carrying only the two things `services/stats.ts`
+    //    reads: the name `trivia_answers` and an `answered_at` that is NULL
+    //    until the player submits. The real migration (019_gates.sql) now ships
+    //    both, and if either is ever renamed THIS TEST is where that is caught,
+    //    before the landing page under-reports in silence.
     try {
       await pool.query(`
         CREATE TABLE ${SCHEMA}.trivia_answers (

@@ -242,6 +242,150 @@ export interface PublicStats {
 /** Every figure the landing page knows how to render, in the order it renders them. */
 export type StatKey = keyof StatsFigures
 
+// ---- conditional claims ("games") ------------------------------------------------
+//
+// A gated drop asks a wallet to satisfy one condition before it will let that
+// wallet claim. Three kinds exist and the server dispatches on `kind`; none of
+// them is a money endpoint, and none of them takes a signature — a grant names
+// an address, and `reserveClaim` compares that address against the one derived
+// from the claim signature, so a condition met under somebody else's address is
+// worthless to whoever met it.
+
+export type GateKind = 'trivia' | 'passphrase' | 'attested'
+
+/**
+ * `GET /api/games/:publicId` — one game, plus whether a named wallet has
+ * already met its condition.
+ *
+ * Deliberately a named field set: the server never returns `drop_gates.config`,
+ * which holds the passphrase hash for one kind and the attester key for
+ * another. There is no `questionCount` and no `secondsPerQuestion` here — those
+ * arrive with a started session.
+ */
+export interface GameView {
+  publicId: string
+  kind: GateKind
+  /** Trivia difficulty; null for a kind that has no tiers. */
+  tier: string | null
+  /** A tier that must already have been passed, or null when nothing locks it. */
+  unlockRequiresTier: string | null
+  /** The sponsor's public hint for `passphrase`; null for every other kind. */
+  hint: string | null
+  amountEachLuna: string
+  claimCount: number
+  slotsRemaining: number
+  expiresAt: string | null
+  state: DropState
+  /** False when no wallet was named — the server cannot answer without one. */
+  granted: boolean
+}
+
+/** One row of `GET /api/games`. Listed, gated, live drops only. */
+export interface ListedGame {
+  publicId: string
+  kind: GateKind
+  tier: string | null
+  amountEachLuna: string
+  slotsRemaining: number
+  expiresAt: string | null
+  unlockRequiresTier: string | null
+  hint: string | null
+}
+
+/** `POST /api/games/:publicId/session` — trivia only. */
+export interface StartedTriviaSession {
+  sessionId: string
+  questionCount: number
+  secondsPerQuestion: number
+  /** Questions already delivered, so a resumed session does not restart at 1. */
+  deliveredCount: number
+}
+
+/**
+ * One question in play.
+ *
+ * `deadlineAt` is stamped by the server at delivery and re-reading does not
+ * extend it, so it — and never a local timer start — is what a countdown may
+ * derive from. Note what is absent: no answer index, no correctness, no score.
+ */
+export interface TriviaQuestion {
+  questionIndex: number
+  prompt: string
+  options: string[]
+  category: string
+  deadlineAt: string
+  questionCount: number
+}
+
+/**
+ * One question of a FINISHED session, with what the player chose and what was
+ * right.
+ *
+ * Mirrors `ReviewedQuestion` in `server/src/gates/trivia/sessions.ts`. Two
+ * fields are easy to conflate and are not the same thing:
+ *
+ *  - `answerIndex` is `null` only when the deadline passed with nothing
+ *    submitted. It is NOT how a wrong answer is expressed.
+ *  - `wasCorrect` is the server's verdict and is the only one a screen may use.
+ *    A late answer is recorded with the index the player chose and scored
+ *    wrong, so `answerIndex === correctIndex` can be true while `wasCorrect` is
+ *    false. Comparing the two indices here would contradict the scoring.
+ */
+export interface ReviewedQuestion {
+  questionIndex: number
+  prompt: string
+  /** Always four, in the order they were shown. */
+  options: string[]
+  /** What the player chose; `null` if the deadline passed with no submission. */
+  answerIndex: number | null
+  /**
+   * The right option, or `null` when the server withheld it.
+   *
+   * Withheld is the NORMAL case for a question the operator wrote themselves:
+   * the server names the right option only where the answer is already published
+   * elsewhere.
+   */
+  correctIndex: number | null
+  /**
+   * Whether the player got this one, or `null` when the server withheld it.
+   *
+   * Always null together with `correctIndex`, never on its own — a verdict on
+   * the option the player chose IS the answer for that question. When both are
+   * null the screen shows what they picked and nothing more, and
+   * `TriviaOutcome.correctCount` carries the score.
+   */
+  wasCorrect: boolean | null
+  /**
+   * The answer arrived after its deadline, so it was scored wrong whatever it
+   * said. Distinct from `answerIndex === null`, which means nothing was
+   * submitted at all — a late answer HAS an index, and it can be the right one.
+   */
+  wasLate: boolean
+}
+
+/**
+ * The result of one submission.
+ *
+ * `state` is the only correctness signal WHILE A QUESTION IS STILL IN PLAY:
+ * there is no per-question feedback mid-session, and `review` is absent until
+ * the session is over. So a client must never treat `review` as
+ * optional-but-expected mid-play: absent means absent.
+ */
+export interface TriviaOutcome {
+  state: 'in_progress' | 'passed' | 'failed'
+  answered: number
+  questionCount: number
+  /** Present ONLY when `state` is `passed` or `failed`. */
+  review?: ReviewedQuestion[]
+  /**
+   * How many were right, out of `questionCount`. Present whenever `review` is.
+   *
+   * The only feedback there is when the bank withholds per-question verdicts, so
+   * a screen must not treat it as a nice-to-have beside `review`.
+   */
+  correctCount?: number
+}
+
 export interface CreateDropInput {
   sponsorLabel: string
   message?: string
@@ -625,5 +769,93 @@ export async function closeDrop(publicId: string, signed: SignedClose): Promise<
 export async function getClaimStatus(claimId: string, statusToken: string): Promise<ClaimStatus> {
   return request<ClaimStatus>(`/claims/${encodeURIComponent(claimId)}`, {
     headers: { Authorization: `Bearer ${statusToken}` },
+  })
+}
+
+// ---- gate endpoints ---------------------------------------------------------------
+
+/**
+ * Every listed, gated, live drop. Answers with an empty list rather than a 404
+ * when no gates are configured, so an empty catalogue does not read as an outage.
+ */
+export async function listGames(): Promise<ListedGame[]> {
+  const body = await request<{ games?: ListedGame[] }>('/games')
+  return Array.isArray(body?.games) ? body.games : []
+}
+
+/**
+ * One game. `walletAddress` is optional and travels as a query parameter: it is
+ * the only way the server can answer `granted`, and it is an assertion rather
+ * than a proof — which is safe, because a grant is worthless to any address but
+ * the one it names.
+ */
+export async function getGame(publicId: string, walletAddress?: string): Promise<GameView> {
+  const query = walletAddress ? `?wallet=${encodeURIComponent(walletAddress)}` : ''
+  return request<GameView>(`/games/${encodeURIComponent(publicId)}${query}`)
+}
+
+export async function startTriviaSession(
+  publicId: string,
+  walletAddress: string,
+): Promise<StartedTriviaSession> {
+  return request<StartedTriviaSession>(`/games/${encodeURIComponent(publicId)}/session`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ walletAddress }),
+  })
+}
+
+/**
+ * The question in play.
+ *
+ * `walletAddress` is required, and not for identification — the session already
+ * knows whose it is. It is there so a LEAKED SESSION ID is useless on its own:
+ * without it, anyone who saw a session id in a log, a referrer or a shared URL
+ * could submit a wrong answer and impose the cooldown on that wallet.
+ */
+export async function getTriviaQuestion(
+  publicId: string,
+  sessionId: string,
+  walletAddress: string,
+): Promise<TriviaQuestion> {
+  const wallet = encodeURIComponent(walletAddress)
+  return request<TriviaQuestion>(
+    `/games/${encodeURIComponent(publicId)}/session/${encodeURIComponent(sessionId)}/question?wallet=${wallet}`,
+  )
+}
+
+/**
+ * Answer the question in play. `questionIndex` is sent so the server can refuse
+ * a submission for a question that is no longer the current one, rather than
+ * spending this session's answer on the wrong question.
+ */
+export async function submitTriviaAnswer(
+  publicId: string,
+  sessionId: string,
+  questionIndex: number,
+  answerIndex: number,
+  walletAddress: string,
+): Promise<TriviaOutcome> {
+  return request<TriviaOutcome>(
+    `/games/${encodeURIComponent(publicId)}/session/${encodeURIComponent(sessionId)}/answer`,
+    {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      // See `getTriviaQuestion`: the address is what makes a leaked session id
+      // worthless by itself.
+      body: JSON.stringify({ questionIndex, answerIndex, walletAddress }),
+    },
+  )
+}
+
+export async function submitPassphrase(
+  publicId: string,
+  walletAddress: string,
+  phrase: string,
+): Promise<{ granted: true }> {
+  return request<{ granted: true }>(`/games/${encodeURIComponent(publicId)}/passphrase`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ walletAddress, phrase }),
   })
 }

@@ -7,6 +7,7 @@ import {
   errorMessage,
   finalityDepthBlocks,
   requireNetwork,
+  requireSigScheme,
   validityWindowBlocks,
 } from '../src/config'
 
@@ -23,6 +24,7 @@ import {
 
 const saved = {
   network: process.env.NIMIQ_NETWORK,
+  scheme: process.env.SIG_SCHEME,
   window: process.env.NIMIQ_VALIDITY_WINDOW_BLOCKS,
   depth: process.env.NIMIQ_FINALITY_DEPTH,
   proxySecret: process.env.CADDY_APP_SHARED_SECRET,
@@ -35,6 +37,7 @@ function restore(name: string, value: string | undefined): void {
 
 afterEach(() => {
   restore('NIMIQ_NETWORK', saved.network)
+  restore('SIG_SCHEME', saved.scheme)
   restore('NIMIQ_VALIDITY_WINDOW_BLOCKS', saved.window)
   restore('NIMIQ_FINALITY_DEPTH', saved.depth)
   restore('CADDY_APP_SHARED_SECRET', saved.proxySecret)
@@ -56,6 +59,36 @@ describe('requireNetwork', () => {
   it('throws on an unrecognised network name', () => {
     process.env.NIMIQ_NETWORK = 'DevAlbatross'
     expect(() => requireNetwork()).toThrow(/NIMIQ_NETWORK/)
+  })
+})
+
+/**
+ * The scheme reader lives here for the same reason the network reader does: two
+ * modules need it, and a copy per caller is how one of them ends up with a
+ * default nobody meant to ship. `SIG_SCHEME=raw` in production once refused
+ * every real Nimiq Pay claimant, so a value that is missing or unrecognised must
+ * stop the process rather than pick a side.
+ */
+describe('requireSigScheme', () => {
+  it('accepts exactly the two supported schemes', () => {
+    process.env.SIG_SCHEME = 'raw'
+    expect(requireSigScheme()).toBe('raw')
+    process.env.SIG_SCHEME = 'nimiq-signed-message'
+    expect(requireSigScheme()).toBe('nimiq-signed-message')
+  })
+
+  it('throws when SIG_SCHEME is unset or empty', () => {
+    delete process.env.SIG_SCHEME
+    expect(() => requireSigScheme()).toThrow(/SIG_SCHEME/)
+    process.env.SIG_SCHEME = ''
+    expect(() => requireSigScheme()).toThrow(/SIG_SCHEME/)
+  })
+
+  it('throws on an unrecognised scheme name, including near misses', () => {
+    for (const raw of ['nimiq', 'signed-message', 'Raw', 'nimiq_signed_message']) {
+      process.env.SIG_SCHEME = raw
+      expect(() => requireSigScheme(), `scheme ${raw} must be refused`).toThrow(/SIG_SCHEME/)
+    }
   })
 })
 

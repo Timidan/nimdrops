@@ -53,36 +53,14 @@ export function otherScheme(scheme: SigScheme): SigScheme {
 }
 
 /**
- * A configured value that decides whether a signature is accepted is missing or
- * unrecognised. Never a caller's fault, and never mapped to anything but a 500:
- * a deployment that cannot say which bytes it verifies must refuse everyone.
+ * Re-exported, not redeclared. The single reader lives in `config.ts` so that
+ * `gates/attested.ts`, the claim path and the sponsor's close path cannot end up
+ * verifying under two different schemes. Signature-verifying callers import it
+ * from here because this is where the scheme is defined and explained;
+ * {@link checkWalletSignature} reports a signature that would have verified
+ * under the other one, and the claim path turns that into an operator alert.
  */
-export class SigConfigError extends Error {}
-
-/**
- * Which bytes the wallet signs, from `SIG_SCHEME`. An unset or unknown value
- * fails closed rather than guessing, since guessing wrong rejects every real
- * signer.
- *
- * A deployment serving Nimiq Pay wants {@link WALLET_SIG_SCHEME}; see the note
- * on that constant for where it is established. It stays configurable so a
- * non-wallet signer can be verified too, and because a wrong value must be
- * *detectable* — {@link checkWalletSignature} reports a signature that would
- * have verified under the other scheme, and the claim path turns that into an
- * operator alert.
- *
- * Read here rather than in each caller so the claim path and the sponsor's
- * close path can never end up verifying under two different schemes.
- */
-export function requireSigScheme(): SigScheme {
-  const scheme = process.env.SIG_SCHEME
-  if (scheme !== 'raw' && scheme !== 'nimiq-signed-message') {
-    throw new SigConfigError(
-      `SIG_SCHEME must be raw or nimiq-signed-message (got ${scheme ?? 'unset'})`,
-    )
-  }
-  return scheme
-}
+export { requireSigScheme, SigConfigError } from '../config'
 
 export interface SignatureCheck {
   /** Verified against the scheme the caller asked for. Only this authorizes. */

@@ -19,6 +19,20 @@ export interface WalletBridge {
   ready(): Promise<void>
   sign(message: string): Promise<{ publicKey: string; signature: string }>
   sendWithData(o: { recipient: string; valueLuna: bigint; data: string }): Promise<{ txHash: string }>
+  /**
+   * The wallet's own address, via `connect()` + `listAccounts()`.
+   *
+   * COSTS A NATIVE PROMPT, and is the only operation here that costs one without
+   * moving money. Call it ONLY where the address is genuinely needed before a
+   * signature exists — today that is the conditional-claim gates, which have to
+   * name a beneficiary before the player has earned anything.
+   *
+   * It is deliberately NOT called from `ready()`, and the ordinary claim path
+   * still never calls it at all: there the address is derived server-side from
+   * the verified `sign()` public key, so a claimant meets exactly one prompt.
+   * Wiring this into `ready()` would silently add a prompt to every drop.
+   */
+  address(): Promise<string>
 }
 
 export type BridgeResult =
@@ -61,7 +75,7 @@ export class BridgeError extends Error {
  * transcribed from a real phone, not guessed. Debug-only; nothing reads it.
  */
 export interface RawProviderCall {
-  method: 'sign' | 'sendBasicTransactionWithData'
+  method: 'sign' | 'sendBasicTransactionWithData' | 'listAccounts'
   request: unknown
   response: unknown
   at: string
@@ -117,9 +131,11 @@ class RealBridge implements WalletBridge {
   async #connect(): Promise<NimiqProvider> {
     if (this.#provider) return this.#provider
     try {
-      // NOTE: deliberately NOT `provider.connect()` — that calls
-      // `listAccounts()`, which costs the claimant an extra native prompt.
-      // Design §4.3: derive the address from the verified `sign()` public key.
+      // DETECTION ONLY — deliberately not `provider.connect()`. Connecting calls
+      // `listAccounts()`, which costs a native prompt, and the claim path does
+      // not need one: design §4.3 derives the address from the verified `sign()`
+      // public key. Everything reachable from a drop link still meets exactly one
+      // prompt. `address()` below is the single opt-in exception.
       this.#provider = await init({ timeout: PROVIDER_DETECT_TIMEOUT_MS })
       return this.#provider
     } catch (cause) {
@@ -130,6 +146,45 @@ class RealBridge implements WalletBridge {
         { cause },
       )
     }
+  }
+
+  /**
+   * Ask the wallet who it is. See {@link WalletBridge.address} for when this is
+   * allowed to be called; it is the one operation here that spends a prompt
+   * without moving money.
+   *
+   * `connect()` is what authorises the disclosure and `listAccounts()` is what
+   * returns it. Both are separately capable of resolving an `ErrorResponse`
+   * rather than rejecting, which is the shape §5.1 exists for.
+   */
+  async address(): Promise<string> {
+    const provider = await this.#connect()
+    try {
+      await provider.connect()
+    } catch (cause) {
+      rethrow('address', cause)
+    }
+
+    let raw: string[] | ErrorResponse
+    try {
+      raw = await provider.listAccounts()
+    } catch (cause) {
+      rethrow('address', cause)
+    }
+    recordRaw('listAccounts', {}, raw)
+
+    const accounts = unwrap<string[]>(raw, 'address')
+    // A wallet with no account is a real state, not a malformed reply — but it
+    // is equally unusable here, and saying "no account" beats a confusing
+    // undefined reaching a request body.
+    if (!Array.isArray(accounts) || accounts.length === 0) {
+      throw new BridgeError('malformed_response', 'address', 'wallet reported no accounts')
+    }
+    const [first] = accounts
+    if (typeof first !== 'string' || first.length === 0) {
+      throw new BridgeError('malformed_response', 'address', 'wallet reported an empty account')
+    }
+    return first
   }
 
   async sign(message: string): Promise<{ publicKey: string; signature: string }> {

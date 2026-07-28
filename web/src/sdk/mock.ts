@@ -11,7 +11,7 @@
 import type { WalletBridge } from './adapter'
 
 export interface MockBridgeCall {
-  method: 'ready' | 'sign' | 'sendWithData'
+  method: 'ready' | 'address' | 'sign' | 'sendWithData'
   args: unknown
   result: unknown
   at: string
@@ -29,6 +29,15 @@ export const MOCK_LATENCY_MS = 300
 
 /** Fixed, obviously-fake Ed25519-shaped key material: 32 bytes = 64 hex chars. */
 export const MOCK_PUBLIC_KEY = `facade00${'de'.repeat(28)}`
+
+/**
+ * The address the mock wallet reports from `address()`.
+ *
+ * Shaped like a real user-friendly address — `NQ` plus 34 base-32 characters in
+ * groups of four — because the server's `ADDRESS_RE` checks that shape, and a
+ * mock that fails validation would make every dev run look like a client bug.
+ */
+export const MOCK_ADDRESS = 'NQ07 0000 0000 0000 0000 0000 0000 0000 00'
 /** Fixed signature-shaped hex: 64 bytes = 128 hex chars. */
 export const MOCK_SIGNATURE = `facade00${'ad'.repeat(60)}`
 
@@ -62,6 +71,15 @@ export class MockBridge implements WalletBridge {
   async ready(): Promise<void> {
     await delay(MOCK_LATENCY_MS)
     record({ method: 'ready', args: null, result: null, at: new Date().toISOString() })
+  }
+
+  async address(): Promise<string> {
+    // No prompt to simulate: the point of the real one is the native dialog, and
+    // there is nothing here to approve. Dev sees the address appear immediately,
+    // which is the one way the mock is kinder than the wallet.
+    await delay(MOCK_LATENCY_MS)
+    record({ method: 'address', args: null, result: MOCK_ADDRESS, at: new Date().toISOString() })
+    return MOCK_ADDRESS
   }
 
   async sign(message: string): Promise<{ publicKey: string; signature: string }> {

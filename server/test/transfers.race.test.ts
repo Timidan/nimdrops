@@ -450,7 +450,7 @@ describe.skipIf(!hasDb)('transfer worker crash windows (real Postgres)', () => {
     expect(await readClaimState(payout.claimId)).toBe('confirming')
   })
 
-  it('signs the payout with the NimDrop memo, inside the 64-byte limit', async () => {
+  it('signs the payout with a per-transfer NimDrop memo, inside the 64-byte limit', async () => {
     const payout = await queuedPayout()
     await runWorkerTick(pool, chain, alerts)
 
@@ -461,6 +461,15 @@ describe.skipIf(!hasDb)('transfer worker crash windows (real Postgres)', () => {
     expect(tx.dataUtf8).toBe(transferMemo(payout.transferId))
     expect(tx.recipient).toBe(payout.recipient)
     expect(tx.valueLuna).toBe(AMOUNT_EACH)
+
+    // It still reads as a NimDrop in the recipient's wallet, and it still fits.
+    expect(tx.dataUtf8).toContain('NimDrop')
+    expect(Buffer.byteLength(tx.dataUtf8 ?? '', 'utf8')).toBeLessThanOrEqual(MEMO_MAX_BYTES)
+
+    // The point of carrying the transfer: the data field is what stops two equal
+    // payments to one address at one head height from being the same bytes, and
+    // therefore the same hash, which `tx_hash` UNIQUE would reject.
+    expect(tx.dataUtf8).not.toBe('NimDrop')
   })
 
   // ---- crash windows ----------------------------------------------------------

@@ -1,0 +1,70 @@
+{
+  "_readme": [
+    "An EXAMPLE bank, and the shape a real one takes. Every question here carries",
+    "\"disclosable\": true for one reason only: this file is committed to a public",
+    "repository, so its answers are already published and echoing one back in a",
+    "finished session's review gives away nothing.",
+    "",
+    "If you copy this file and write your own questions, DELETE the flag. It is",
+    "false when absent, and false is what a hand-written question needs: a player",
+    "is still told which ones they got right, but the right option is not named,",
+    "because sessions need no signature and anyone can open them under addresses",
+    "they invent. See Question.disclosable in bank.ts.",
+    "",
+    "The importer at spike/import-opentdb.ts sets the flag itself, because every",
+    "question it writes comes from a public API whose answers anyone can download."
+  ],
+  "version": "example-v1",
+  "questions": [
+    {
+      "id": "geo-001",
+      "tier": "novice",
+      "category": "geography",
+      "prompt": "Which ocean lies between Africa and Australia?",
+      "options": ["Atlantic Ocean", "Indian Ocean", "Pacific Ocean", "Arctic Ocean"],
+      "answerIndex": 1,
+      "source": "https://www.britannica.com/place/Indian-Ocean",
+      "disclosable": true
+    },
+    {
+      "id": "sci-001",
+      "tier": "novice",
+      "category": "science",
+      "prompt": "What gas do plants absorb from the air during photosynthesis?",
+      "options": ["Oxygen", "Nitrogen", "Carbon dioxide", "Hydrogen"],
+      "answerIndex": 2,
+      "source": "https://www.britannica.com/science/photosynthesis",
+      "disclosable": true
+    },
+    {
+      "id": "his-001",
+      "tier": "easy",
+      "category": "history",
+      "prompt": "Which wall divided a European capital until 1989?",
+      "options": ["Hadrian's Wall", "The Berlin Wall", "The Great Wall", "The Western Wall"],
+      "answerIndex": 1,
+      "source": "https://www.britannica.com/topic/Berlin-Wall",
+      "disclosable": true
+    },
+    {
+      "id": "mus-001",
+      "tier": "medium",
+      "category": "music",
+      "prompt": "How many strings does a standard violin have?",
+      "options": ["Four", "Five", "Six", "Seven"],
+      "answerIndex": 0,
+      "source": "https://www.britannica.com/art/violin",
+      "disclosable": true
+    },
+    {
+      "id": "lan-001",
+      "tier": "hard",
+      "category": "language",
+      "prompt": "Which language contributed the word 'algebra' to English?",
+      "options": ["Greek", "Latin", "Arabic", "Persian"],
+      "answerIndex": 2,
+      "source": "https://www.etymonline.com/word/algebra",
+      "disclosable": true
+    }
+  ]
+}

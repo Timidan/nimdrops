@@ -12,8 +12,6 @@
   },
   "dependencies": {
     "@nimiq/mini-app-sdk": "^0.1.0",
-    "@radix-ui/react-dialog": "^1.1.23",
-    "motion": "^12.42.2",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "react-router-dom": "^7.18.1"

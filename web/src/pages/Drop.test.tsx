@@ -89,6 +89,11 @@ const unavailableBridge = async (): Promise<BridgeResult> => ({ kind: 'unavailab
 
 function rejectingBridge(): WalletBridge {
   return {
+    // The claim and funding paths must NEVER ask the wallet who it is: the
+    // address is derived server-side from the verified sign() public key, and a
+    // call here would be a silently added native prompt. Throwing makes that a
+    // test failure instead of a UX regression nobody notices.
+    address: () => Promise.reject(new Error('address() must not be called on this path')),
     ready: async () => {},
     sign: async () => {
       throw new BridgeError('provider_error', 'sign', 'UserRejected: user rejected the request')

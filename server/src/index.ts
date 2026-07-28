@@ -1,7 +1,19 @@
 import { serve } from '@hono/node-server'
 import { getConnInfo } from '@hono/node-server/conninfo'
 import { readOnlyNimiqChainFromEnv } from './chain/nimiq'
-import { caddyAppSharedSecret, errorMessage, requireNetwork } from './config'
+import {
+  caddyAppSharedSecret,
+  errorMessage,
+  requireNetwork,
+  requireSigScheme,
+  requireTriviaBankPath,
+  requireTriviaSalt,
+  requirePassphraseSalt,
+  passphraseConfigured,
+  triviaConfigured,
+} from './config'
+import { loadBank } from './gates/trivia/bank'
+import { makeTrivia } from './gates/trivia/sessions'
 import { closePool, getPool } from './db/pool'
 import { exitAfterFlush, exitAfterTeardown } from './exit'
 import { makeApp } from './http/app'
@@ -67,11 +79,7 @@ function requireEnv(): void {
   if (missing.length > 0) throw new Error(`missing required environment: ${missing.join(', ')}`)
 
   requireNetwork()
-
-  const scheme = process.env.SIG_SCHEME
-  if (scheme !== 'raw' && scheme !== 'nimiq-signed-message') {
-    throw new Error(`SIG_SCHEME must be raw or nimiq-signed-message (got ${scheme ?? 'unset'})`)
-  }
+  requireSigScheme()
 
   // Optional, so it is not in REQUIRED_ENV — but if it is set it is checked
   // HERE, before the socket, not at the first request the limiter has to judge.
@@ -130,7 +138,25 @@ async function main(): Promise<void> {
     peerAddress: (c) => getConnInfo(c).remote.address,
   })
 
-  const app = makeApp({ pool, chain, alerts, clientIp })
+  // Absent trivia configuration is NOT an error: the deployment simply serves no
+  // question games, while passphrase, attested and every ordinary drop path carry
+  // on. A bank that IS configured but unreadable or invalid is an error, and
+  // `loadBank` throws here so a broken bank stops boot instead of silently
+  // disabling the feature on a process that then reports itself healthy.
+  const triviaOn = triviaConfigured()
+  const passphraseOn = passphraseConfigured()
+  const gates = {
+    trivia: triviaOn
+      ? makeTrivia({ pool, bank: await loadBank(requireTriviaBankPath()), salt: requireTriviaSalt() })
+      : null,
+    // A SEPARATE key from the selection salt, and configured independently. The
+    // two were one value, which meant rotating the salt to reshuffle questions
+    // also invalidated every passphrase hash already stored on a live drop.
+    passphraseSalt: passphraseOn ? requirePassphraseSalt() : null,
+  }
+  logInfo('gates_configured', { trivia: triviaOn, passphrase: passphraseOn })
+
+  const app = makeApp({ pool, chain, alerts, clientIp, gates })
 
   const server = serve({ fetch: app.fetch, port: port(), hostname: '0.0.0.0' }, (info) => {
     log('api_listening', {

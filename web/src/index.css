@@ -574,6 +574,23 @@ body {
 }
 
 /**
+ * The gate screens' reading column (`ui/Screen.tsx`).
+ *
+ * Folded in from the gates branch, which owns the only surfaces that use it.
+ * Without it `/games` and `/game/:publicId` run edge to edge on a desktop
+ * width; every other screen gets its measure from its own layout.
+ */
+.nd-column {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+  max-width: 430px;
+  margin-inline: auto;
+}
+
+/**
  * The bloom and its counter-light. One of them moves, and it moves with
  * `transform` only.
  *
@@ -886,6 +903,22 @@ body {
   line-height: 0.88;
   letter-spacing: -0.05em;
   color: var(--nd-on-surface);
+}
+
+/**
+ * The gate screens (`/games`, `/game/:publicId`) put their card on chalk rather
+ * than on the field, so the amount takes the chalk foreground. Without this it
+ * inherits `--nd-on-surface`, which is near-white and correct everywhere else.
+ *
+ * `justify-content` is here because `.nd-amount` is a flex row, which a
+ * `text-center` on the element cannot move.
+ */
+.nd-gate-surface .nd-amount {
+  color: var(--color-chalk-ink);
+}
+
+.nd-gate-surface .nd-amount.text-center {
+  justify-content: center;
 }
 
 .nd-amount[data-size='lg'] {

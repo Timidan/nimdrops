@@ -6,6 +6,7 @@ import { addressFromPublicKey } from '../auth/verify'
 import { ChainCallTimeoutError } from '../chain/deadline'
 import type { ChainClient } from '../chain/types'
 import { DropShapeError, formatNim, lunaFromNim } from '../money'
+import { normaliseNimiqAddress } from '../nimiq-address'
 import { type Alerts, throttled } from '../services/alerts'
 import {
   ClaimNotFoundError,
@@ -47,6 +48,11 @@ import {
   readCapacity,
   readControls,
 } from '../services/solvency'
+import { submitAttestation } from '../gates/attested'
+import { submitPassphrase } from '../gates/passphrase'
+import type { TriviaService } from '../gates/trivia/sessions'
+import { GateRejectedError, type GateRejectionCode } from '../gates/types'
+import { hasGrant, listGames, loadGameView, loadGate } from '../services/gates'
 import { StatsCache, type StatsCacheOptions, StatsUnavailableError } from '../services/stats'
 import { SHARED_BUCKET, type ClientIpResolver } from './client-ip'
 import { type CustodyDisclosure, buildDisclosure } from './disclosure'
@@ -78,9 +84,19 @@ import { registerSsr } from './ssr'
 
 // ---- rate limits ---------------------------------------------------------------
 
+/**
+ * HTTP requests one honest five-question session costs at the gate routes: one
+ * `POST /session`, then a `GET .../question` and a `POST .../answer` per
+ * question. The limiter is a multiple of this rather than a bare number, so
+ * changing the question count cannot leave a player throttled mid-game.
+ */
+export const GATE_REQUESTS_PER_SESSION = 11
+
 export interface RateLimits {
   /** Requests per window per client IP, across every `/api` route. */
   ipPerWindow: number
+  /** Whole gate sessions one IP may play per window. */
+  gateSessionsPerWindow: number
   /** Claim attempts per window per drop (design §10.1). */
   claimsPerDropPerWindow: number
   /** Claim attempts per window per derived wallet address, across drops. */
@@ -90,6 +106,9 @@ export interface RateLimits {
 
 export const DEFAULT_LIMITS: RateLimits = {
   ipPerWindow: 60,
+  // Two, not one: a player who reloads or resumes must not be locked out of the
+  // game they are already in the middle of.
+  gateSessionsPerWindow: 2,
   claimsPerDropPerWindow: 10,
   claimsPerWalletPerWindow: 5,
   windowMs: 60_000,
@@ -196,6 +215,12 @@ const CLAIM_MESSAGES: Record<ClaimRejectionCode, string> = {
   // lost something they had: a share they never reserved was never theirs.
   closed_by_sponsor: 'the sponsor closed this drop, so there are no shares left to claim',
   exhausted: 'every share in this drop has been claimed',
+  // NOT "you failed" and not "you are not eligible". The overwhelmingly common
+  // case is a stranger who was sent the claim link directly and has never seen
+  // the condition at all, so this says what to do rather than what went wrong.
+  // It also avoids naming the condition: this layer does not know which kind the
+  // drop carries, and guessing would eventually be wrong.
+  gate_required: 'this drop asks you to do something first — open it to see what',
 }
 
 /**
@@ -233,6 +258,66 @@ const FUNDING_MESSAGES: Record<FundingRejectionCode, string> = {
   attested_as_float: 'that transaction is already recorded as an operator deposit',
 }
 
+/**
+ * Client-facing copy for every gate rejection, on the same rule as
+ * `CLAIM_MESSAGES`: the service message is never forwarded, so a reworded
+ * internal message can never reach a client by accident.
+ *
+ * Two of these say deliberately little. `already_granted` does not name which
+ * condition was met, and `misconfigured` does not say what is broken — a
+ * player can do nothing with either detail, and the second would describe the
+ * operator's config to whoever asked.
+ */
+const GATE_MESSAGES: Record<GateRejectionCode, string> = {
+  not_a_game: 'this drop has no condition to meet',
+  game_not_live: 'this drop is not accepting claims',
+  wrong_kind: 'that is not how this drop works',
+  already_granted: 'you have already met this drop’s condition — claim your share',
+  cooldown: 'wait a few minutes before trying again',
+  too_many_attempts: 'too many tries — try again in an hour',
+  bad_attempt: 'that is not it',
+  session_not_found: 'that attempt is no longer valid — start again',
+  session_over: 'that attempt is finished — start again',
+  deadline_missed: 'time ran out on that question',
+  wrong_index: 'that is not the question in play — reload and try again',
+  tier_locked: 'pass an easier one first to unlock this',
+  bad_attestation: 'that confirmation could not be verified',
+  attestation_replayed: 'that confirmation was already used',
+  // Every route above already rejects a bad address at the boundary, so this is
+  // normally unreachable over HTTP. It is here because the gates now check for
+  // themselves rather than trusting that — see `requireGateWallet`.
+  bad_address: 'that is not a valid Nimiq address',
+  // 5xx: see GATE_STATUS.
+  misconfigured: 'this drop is not set up correctly — nobody can claim it yet',
+}
+
+/**
+ * The status each rejection answers with.
+ *
+ * `misconfigured` is the only 5xx, and it is deliberate. The request was
+ * well-formed and the player did nothing wrong, so every 4xx would blame them;
+ * the deployment is genuinely broken, so a 2xx would hide it. It is the one code
+ * here that means "our fault", and it is the one an operator must be paged about.
+ */
+const GATE_STATUS: Record<GateRejectionCode, ContentfulStatusCode> = {
+  not_a_game: 404,
+  game_not_live: 409,
+  wrong_kind: 409,
+  already_granted: 409,
+  cooldown: 429,
+  too_many_attempts: 429,
+  bad_attempt: 409,
+  session_not_found: 404,
+  session_over: 409,
+  deadline_missed: 409,
+  wrong_index: 409,
+  tier_locked: 403,
+  bad_attestation: 400,
+  attestation_replayed: 409,
+  bad_address: 400,
+  misconfigured: 500,
+}
+
 /** Retry hint for a temporarily unavailable money path. */
 const DEGRADED_RETRY_SECONDS = 30
 
@@ -243,6 +328,16 @@ const PUBLIC_ID_RE = /^[A-Za-z0-9_-]{22}$/
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 /** Nimiq transaction id: 32 bytes of hex. */
 const TX_HASH_RE = /^[0-9a-fA-F]{64}$/
+// A wallet address is checked by its CHECKSUM, in `../nimiq-address`, and there
+// is deliberately no `ADDRESS_RE` at this spot any more. The regex that used to
+// live here matched the shape and nothing else, so it admitted addresses no
+// wallet can hold — see `requireWalletAddress` below and the module comment in
+// `../nimiq-address` for what that cost.
+
+/** The longest phrase a sponsor may set. Long enough for a sentence. */
+const PHRASE_MAX_LENGTH = 120
+/** A signed attestation is seven short lines; this is generous for all of them. */
+const ATTESTATION_MAX_LENGTH = 512
 /** Ed25519 public key (32 bytes) and signature (64 bytes). */
 const PUBLIC_KEY_RE = /^[0-9a-fA-F]{64}$/
 const SIGNATURE_RE = /^[0-9a-fA-F]{128}$/
@@ -259,6 +354,64 @@ function requirePublicId(c: Context): string {
   const publicId = c.req.param('publicId')
   if (!publicId || !PUBLIC_ID_RE.test(publicId)) throw notFound()
   return publicId
+}
+
+/**
+ * A session id from the path.
+ *
+ * Answers 404 rather than 400 for a malformed one, matching `requirePublicId`: a
+ * session id is an opaque handle, and telling a caller their id is the wrong
+ * SHAPE is a distinction only a prober would use.
+ */
+function requireSessionId(c: Context): string {
+  const sessionId = c.req.param('sessionId')
+  if (!sessionId || !UUID_RE.test(sessionId)) throw notFound()
+  return sessionId
+}
+
+/**
+ * A whole number in an inclusive range.
+ *
+ * Rejects a numeric STRING as well as a fraction. `matching()` covers strings and
+ * `Number()` would happily accept `"0"`, `" 0"` and `"0.0"` as the same index —
+ * three spellings of one answer is the shape of laxity that makes a
+ * one-submission-per-question rule negotiable.
+ */
+function wholeNumberIn(
+  body: Record<string, unknown>,
+  key: string,
+  min: number,
+  max: number,
+): number {
+  const value = body[key]
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < min || value > max) {
+    throw invalidRequest(`${key} must be a whole number between ${min} and ${max}`)
+  }
+  return value
+}
+
+/** A submitted passphrase. Trimming and casefolding belong to the gate, not here. */
+function requirePhrase(body: Record<string, unknown>): string {
+  const value = body.phrase
+  if (typeof value !== 'string' || value.trim() === '' || value.length > PHRASE_MAX_LENGTH) {
+    throw invalidRequest('phrase must be a short non-empty string')
+  }
+  return value
+}
+
+/**
+ * A signed attestation message, passed through byte for byte.
+ *
+ * Deliberately NOT normalised, trimmed or re-joined: the signature covers these
+ * exact bytes, so altering them here would either break a valid attestation or —
+ * worse — make two different bodies verify as the same message.
+ */
+function requireAttestationMessage(body: Record<string, unknown>): string {
+  const value = body.message
+  if (typeof value !== 'string' || value === '' || value.length > ATTESTATION_MAX_LENGTH) {
+    throw invalidRequest('message must be a non-empty attestation string')
+  }
+  return value
 }
 
 function requireIdemKey(c: Context): string {
@@ -316,12 +469,48 @@ function matching(body: Record<string, unknown>, key: string, re: RegExp): strin
 }
 
 /**
+ * A wallet address from a body, checksum-verified and returned in ONE spelling.
+ *
+ * Returning the normalised form is not tidiness. The address is stored as written
+ * — as a `gate_grants` row and a `trivia_sessions` row — and `reserveClaim` later
+ * compares that stored string against an address derived from a verified public
+ * key. If `NQ07 ABCD…` and `nq07abcd…` are allowed to reach the database as two
+ * strings, one wallet gets two grants on a one-play-per-wallet gate and at least
+ * one of them can never be matched by anything derived.
+ */
+function requireWalletAddress(body: Record<string, unknown>, key = 'walletAddress'): string {
+  const value = body[key]
+  if (typeof value !== 'string') throw invalidRequest()
+  const address = normaliseNimiqAddress(value)
+  if (address === null) throw invalidRequest(`${key} is not a valid Nimiq address`)
+  return address
+}
+
+/**
+ * The wallet a session belongs to, from `?wallet=`.
+ *
+ * Required on the session routes, which otherwise identify the caller by session
+ * id alone. A session id is a v4 uuid and so unguessable, but it travels in URLs,
+ * referrers and logs, and on its own it was enough to play out somebody else's
+ * session — one wrong answer imposes the cooldown on THEIR wallet. Presenting the
+ * address alongside it does not make the address a secret; it makes a leaked
+ * session id insufficient, which is the whole exposure.
+ */
+function requireWalletQuery(c: Context): string {
+  const value = c.req.query('wallet')
+  if (value === undefined) throw invalidRequest('a wallet query parameter is required')
+  const address = normaliseNimiqAddress(value)
+  if (address === null) throw invalidRequest('wallet is not a valid Nimiq address')
+  return address
+}
+
+/**
  * The sponsor's chosen claim window, or `undefined` when they did not choose.
  *
  * Type first, then bounds, and both here rather than in the service: a body
  * carrying `"24"` or `1.5` is a malformed request, and the sponsor should be
  * told 400 rather than have it become a database error further in.
- * `assertExpiryHours` runs again inside `createDraft`, and migration 016's
+ * `assertExpiryHours` runs again inside `createDraft`, and migration 019's
  * CHECK constraint runs after that — three layers, of which only the last one
  * cannot be bypassed by a future caller.
  */
@@ -504,6 +693,26 @@ export interface AppDeps {
    * the TTL so they can observe a refresh without waiting a minute.
    */
   statsCache?: StatsCacheOptions
+  /**
+   * The gate services, or null where a kind is not configured.
+   *
+   * INJECTED rather than constructed here, for two reasons. Reading the question
+   * bank is async and `makeApp` is not — making it async would ripple into every
+   * caller and every test that builds an app. And tests need to supply a small
+   * in-memory bank without touching the filesystem. `index.ts` is the only place
+   * that reads the file.
+   *
+   * Absent, or with `trivia: null`, the corresponding routes answer 404 and every
+   * ordinary drop path is untouched. A deployment with no question bank still
+   * serves passphrase and attested drops.
+   */
+  gates?: GateServices | null
+}
+
+export interface GateServices {
+  trivia: TriviaService | null
+  /** HMAC key for passphrase hashing. Null disables the passphrase route. */
+  passphraseSalt: string | null
 }
 
 const CREATE_DROP_SCOPE = 'POST /api/drops'
@@ -529,6 +738,54 @@ export function makeApp(deps: AppDeps): Hono {
     const verdict = bucket.take(key)
     if (verdict.allowed) return
     throw new HttpError(429, 'rate_limited', 'too many requests — try again shortly', verdict.retryAfterSeconds)
+  }
+
+  const gates = deps.gates ?? null
+
+  /**
+   * Attempts at a condition, per IP.
+   *
+   * Every gate route does real work before it can refuse: a passphrase submission
+   * runs an HMAC, an attestation runs an Ed25519 verify, a session start runs an
+   * HMAC selection and a transaction. Unlike a claim there is no signature to
+   * make an attacker pay for the privilege, so this bucket is the only thing
+   * between the routes and a CPU-bound flood. Per-IP rather than per-address,
+   * because the address is client-asserted and an attacker would simply vary it.
+   */
+  //
+  // Sized from what ONE honest session costs, which is not the claim budget. A
+  // five-question session is eleven requests through here: one start, then a read
+  // and a submit per question. Reusing `claimsPerWalletPerWindow` (5) meant a
+  // player was rate-limited out of their own game at question three — caught by an
+  // API test that could not finish a session, not by review.
+  //
+  // GATE_REQUESTS_PER_SESSION is that arithmetic written down, so a change to the
+  // question count moves the limit with it instead of silently re-breaking this.
+  const gateAttemptBucket = new TokenBuckets(
+    GATE_REQUESTS_PER_SESSION * limits.gateSessionsPerWindow,
+    limits.windowMs,
+    now,
+  )
+
+  function requireGates(): GateServices {
+    if (!gates) throw new HttpError(404, 'not_found', 'this deployment has no gated drops')
+    return gates
+  }
+
+  function requireTrivia(): TriviaService {
+    const service = requireGates().trivia
+    if (!service) {
+      throw new HttpError(404, 'not_found', 'this deployment does not serve question games')
+    }
+    return service
+  }
+
+  function requirePassphraseSalt(): string {
+    const salt = requireGates().passphraseSalt
+    if (!salt) {
+      throw new HttpError(404, 'not_found', 'this deployment does not serve passphrase games')
+    }
+    return salt
   }
 
   const app = new Hono()
@@ -858,6 +1115,158 @@ export function makeApp(deps: AppDeps): Hono {
     })
   })
 
+  // ---- gates: meeting a drop's condition ---------------------------------------------------
+  //
+  // None of these routes takes a wallet signature, and that is the design rather
+  // than an omission (spec §4.5): a grant names an address but only ever benefits
+  // the holder of that address, because `reserveClaim` compares it against the
+  // address derived from the claim signature. Asking for a signature here would
+  // cost the player a native wallet prompt before they had received anything.
+  //
+  // What that leaves is read-side disclosure, which is real and worth naming: the
+  // session route tells anyone who asks whether a given address has already
+  // played or won a given drop. It is not a money hole, and it is not fixable
+  // without the prompt the flow declines to ask for.
+
+  // ---- GET /api/games ----------------------------------------------------------------------
+
+  /**
+   * Listed, gated, live drops. Answers even with no gates configured, because an
+   * empty catalogue is a truthful answer and a 404 here would look like an outage.
+   */
+  app.get('/api/games', async (c) => {
+    if (!gates) return c.json({ games: [] })
+    return c.json({ games: await listGames(pool) })
+  })
+
+  // ---- GET /api/games/:publicId ------------------------------------------------------------
+
+  /**
+   * One game, plus whether a given wallet has already met its condition.
+   *
+   * Returns a NAMED field set and never `drop_gates.config`, which holds the
+   * passphrase hash for one kind and the attester key for another. `wallet` is an
+   * optional query parameter; without it `granted` is false rather than unknown,
+   * because the page that has no wallet yet cannot act on the difference.
+   */
+  app.get('/api/games/:publicId', async (c) => {
+    const publicId = requirePublicId(c)
+    requireGates()
+    const view = await loadGameView(pool, publicId)
+    const wallet = c.req.query('wallet')
+    // An absent OR invalid wallet reads as `granted: false` rather than 400,
+    // unchanged: this route answers a page that may not have a wallet yet, and a
+    // page that cannot act on the difference should not be handed an error. What
+    // did change is that the lookup now uses the NORMALISED address, so a spaced
+    // and a compacted spelling of one wallet no longer disagree about its grant.
+    const address = wallet === undefined ? null : normaliseNimiqAddress(wallet)
+    const granted =
+      address === null
+        ? false
+        : await hasGrant(pool, (await loadGate(pool, publicId)).dropId, address)
+    return c.json({ ...view, granted })
+  })
+
+  // ---- POST /api/games/:publicId/session ---------------------------------------------------
+
+  app.post('/api/games/:publicId/session', async (c) => {
+    const publicId = requirePublicId(c)
+    const body = await readJsonObject(c)
+    only(body, ['walletAddress'])
+    const walletAddress = requireWalletAddress(body)
+    enforce(gateAttemptBucket, clientIp(c))
+
+    const gate = await loadGate(pool, publicId)
+    const started = await requireTrivia().startOrResume(gate, walletAddress)
+    return c.json(started)
+  })
+
+  // ---- GET /api/games/:publicId/session/:sessionId/question --------------------------------
+
+  app.get('/api/games/:publicId/session/:sessionId/question', async (c) => {
+    const publicId = requirePublicId(c)
+    const sessionId = requireSessionId(c)
+    const walletAddress = requireWalletQuery(c)
+    // Metered like the other gate routes. It looked like a read, but it opens a
+    // transaction, locks the session row, writes delivery state and reads the
+    // bank — the same work the routes either side of it pay for.
+    enforce(gateAttemptBucket, clientIp(c))
+    // All THREE identifiers are honoured. Without the drop id a session belonging
+    // to one drop could be played through another drop's URL; without the wallet,
+    // a leaked session id alone was enough to drive somebody else's session.
+    const gate = await loadGate(pool, publicId)
+    const question = await requireTrivia().currentQuestion(sessionId, gate.dropId, walletAddress)
+    // Note what is NOT here: no answer index, no per-question correctness, no
+    // score. See `AnswerOutcome` in `gates/trivia/sessions.ts` for why.
+    return c.json({ ...question, deadlineAt: question.deadlineAt.toISOString() })
+  })
+
+  // ---- POST /api/games/:publicId/session/:sessionId/answer ---------------------------------
+
+  app.post('/api/games/:publicId/session/:sessionId/answer', async (c) => {
+    const publicId = requirePublicId(c)
+    const sessionId = requireSessionId(c)
+    const body = await readJsonObject(c)
+    only(body, ['questionIndex', 'answerIndex', 'walletAddress'])
+    const questionIndex = wholeNumberIn(body, 'questionIndex', 0, 9)
+    const answerIndex = wholeNumberIn(body, 'answerIndex', 0, 3)
+    // Required, for the reason in `requireWalletQuery`: a wrong answer costs the
+    // session's wallet a ten-minute cooldown, so submitting one must take more
+    // than a session id somebody left in a log.
+    const walletAddress = requireWalletAddress(body)
+    enforce(gateAttemptBucket, clientIp(c))
+    const gate = await loadGate(pool, publicId)
+    return c.json(
+      await requireTrivia().submitAnswer(
+        sessionId,
+        questionIndex,
+        answerIndex,
+        gate.dropId,
+        walletAddress,
+      ),
+    )
+  })
+
+  // ---- POST /api/games/:publicId/passphrase ------------------------------------------------
+
+  app.post('/api/games/:publicId/passphrase', async (c) => {
+    const publicId = requirePublicId(c)
+    const body = await readJsonObject(c)
+    only(body, ['walletAddress', 'phrase'])
+    const walletAddress = requireWalletAddress(body)
+    const phrase = requirePhrase(body)
+    enforce(gateAttemptBucket, clientIp(c))
+
+    const gate = await loadGate(pool, publicId)
+    return c.json(
+      await submitPassphrase(pool, { gate, walletAddress, phrase, salt: requirePassphraseSalt() }),
+    )
+  })
+
+  // ---- POST /api/games/:publicId/attestation -----------------------------------------------
+
+  /**
+   * A third party confirming that a wallet met their condition.
+   *
+   * The body carries a message and a signature and NO address: the beneficiary is
+   * named inside the signed bytes, so there is nothing here for a request to
+   * substitute. `only()` refuses an unexpected `walletAddress` field outright
+   * rather than ignoring it, so a client that thinks it can nominate one is told
+   * it cannot.
+   */
+  app.post('/api/games/:publicId/attestation', async (c) => {
+    const publicId = requirePublicId(c)
+    const body = await readJsonObject(c)
+    only(body, ['message', 'signature'])
+    const message = requireAttestationMessage(body)
+    const signatureHex = matching(body, 'signature', SIGNATURE_RE)
+    enforce(gateAttemptBucket, clientIp(c))
+
+    requireGates()
+    const gate = await loadGate(pool, publicId)
+    return c.json(await submitAttestation(pool, { gate, message, signatureHex }))
+  })
+
   // ---- GET /health -------------------------------------------------------------------------
 
   /**
@@ -987,6 +1396,16 @@ function mapError(err: unknown): HttpError {
       CLOSE_MESSAGES[err.code] ?? 'this drop cannot be closed',
     )
   }
+  // Unlike claim and funding refusals, gate refusals do not share one status:
+  // a locked tier is a 403, a cooldown is a 429, an unknown session is a 404,
+  // and a misconfigured drop is the one 5xx. See GATE_STATUS.
+  if (err instanceof GateRejectedError) {
+    return new HttpError(
+      GATE_STATUS[err.code] ?? 409,
+      err.code,
+      GATE_MESSAGES[err.code] ?? 'this condition cannot be completed',
+    )
+  }
   if (err instanceof DropShapeError) return invalidRequest(err.message)
   // The route validates the window first and answers 400 with its own code, so
   // this is the service's own bound speaking — reachable only from a caller
@@ -1003,7 +1422,7 @@ function mapError(err: unknown): HttpError {
   // client copy stays this file's to choose (see the CLAIM_MESSAGES note).
   //
   // Both are now reachable ONLY when an operator has set the principal cap as a
-  // kill switch (migration 015); with it unset there is no size a drop can be
+  // kill switch (migration 018); with it unset there is no size a drop can be
   // too big for. The `?? 0n` fallbacks are therefore unreachable-by-construction
   // rather than a guess at a number — a cap that is null cannot have thrown.
   if (err instanceof DropTooLargeError) {

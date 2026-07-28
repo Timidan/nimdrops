@@ -7,15 +7,17 @@ import DirectionC from './pages/design/DirectionC'
 import Reveal from './pages/design/Reveal'
 import Treatment from './pages/design/Treatments'
 import Drop from './pages/Drop'
+import Game from './pages/Game'
+import Games from './pages/Games'
 import Landing from './pages/Landing'
 import Preview from './pages/Preview'
 import Spike from './pages/Spike'
 
 /**
  * The routes the server actually serves a shell for (`http/ssr.ts`): `/`,
- * `/create`, `/drop/:publicId` and `/drop/:publicId/close`. Anything else is a
- * mistyped or stale link, and the useful answer to that is the create screen,
- * not a 404 page.
+ * `/create`, `/drop/:publicId`, `/drop/:publicId/close`, `/game/:publicId` and
+ * `/games`. Anything else is a mistyped or stale link, and the useful answer to
+ * that is the create screen, not a 404 page.
  *
  * `/preview` is the envelope's states board and must never ship. The guard is
  * `import.meta.env.DEV`, which Vite substitutes with the literal `false` in a
@@ -65,6 +67,14 @@ export function AppRoutes() {
         money that was sent to them — cheap to keep, expensive to have missed.
       */}
       <Route path="/d/:publicId" element={<LegacyDropRedirect />} />
+      {/*
+        Conditional claims. `/game/:publicId`, not `/g/:publicId` — `/d/` was
+        the short thing that fit while the shell was being built and it cost a
+        redirect to undo, so a new abbreviation would recreate that debt on day
+        one.
+      */}
+      <Route path="/game/:publicId" element={<Game />} />
+      <Route path="/games" element={<Games />} />
       {import.meta.env.DEV ? <Route path="/spike" element={<Spike />} /> : null}
       {import.meta.env.DEV ? <Route path="/preview" element={<Preview />} /> : null}
       {import.meta.env.DEV ? <Route path="/design/a" element={<DirectionA />} /> : null}
