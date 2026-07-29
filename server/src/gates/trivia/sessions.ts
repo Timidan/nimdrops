@@ -477,24 +477,8 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
         `trivia:${walletAddress}`,
       ])
 
-      // The grant is what blocks a retry, not a passed session row. A wallet that
-      // already satisfied this drop's condition should be claiming, not playing
-      // again — and any kind could have issued it.
-      const { rows: held } = await client.query<{ id: string }>(
-        'SELECT id FROM gate_grants WHERE drop_id = $1 AND wallet_address = $2',
-        [gate.dropId, walletAddress],
-      )
-      if (held[0]) {
-        throw new GateRejectedError(
-          'already_granted',
-          'this wallet has already met this condition',
-        )
-      }
-
-      // After `already_granted`, so a wallet that has finished this very game is
-      // told to go and claim rather than told it is locked out of it. Before the
-      // cooldown and before selection: a locked player must not spend a session,
-      // and must not be put in cooldown for one they were never allowed to start.
+      // A grant does not end a trivia game: wallets may replay after the normal
+      // cooldown. Grants still authorize claims, but they are not play limits.
       const { rows: existing } = await client.query<{
         id: string
         state: SessionState

@@ -134,7 +134,10 @@ export default function Game({ walletAddress }: GameProps) {
   )
 
   const amount = gate.amountEachLuna === null ? null : formatNim(BigInt(gate.amountEachLuna))
-  const met = gate.granted || metJustNow
+  // A stored grant is still the terminal state for passphrase and attested
+  // gates. Trivia is replayable: only a pass from this visit hands off to the
+  // claim screen, while an older grant must not hide the game.
+  const met = metJustNow || (gate.kind !== 'trivia' && gate.granted)
 
   return (
     <Field tone="live">

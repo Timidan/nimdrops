@@ -250,6 +250,14 @@ describe('Game — which wallet is playing', () => {
 })
 
 describe('Game — trivia before play', () => {
+  it('lets a wallet replay trivia after it has already earned a grant', async () => {
+    installFetch({ game: { status: 200, body: gameBody({ granted: true }) } })
+    mount()
+
+    expect(await screen.findByTestId('trivia-idle')).toBeTruthy()
+    expect(screen.queryByTestId('gate-passed')).toBeNull()
+  })
+
   it('states the tier, the exact amount, the question count, and that the approval comes after', async () => {
     installFetch({ game: { status: 200, body: gameBody() } })
     mount()

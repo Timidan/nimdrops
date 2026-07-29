@@ -420,7 +420,7 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
       /already-seen|categories left/,
     )
   })
-  it('refuses a new session once the wallet holds a grant', async () => {
+  it('allows another session after the cooldown when the wallet already holds a grant', async () => {
     const svc = service()
     const gate = await gateFor()
     const s = await svc.startOrResume(gate, PLAYER)
@@ -432,7 +432,8 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
       [s.sessionId, COOLDOWN_MINUTES + 1],
     )
     await issueGrant(pool, { dropId: gate.dropId, walletAddress: PLAYER, kind: 'trivia' })
-    await expect(svc.startOrResume(gate, PLAYER)).rejects.toThrow(/already_granted/)
+    const replay = await svc.startOrResume(gate, PLAYER)
+    expect(replay.sessionId).not.toBe(s.sessionId)
   })
 
   it('does not resume a session past its expiry, and marks it expired', async () => {
