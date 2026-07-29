@@ -214,7 +214,7 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
 
   it('ships a ten-minute session and a three-minute gap between attempts', () => {
     expect(SESSION_TTL_MINUTES).toBe(10)
-    expect(COOLDOWN_MINUTES).toBe(3)
+    expect(COOLDOWN_MINUTES).toBe(2)
   })
 
   it('ships a pass bar of three of five', () => {
@@ -530,7 +530,7 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
    * that turned `failed` the moment one answer was wrong was per-question
    * correctness under a different name, and it cut brute force from 1024 attempts
    * to sixteen — three failed sessions per question, five questions, about two
-   * and a half hours at a ten-minute cooldown, knowing none of the answers.
+   * and a half hours at the cooldown of the day, knowing none of the answers.
    *
    * So this asserts the semantics: a wrong FIRST answer must be
    * indistinguishable from a right one until the set is finished.
@@ -924,7 +924,7 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
   // Session ids are v4 uuids, so unguessable, but they are not secrets: they
   // travel in URLs, `Referer` headers and access logs. Before `expectWallet`,
   // holding one was enough to submit a wrong answer and spend somebody else's
-  // attempt — and a failed attempt costs that wallet a ten-minute cooldown, so a
+  // attempt — and a failed attempt costs that wallet a cooldown, so a
   // leaked id was effectively a remote "end that player's run" button. Naming the
   // wallet does not make it a secret (the client asserts it either way); it makes
   // the leaked id on its own useless, which is the actual exposure.
@@ -1042,117 +1042,28 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
   // The bank in this suite holds novice questions only, so a gate under test
   // stays `tier: 'novice'` and carries the requirement in `unlockRequiresTier`.
   // Only the tier of the drop a PRIOR grant sits on matters to the check.
-  describe('tier progression', () => {
-    /** A gate that requires `tier`, on its own drop. */
+  describe('every tier is open to everyone', () => {
     const gateRequiring = (tier: string) =>
       seedGate({ config: { ...shippedConfig, unlockRequiresTier: tier } })
 
-    /** A prior pass: a grant of `kind` on a separate drop whose gate is `tier`. */
-    async function priorGrant(o: { tier: string; kind?: 'trivia' | 'passphrase' }) {
-      const other = await seedGate({ config: { ...shippedConfig, tier: o.tier } })
-      const gate = await gateFor(other)
-      await issueGrant(pool, {
-        dropId: gate.dropId,
-        walletAddress: PLAYER,
-        kind: o.kind ?? 'trivia',
-      })
-    }
+    it('starts a session on a gate that names a requirement', async () => {
+      const named = await gateRequiring('hard')
+      await expect(
+        service().startOrResume(await gateFor(named), PLAYER),
+      ).resolves.toMatchObject({ deliveredCount: 0 })
+    })
 
-    it('never locks a gate that names no requirement', async () => {
-      // Absent, as `shippedConfig` has it, and explicitly null.
+    it('starts a session for a wallet holding no prior grant at all', async () => {
+      const named = await gateRequiring('medium')
+      await expect(
+        service().startOrResume(await gateFor(named), testAddress('NOBODY')),
+      ).resolves.toMatchObject({ deliveredCount: 0 })
+    })
+
+    it('starts a session on a gate that names no requirement', async () => {
       await expect(service().startOrResume(await gateFor(), PLAYER)).resolves.toMatchObject({
         deliveredCount: 0,
       })
-      const open = await seedGate({ config: { ...shippedConfig, unlockRequiresTier: null } })
-      await expect(
-        service().startOrResume(await gateFor(open), testAddress('OTHER')),
-      ).resolves.toMatchObject({ deliveredCount: 0 })
-    })
-
-    it('locks a wallet holding no prior trivia grant', async () => {
-      const locked = await gateRequiring('medium')
-      await expect(service().startOrResume(await gateFor(locked), PLAYER)).rejects.toThrow(
-        /tier_locked/,
-      )
-    })
-
-    it('unlocks on a grant at exactly the required tier', async () => {
-      const locked = await gateRequiring('medium')
-      await priorGrant({ tier: 'medium' })
-      await expect(
-        service().startOrResume(await gateFor(locked), PLAYER),
-      ).resolves.toMatchObject({ deliveredCount: 0 })
-    })
-
-    it('unlocks on a grant at a higher tier', async () => {
-      const locked = await gateRequiring('easy')
-      await priorGrant({ tier: 'hard' })
-      await expect(
-        service().startOrResume(await gateFor(locked), PLAYER),
-      ).resolves.toMatchObject({ deliveredCount: 0 })
-    })
-
-    it('stays locked on a grant at a lower tier', async () => {
-      const locked = await gateRequiring('hard')
-      await priorGrant({ tier: 'easy' })
-      await expect(service().startOrResume(await gateFor(locked), PLAYER)).rejects.toThrow(
-        /tier_locked/,
-      )
-    })
-
-    // A passphrase grant says a wallet heard a word at a meetup. It is no
-    // evidence about trivia, however high the tier of the drop it sits on.
-    it('does not accept a passphrase grant as a trivia pass', async () => {
-      const locked = await gateRequiring('easy')
-      await priorGrant({ tier: 'hard', kind: 'passphrase' })
-      await expect(service().startOrResume(await gateFor(locked), PLAYER)).rejects.toThrow(
-        /tier_locked/,
-      )
-    })
-
-    // The unlock and the session it authorises must be decided against one
-    // snapshot. Checking it after the COMMIT, or on the pool instead of the
-    // transaction's client, would let two tabs each read "locked" and one still
-    // walk away with a session.
-    it('checks the requirement inside the advisory-locked transaction', async () => {
-      const sql: string[] = []
-      const recording = {
-        connect: async () => {
-          const client = await pool.connect()
-          const original = client.query.bind(client)
-          const spy = (...args: unknown[]) => {
-            const first = args[0]
-            sql.push(
-              typeof first === 'string' ? first : String((first as { text: string }).text),
-            )
-            return (original as unknown as (...a: unknown[]) => unknown)(...args)
-          }
-          Object.assign(client, { query: spy })
-          return client
-        },
-      } as unknown as pg.Pool
-
-      const locked = await gateRequiring('medium')
-      const svc = makeTrivia({ pool: recording, bank: testBank(), salt: SALT })
-      await expect(svc.startOrResume(await gateFor(locked), PLAYER)).rejects.toThrow(
-        /tier_locked/,
-      )
-
-      const at = (needle: string) => sql.findIndex((q) => q.includes(needle))
-      expect(sql[0]).toBe('BEGIN')
-      expect(at('pg_advisory_xact_lock')).toBeGreaterThan(0)
-      // `array_position` over the tier ladder is the tier check and nothing else
-      // in this path uses it.
-      expect(at('array_position')).toBeGreaterThan(at('pg_advisory_xact_lock'))
-      expect(at('ROLLBACK')).toBeGreaterThan(at('array_position'))
-      expect(at('COMMIT')).toBe(-1)
-
-      // And the rollback is real: a locked player spends no session, so nothing
-      // puts them in a cooldown for an attempt they were never allowed.
-      const { rows } = await pool.query<{ count: string }>(
-        'SELECT count(*)::text AS count FROM trivia_sessions',
-      )
-      expect(rows[0].count).toBe('0')
     })
   })
 })

@@ -415,12 +415,6 @@ function fieldPairs(o: Option): Pair[] {
       bg: FIELD_RECESS,
       floor: 4.5,
     },
-    {
-      what: 'the unverified-name chip, on the same recess',
-      fg: on(MUTED, FIELD_RECESS),
-      bg: FIELD_RECESS,
-      floor: 4.5,
-    },
 
     // --- the rail ---
     { what: 'a rail icon (non-text), on its 6% lift', fg: on(INK, FIELD_ROUND), bg: FIELD_ROUND, floor: 3 },

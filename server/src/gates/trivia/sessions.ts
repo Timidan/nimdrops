@@ -65,7 +65,7 @@ export const SESSION_LOCK_TIMEOUT_MS = 5_000
  * hour of 3-minute cycles, converging retries faster via the finished-session
  * review. The owner chose reach over friction (design §5); no attempt cap ships.
  */
-export const COOLDOWN_MINUTES = 3
+export const COOLDOWN_MINUTES = 2
 
 /**
  * A session passes at this many correct answers. Below it, failing works
@@ -90,8 +90,8 @@ const TIERS: readonly Tier[] = ['novice', 'easy', 'medium', 'hard']
 /**
  * Validated `drop_gates.config` for a trivia gate.
  *
- * `unlockRequiresTier` is enforced in {@link TriviaService.startOrResume} — see
- * `assertTierUnlocked` — and is also what a listed game shows as its
+ * `unlockRequiresTier` is accepted for compatibility and no longer gates play:
+ * every tier is open to everyone. It is still what a listed game shows as its
  * requirement, so a locked game still renders with its payout visible.
  */
 export interface TriviaConfig {
@@ -366,32 +366,6 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
    * decided against one snapshot, or two tabs could each read "locked" and one
    * still get a session out of it.
    */
-  async function assertTierUnlocked(
-    db: PoolClient,
-    requiredTier: Tier,
-    walletAddress: string,
-  ): Promise<void> {
-    const { rows } = await db.query<{ unlocked: boolean }>(
-      `SELECT true AS unlocked
-       FROM gate_grants gg
-       JOIN drop_gates dg ON dg.drop_id = gg.drop_id
-       WHERE gg.wallet_address = $1
-         AND gg.kind = 'trivia'
-         AND array_position($3::text[], dg.config->>'tier')
-             >= array_position($3::text[], $2::text)
-       LIMIT 1`,
-      [walletAddress, requiredTier, [...TIERS]],
-    )
-    if (rows.length === 0) {
-      // Names the requirement, because a player who cannot see what unlocks a
-      // game has been given a locked door and no sign on it. It names no wallet
-      // and no other drop.
-      throw new GateRejectedError(
-        'tier_locked',
-        `this game opens after a pass at ${requiredTier} or above`,
-      )
-    }
-  }
 
   /**
    * @param expectDropId when given, the session must belong to this drop.
@@ -521,25 +495,19 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
       // told to go and claim rather than told it is locked out of it. Before the
       // cooldown and before selection: a locked player must not spend a session,
       // and must not be put in cooldown for one they were never allowed to start.
-      if (config.unlockRequiresTier !== null) {
-        await assertTierUnlocked(client, config.unlockRequiresTier, walletAddress)
-      }
-
       const { rows: existing } = await client.query<{
         id: string
         state: SessionState
         delivered_count: number
         expired: boolean
-        cooling: boolean
       }>(
         `SELECT id, state, delivered_count,
-                expires_at <= now() AS expired,
-                started_at > now() - make_interval(mins => $3::int) AS cooling
+                expires_at <= now() AS expired
          FROM trivia_sessions
          WHERE drop_id = $1 AND wallet_address = $2
          ORDER BY started_at DESC
          LIMIT 1`,
-        [gate.dropId, walletAddress, COOLDOWN_MINUTES],
+        [gate.dropId, walletAddress],
       )
 
       const prior = existing[0]
@@ -559,12 +527,21 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
         if (prior.state === 'in_progress' && prior.expired) {
           await retireIfExpired(client, prior.id)
         }
-        if (prior.cooling) {
-          throw new GateRejectedError(
-            'cooldown',
-            `wait ${COOLDOWN_MINUTES} minutes between attempts at this drop`,
-          )
-        }
+      }
+
+      const { rows: recent } = await client.query<{ cooling: boolean }>(
+        `SELECT started_at > now() - make_interval(mins => $2::int) AS cooling
+         FROM trivia_sessions
+         WHERE wallet_address = $1 AND state <> 'in_progress'
+         ORDER BY started_at DESC
+         LIMIT 1`,
+        [walletAddress, COOLDOWN_MINUTES],
+      )
+      if (recent[0]?.cooling) {
+        throw new GateRejectedError(
+          'cooldown',
+          `wait ${COOLDOWN_MINUTES} minutes between attempts`,
+        )
       }
 
       // Deterministic per (drop, wallet), so a retry gets the identical set —

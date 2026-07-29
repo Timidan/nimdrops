@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import type { ClaimServerState, DropPublic } from '../api'
 import { appShareData, canonicalDropUrl, dropShareData, shareOrCopy } from '../integrations/share'
@@ -13,6 +13,7 @@ import {
   CustodyShieldIcon,
   InfoIcon,
   ShareIcon,
+  SuccessCheckIcon,
   WarningIcon,
   type IconComponent,
 } from '../ui/icons'
@@ -464,11 +465,9 @@ function Sender({
   return (
     <>
       <p className="nd-from">
-        {/* Claimant-facing, sponsor-supplied text, and labelled as such. */}
         <span className="line-clamp-3 [overflow-wrap:anywhere]">
           <b>{sponsor}</b> sent you a NimDrop
         </span>
-        <span className="nd-chip">name unverified</span>
       </p>
       {drop?.message ? <p className="nd-message">{drop.message}</p> : null}
     </>
@@ -890,8 +889,28 @@ function NoWallet() {
   )
 }
 
+type RailFeedback = 'idle' | 'ok' | 'failed'
+
+function useRailFeedback(): [RailFeedback, (next: RailFeedback) => void] {
+  const [state, setState] = useState<RailFeedback>('idle')
+  const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  useEffect(() => () => clearTimeout(timer.current), [])
+  const report = (next: RailFeedback) => {
+    setState(next)
+    clearTimeout(timer.current)
+    if (next !== 'idle') timer.current = setTimeout(() => setState('idle'), 2000)
+  }
+  return [state, report]
+}
+
+function RailIcon({ state, resting }: { state: RailFeedback; resting: ReactNode }) {
+  if (state === 'ok') return <SuccessCheckIcon size={18} />
+  if (state === 'failed') return <WarningIcon size={18} />
+  return resting
+}
+
 function CopyLinkButton({ publicId }: { publicId: string }) {
-  const [copied, setCopied] = useState(false)
+  const [state, report] = useRailFeedback()
   return (
     <>
       <button
@@ -901,16 +920,15 @@ function CopyLinkButton({ publicId }: { publicId: string }) {
         aria-label="Copy the link to this drop"
         onClick={() => {
           const here = canonicalDropUrl(publicId)
-          void navigator.clipboard
-            ?.writeText(here)
-            .then(() => setCopied(true))
-            .catch(() => setCopied(false))
+          void shareOrCopy({ url: here }).then((result) =>
+            report(result === 'failed' ? 'failed' : 'ok'),
+          )
         }}
       >
-        <CopyIcon size={18} />
+        <RailIcon state={state} resting={<CopyIcon size={18} />} />
       </button>
       <span className="nd-sr" role="status">
-        {copied ? 'Link copied' : ''}
+        {state === 'ok' ? 'Link copied' : state === 'failed' ? 'Could not copy the link' : ''}
       </span>
     </>
   )
@@ -925,7 +943,7 @@ function ShareButton({
   amount: string
   canForward: boolean
 }) {
-  const [copied, setCopied] = useState(false)
+  const [state, report] = useRailFeedback()
   const origin = typeof window === 'undefined' ? '' : window.location.origin
   const data = canForward
     ? dropShareData({ url: canonicalDropUrl(publicId, origin), amount })
@@ -938,13 +956,22 @@ function ShareButton({
         className="nd-round"
         aria-label={canForward ? 'Share this drop' : 'Share NimDrops'}
         onClick={() => {
-          void shareOrCopy(data).then((result) => setCopied(result === 'copied'))
+          void shareOrCopy(data).then((result) => {
+            if (result === 'dismissed') return
+            report(result === 'failed' ? 'failed' : 'ok')
+          })
         }}
       >
-        <ShareIcon size={18} />
+        <RailIcon state={state} resting={<ShareIcon size={18} />} />
       </button>
       <span className="nd-sr" role="status">
-        {copied ? (canForward ? 'Drop link copied' : 'App link copied') : ''}
+        {state === 'ok'
+          ? canForward
+            ? 'Drop link copied'
+            : 'App link copied'
+          : state === 'failed'
+            ? 'Could not share the link'
+            : ''}
       </span>
     </>
   )

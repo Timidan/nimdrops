@@ -392,10 +392,10 @@ export default function SealedEnvelope({
  * on the sealed screen — and a stranger deciding whether to hold a thing for
  * two and a half seconds should know whose thing it is.
  *
- * On a recess rather than on the bare field: the "name unverified" chip is
- * secondary copy, the field's brightest pixel cannot carry secondary copy at
- * any alpha short of solid, and this block sits mid-screen where no scrim band
- * reaches it. `surface.contrast.test.ts` computes it there.
+ * On a recess rather than on the bare field: this is secondary copy, the
+ * field's brightest pixel cannot carry secondary copy at any alpha short of
+ * solid, and this block sits mid-screen where no scrim band reaches it.
+ * `surface.contrast.test.ts` computes it there.
  */
 function Sender({ sponsor, message }: { sponsor?: string; message?: string | null }) {
   return (
@@ -404,7 +404,6 @@ function Sender({ sponsor, message }: { sponsor?: string; message?: string | nul
         {sponsor ? (
           <>
             <b>{sponsor}</b> sent you a NimDrop
-            <span className="nd-chip">name unverified</span>
           </>
         ) : (
           <b>Sender details are arriving…</b>

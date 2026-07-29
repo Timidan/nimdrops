@@ -25,9 +25,7 @@ export default function Receipt({ publicId, txHash, sponsorLabel }: ReceiptProps
       <dl className="nd-rows mt-5">
         <div className="nd-row">
           <dt>From</dt>
-          <dd>
-            {sponsorLabel} <span className="text-(--nd-on-surface-muted)">(name unverified)</span>
-          </dd>
+          <dd>{sponsorLabel}</dd>
         </div>
         <div className="nd-row">
           <dt>Transaction</dt>

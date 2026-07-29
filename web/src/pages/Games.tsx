@@ -103,19 +103,9 @@ export default function Games() {
   )
 }
 
-/**
- * One drop.
- *
- * `unlockRequiresTier` is a property of the drop, not of the reader: it says
- * which tier must already have been passed, and the page cannot know whether
- * this player has. So the card states the requirement as a requirement rather
- * than telling somebody they are locked out, and it still links through — the
- * server answers with the exact reason if the tier is not met, and it is the
- * only one that knows.
- */
+/** One drop. Every tier is open to everyone, so no card is ever locked. */
 function GameCard({ game }: { game: ListedGame }) {
   const amount = formatNim(BigInt(game.amountEachLuna))
-  const locked = game.unlockRequiresTier !== null
 
   return (
     <Link
@@ -143,16 +133,6 @@ function GameCard({ game }: { game: ListedGame }) {
           className="mt-3 border-l-2 border-chalk/25 pl-3 text-sm leading-relaxed text-chalk/70"
         >
           {game.hint}
-        </p>
-      ) : null}
-
-      {locked ? (
-        <p
-          data-testid={`locked-${game.publicId}`}
-          className="mt-3 rounded-xl bg-(--nd-recess-field) px-3 py-2 text-xs leading-relaxed text-chalk/70"
-        >
-          Locked until a {game.unlockRequiresTier} round has been passed. The share stays this size
-          when it opens.
         </p>
       ) : null}
 

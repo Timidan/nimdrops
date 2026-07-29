@@ -131,7 +131,7 @@ describe('Games', () => {
     expect(phrase.textContent).not.toMatch(/up to/i)
   })
 
-  it('keeps a locked card visible, with its payout and its requirement', async () => {
+  it('shows every tier as playable, with its payout', async () => {
     installFetch({
       status: 200,
       body: {
@@ -141,11 +141,8 @@ describe('Games', () => {
     mount()
 
     const card = await screen.findByTestId('game-hard-one')
-    // The unreachable value is the whole point of showing it.
     expect(card.textContent).toMatch(/2\.5\s*NIM/)
-    const locked = screen.getByTestId('locked-hard-one')
-    expect(locked.textContent).toMatch(/locked until a medium round has been passed/i)
-    // And it still leads somewhere: the server owns the reason, not this page.
+    expect(screen.queryByTestId('locked-hard-one')).toBe(null)
     expect(card.getAttribute('href')).toBe('/game/hard-one')
   })
 

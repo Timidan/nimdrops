@@ -127,7 +127,6 @@ describe('the sealed screen shows no amount', () => {
     const stage = screen.getByTestId('reveal-stage')
     expect(stage.textContent).toMatch(/Amara O\./)
     expect(stage.textContent).toMatch(/Thanks for a good week/)
-    expect(stage.textContent).toMatch(/name unverified/)
   })
 })
 

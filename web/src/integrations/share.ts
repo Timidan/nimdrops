@@ -46,11 +46,38 @@ export async function shareOrCopy(
   }
 
   const text = data.url || data.text
-  if (!text || !host.clipboard) return 'failed'
+  if (!text) return 'failed'
+
+  if (host.clipboard) {
+    try {
+      await host.clipboard.writeText(text)
+      return 'copied'
+    } catch {
+      // falls through to legacyCopy
+    }
+  }
+
+  return legacyCopy(text) ? 'copied' : 'failed'
+}
+
+/** Fallback for WebViews where the async clipboard is absent or refused. */
+function legacyCopy(text: string): boolean {
+  if (typeof document === 'undefined' || typeof document.execCommand !== 'function') return false
+  const area = document.createElement('textarea')
+  area.value = text
+  area.readOnly = true
+  area.setAttribute('aria-hidden', 'true')
+  area.style.position = 'fixed'
+  area.style.top = '-9999px'
+  area.style.opacity = '0'
+  document.body.appendChild(area)
   try {
-    await host.clipboard.writeText(text)
-    return 'copied'
+    area.select()
+    area.setSelectionRange(0, text.length)
+    return document.execCommand('copy')
   } catch {
-    return 'failed'
+    return false
+  } finally {
+    area.remove()
   }
 }

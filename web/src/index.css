@@ -2308,9 +2308,9 @@ body {
  * Who sent this, and their words. Neither is the amount, so both are allowed on
  * the sealed screen.
  *
- * On a recess: the "name unverified" chip is secondary copy and this block sits
- * mid-screen, where no scrim band reaches it and the bare field cannot carry
- * secondary copy at any alpha short of solid.
+ * On a recess: this is secondary copy and the block sits mid-screen, where no
+ * scrim band reaches it and the bare field cannot carry secondary copy at any
+ * alpha short of solid.
  */
 .nd-gate-from {
   width: 100%;

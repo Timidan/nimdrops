@@ -159,14 +159,12 @@ afterEach(() => {
 })
 
 describe('Drop — the drop card', () => {
-  it('shows sponsor, the unverified chip, the fixed amount, what is left, and the message', async () => {
+  it('shows sponsor, the fixed amount, what is left, and the message', async () => {
     installFetch({ drop: { status: 200, body: dropBody() } })
     mount()
     await unseal()
 
     expect(await screen.findByText('Team NimDrops')).toBeTruthy()
-    // §4.1: the sponsor label is claimant-supplied text and is labelled as such.
-    expect(screen.getByText(/unverified/i)).toBeTruthy()
     expect(screen.getByTestId('amount-hero').textContent).toMatch(/2\s*NIM/)
     expect(screen.getByTestId('remaining').textContent).toMatch(/3.*5/)
     expect(screen.getByText('Thanks for a good week')).toBeTruthy()
