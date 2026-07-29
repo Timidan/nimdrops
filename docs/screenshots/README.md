@@ -1,8 +1,8 @@
 # Screenshots
 
 Product screenshots for the project README and other documentation. These are
-optimized, curated exports — not the full design-process archive (see
-`docs/design/` on disk for that).
+optimized, curated exports; the full design-process archive they came from is
+kept outside this repository.
 
 They are renders, so interface copy can lag the shipped strings: `claim.png`
 shows the primary action as "Open 5 NIM", which the app now words as "Claim 5

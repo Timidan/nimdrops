@@ -7,7 +7,7 @@ NimDrops entitlement -> finalized NIM payout -> claimant receipt
                                              -> optional external handoff
 ```
 
-The competition build has three external handoffs:
+This release has three external handoffs:
 
 | Need | Destination | What NimDrops sends |
 |---|---|---|

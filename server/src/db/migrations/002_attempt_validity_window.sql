@@ -21,7 +21,7 @@
 -- double-payment this column exists to prevent. After this migration every
 -- insert must state the height explicitly.
 --
--- GUARD (G1 review review finding 9). The paragraph above used to end "pre-existing
+-- GUARD (G1 review finding 9). The paragraph above used to end "pre-existing
 -- rows are backfilled with 0, which is safe because no deployment exists yet".
 -- That safety argument is true of THIS repository and of nothing else: run
 -- against a 001-era database that does have attempt rows, the backfill gives

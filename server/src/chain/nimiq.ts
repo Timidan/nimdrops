@@ -126,8 +126,8 @@ export const DEFAULT_SEED_NODES: Record<NimiqNetwork, string[]> = {
  * macro block was produced after inclusion NO MATTER where in the batch the
  * transaction landed — that is the reason for the default, not a round number.
  *
- * Re-exported from `config.ts`, where it is also the HARD FLOOR: since G1 review
- * finding 5, `NIMIQ_FINALITY_DEPTH` may raise this number and never lower it.
+ * Re-exported from `config.ts`, where it is also the HARD FLOOR: since the G1
+ * review finding 5, `NIMIQ_FINALITY_DEPTH` may raise this number and never lower it.
  */
 export const DEFAULT_FINALITY_DEPTH = FINALITY_DEPTH_FLOOR_BLOCKS
 

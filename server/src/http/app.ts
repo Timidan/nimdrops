@@ -1027,7 +1027,7 @@ export function makeApp(deps: AppDeps): Hono {
       signatureHex,
       idemKey,
       requestHash: requestHash(scope, { challengeId, publicKey: publicKeyHex, signature: signatureHex }),
-      // G1 review finding 8, round-2 F8, round-3 R5: the per-drop bucket is
+      // G1 review finding 8, round-2 review F8, round-3 review R5: the per-drop bucket is
       // charged only by the request that actually commits a new reservation,
       // from inside the allocation transaction. Charging it up front made a
       // targeted lockout cost nothing (ten junk requests a minute at one drop

@@ -444,7 +444,7 @@ describe.skipIf(!hasDb)('solvency and custody controls (real Postgres)', () => {
   // ---- G1 review finding 3: addLuna belongs in the balance requirement --------
 
   it('refuses an activation whose new principal is not covered once prior fees are spent', async () => {
-    // The exact the reviewer scenario. The operator float is exactly the fee reserve,
+    // The exact scenario. The operator float is exactly the fee reserve,
     // one earlier payout consumed a fee of f out of it, and a sponsor's new
     // principal F is now verified and being activated.
     const FEE = 30n

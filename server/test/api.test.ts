@@ -1262,7 +1262,7 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
   })
 
   /**
-   * round-2 review F8. Charging the per-drop bucket on every AUTHENTICATED
+   * Round-2 review F8. Charging the per-drop bucket on every AUTHENTICATED
    * request was the same denial of service one signature deeper: the
    * idempotency contract invites a client to retry, and each retry — answered
    * from a record, allocating nothing — still spent one of the drop's ten
@@ -1314,7 +1314,7 @@ describe.skipIf(!hasDb)('HTTP API (real Postgres)', () => {
   })
 
   /**
-   * round-3 review R5. F8 made SEQUENTIAL retries free and left concurrent ones
+   * Round-3 review R5. F8 made SEQUENTIAL retries free and left concurrent ones
    * charged: the retry recheck that spares a duplicate runs inside the
    * allocation transaction, but the charge happened before it, so ten copies of
    * one request sent at once all found no existing claim, all spent a token,

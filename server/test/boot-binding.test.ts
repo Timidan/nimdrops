@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { migrate } from '../src/db/migrate'
 
 /**
- * round-4 review S1 — the API and the worker cannot disagree about the custody
+ * Round-4 review S1 — the API and the worker cannot disagree about the custody
  * address, proven the only way it means anything: by booting the REAL
  * entrypoints as child processes and reading what they do.
  *

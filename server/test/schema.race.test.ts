@@ -258,7 +258,7 @@ describe.skipIf(!hasDb)('schema invariants (real Postgres)', () => {
   })
 
   /**
-   * round-2 review F9. The guard above is correct and, on the databases it was
+   * Round-2 review F9. The guard above is correct and, on the databases it was
    * written for, unreachable: `db/migrate.ts` skips by FILENAME, so a
    * deployment that had already applied 002 never ran the amended version of it
    * and never will. `005` ships the check as a migration of its own, where it

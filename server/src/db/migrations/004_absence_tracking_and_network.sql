@@ -1,5 +1,5 @@
 -- Sustained-absence evidence, network binding and the operator float
--- (G1 review review findings 2, 4 and 6).
+-- (G1 review findings 2, 4 and 6).
 --
 -- 1. ABSENCE TRACKING (finding 2). `proven_dead` used to rest on a SINGLE
 --    not-found lookup plus an expired validity window. One lookup is one

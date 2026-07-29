@@ -1,20 +1,20 @@
 # ADR-001: Keep NIM Settlement Frozen; Add Polygon USDT as a Same-Asset Rail Later
 
-**Status:** Accepted for competition scope; post-competition design direction  
+**Status:** Accepted for the current release; forward design direction  
 **Date:** 26 July 2026  
 **Research:** [Nimiq ecosystem and USD payout report](../research/Nimiq_Ecosystem_USD_Payout_20260726/report.md)
 
 ## Context
 
-NimDrops currently implements a NIM-funded custodial pot with NIM payouts and NIM expiry refunds. The competition release has four days remaining. Nimiq Pay supports Polygon USDT and exposes an EVM provider, but no live canonical NIM-to-EVM bridge or public Mini App swap primitive exists.
+NimDrops currently implements a NIM-funded custodial pot with NIM payouts and NIM expiry refunds. Nimiq Pay supports Polygon USDT and exposes an EVM provider, but no live canonical NIM-to-EVM bridge or public Mini App swap primitive exists.
 
 “Fund in NIM and let each claimant select USD on any network” crosses four boundaries at once: asset conversion, destination-chain settlement, custody/solvency, and exchange/compliance operations. It cannot be represented safely as another value in the current outgoing transfer `purpose` field or as methods added to the NIM `ChainClient`.
 
 ## Decision
 
-1. Cycle I remains NIM-only. Polygon, USDT, swaps, and destination selection stay outside the competition money path.
+1. The current release remains NIM-only. Polygon, USDT, swaps and destination selection stay outside its money path.
 2. The existing `ChainClient` remains Nimiq-specific and unchanged.
-3. The first added stablecoin product may be a creator-funded **Polygon USDT Stable Drop** in a separate post-competition build. Funding, claims, payouts, accounting, and refunds use the same token on the same chain.
+3. The first added stablecoin product may be a creator-funded **Polygon USDT Stable Drop** in a separate later build. Funding, claims, payouts, accounting, and refunds use the same token on the same chain.
 4. A shared `PayoutRail` interface will be extracted only while implementing that second working rail. It will compose the NIM client; it will not replace it with a prematurely generic chain interface.
 5. NIM-funded claimant-selected conversion is not a scheduled feature. It is conditional research that can be reconsidered only when live economics and supported integration plumbing meet explicit gates.
 6. “USD” in product copy will be “Polygon USDT” unless the product actually uses a regulated bank payout rail.
@@ -100,7 +100,7 @@ Do not overload current `outgoing_transfers` with provider orders or store decim
 
 Positive:
 
-- The competition build keeps its tested NIM accounting and failure model.
+- This release keeps its tested NIM accounting and failure model.
 - Polygon USDT can be added without conversion, slippage, or exchange/KYC dependencies.
 - Future providers can churn without infecting the entitlement ledger.
 - Product copy remains precise and supportable.
@@ -124,7 +124,7 @@ Negative:
 
 Revisit NIM-to-Polygon-USDT conversion only after all of these are true. Until then it is considered economically unavailable, not deferred roadmap scope:
 
-1. Competition NIM settlement is mainnet- and device-proven.
+1. NIM settlement is mainnet- and device-proven.
 2. Real users request stable settlement and the expected claim size exceeds route minimums/fees.
 3. Nimiq or Fastspot supplies a supported third-party integration path and production terms.
 4. An end-to-end spike proves quote, signing, funding, settlement, timeout, refund, ambiguous response recovery, and provider outage handling.

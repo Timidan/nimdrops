@@ -89,7 +89,7 @@ export async function runWorker(chain: ChainClient, alerts: Alerts): Promise<voi
   try {
     // Before anything touches money: bind this database to this chain AND to
     // this custody wallet, or refuse to run at all (G1 review finding 6, round-4
-    // S1). A worker pointed at the wrong network would sign payouts with the
+    // review S1). A worker pointed at the wrong network would sign payouts with the
     // wrong network id and reconcile against a chain that has never seen this
     // custody wallet. A worker whose KEY derives a different address than the
     // one the API is publishing as funding instructions is the same failure

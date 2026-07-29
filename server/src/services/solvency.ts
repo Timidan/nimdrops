@@ -14,7 +14,7 @@ import { type Alerts, consoleAlerts } from './alerts'
  * calling `lockControls`. The mandated lock order is ALWAYS
  * `custody_controls` → drop row; taking them in the other order deadlocks.
  *
- * Since the G1 review review the invariant runs on a LEDGER-DERIVED balance
+ * Since the G1 review the invariant runs on a LEDGER-DERIVED balance
  * (`ledgerBalanceLuna`: operator float + accepted finalized funding − finalized
  * outgoing principal − recorded fees), not on the chain's head-state balance.
  * The chain balance is still fetched every `reconcile()`, but only as a
@@ -1097,7 +1097,7 @@ export const CROSS_CHECK_EPSILON_LUNA = 0n
  * Refresh the chain cross-check and the reconciliation timestamp (design §10.3:
  * startup and periodic reconciliation).
  *
- * Since G1 review finding 4 this no longer feeds the invariant — it AUDITS it.
+ * Since the G1 review finding 4 this no longer feeds the invariant — it AUDITS it.
  * The chain balance is stored, then compared against the smallest balance the
  * books can explain (`ledger − in-flight outgoing`). Custody having MORE than
  * the books say is normal and harmless (an operator top-up, a stray deposit,
