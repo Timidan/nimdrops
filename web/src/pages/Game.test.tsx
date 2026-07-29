@@ -170,11 +170,11 @@ describe('Game — which wallet is playing', () => {
     mount(null)
 
     const step = await screen.findByTestId('wallet-step')
-    expect(step.textContent).toMatch(/which wallet is playing/i)
+    expect(step.textContent).toMatch(/play with your nimiq wallet/i)
     // The reason it is asked, said out loud.
     expect(step.textContent).toMatch(/only that wallet can\s+claim/i)
     // And the promise that this is not the signature.
-    expect(step.textContent).toMatch(/nothing is signed here/i)
+    expect(step.textContent).toMatch(/nothing is signed or sent until you claim/i)
     // The offer came first: a stranger learns what this is before being asked.
     expect(document.body.textContent).toMatch(/2\.5 NIM/)
     // No condition has started.
@@ -292,8 +292,8 @@ describe('Game — trivia before play', () => {
 
     await screen.findByTestId('trivia-idle')
     const body = document.body.textContent ?? ''
-    expect(body).toMatch(/up to this amount/i)
-    expect(body).toMatch(/3 of 5 right pays 60%, 4 pays 80%, 5 pays it all/i)
+    expect(body).toMatch(/maximum payout/i)
+    expect(screen.getByLabelText('Score payouts').textContent).toMatch(/3\/5.*60%.*5\/5.*100%/i)
     expect(body).not.toMatch(/the same fixed amount for everyone/i)
   })
 })
@@ -753,7 +753,7 @@ describe('Game — passphrase', () => {
 
     await screen.findByTestId('passphrase-form')
     expect(document.body.textContent ?? '').toMatch(/the same fixed amount for everyone/i)
-    expect(document.body.textContent ?? '').not.toMatch(/up to this amount/i)
+    expect(document.body.textContent ?? '').not.toMatch(/maximum payout/i)
   })
 
   it('shows the hint, one field and one button', async () => {

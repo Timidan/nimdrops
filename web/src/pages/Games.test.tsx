@@ -111,7 +111,7 @@ describe('Games', () => {
     expect(card.getAttribute('href')).toBe('/game/phrase-one')
   })
 
-  it('says "up to" beside a trivia amount, since the score sets the share', async () => {
+  it('labels the trivia amount as a maximum and shows the score ladder', async () => {
     installFetch({
       status: 200,
       body: {
@@ -124,11 +124,12 @@ describe('Games', () => {
     mount()
 
     const trivia = await screen.findByTestId('game-trivia-one')
-    expect(trivia.textContent).toMatch(/up to, by your score/i)
+    expect(trivia.textContent).toMatch(/maximum payout/i)
+    expect(screen.getByLabelText('Score payouts').textContent).toMatch(/3\/5.*60%.*5\/5.*100%/i)
 
     const phrase = screen.getByTestId('game-phrase-one')
     expect(phrase.textContent).toMatch(/each/i)
-    expect(phrase.textContent).not.toMatch(/up to/i)
+    expect(phrase.textContent).not.toMatch(/maximum payout/i)
   })
 
   it('shows every tier as playable, with its payout', async () => {

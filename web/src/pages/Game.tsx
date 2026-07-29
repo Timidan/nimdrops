@@ -233,11 +233,12 @@ function Offer({
       </p>
       <p className="mt-3 text-center text-xs leading-relaxed text-chalk/55">
         {kind === 'trivia' ? (
-          <>Up to this amount. 3 of 5 right pays 60%, 4 pays 80%, 5 pays it all.</>
+          <>Maximum payout. Your score decides how much you claim.</>
         ) : (
           <>The same fixed amount for everyone who meets this drop&rsquo;s condition.</>
         )}
       </p>
+      {kind === 'trivia' ? <ScoreLadder /> : null}
 
       {slotsRemaining === null ? null : (
         <p data-testid="game-slots" className="mt-4 text-center text-xs tabular-nums text-chalk/55">
@@ -245,6 +246,16 @@ function Offer({
         </p>
       )}
     </div>
+  )
+}
+
+function ScoreLadder() {
+  return (
+    <p aria-label="Score payouts" className="mt-3 flex flex-wrap justify-center gap-x-4 gap-y-1 text-[0.6875rem] tabular-nums text-chalk/60">
+      <span><strong className="font-semibold text-chalk/80">3/5</strong> · 60%</span>
+      <span><strong className="font-semibold text-chalk/80">4/5</strong> · 80%</span>
+      <span><strong className="font-semibold text-chalk/80">5/5</strong> · 100%</span>
+    </p>
   )
 }
 
@@ -544,14 +555,10 @@ function WalletStep({ onSubmit }: { onSubmit: (address: string) => void }) {
 
   return (
     <div data-testid="wallet-step" className="mt-8">
-      <h1 className="text-lg font-semibold tracking-tight">Which wallet is playing?</h1>
+      <h1 className="text-lg font-semibold tracking-tight">Play with your Nimiq wallet</h1>
       <p className="mt-2 text-sm leading-relaxed text-chalk/65">
-        Whatever this drop asks of you is recorded against your wallet, and only that wallet can
-        claim the share.
-      </p>
-      <p className="mt-2 text-sm leading-relaxed text-chalk/65">
-        Your wallet will ask you to share your address. Nothing is signed here and nothing leaves
-        your wallet. The signature comes later, on the claim.
+        Nimiq Pay shares your wallet address so your score and claim stay together, and only that
+        wallet can claim. Nothing is signed or sent until you claim.
       </p>
 
       {problem ? (
@@ -563,8 +570,7 @@ function WalletStep({ onSubmit }: { onSubmit: (address: string) => void }) {
       {needsApp ? (
         <div data-testid="open-in-app" className="mt-6">
           <p className="text-sm leading-relaxed text-chalk/65">
-            This page needs Nimiq Pay to read your wallet. Open it there and this same page loads,
-            ready to play.
+            Open this page in Nimiq Pay to connect your wallet and play.
           </p>
           {url ? (
             <button
@@ -731,17 +737,8 @@ function Trivia({
         {TRIVIA_QUESTION_COUNT} questions, four options each
       </h1>
       <p className="mt-2 text-sm leading-relaxed text-chalk/65">
-        Get {TRIVIA_PASS_MIN_CORRECT} or more right to win. Your score sets your share:{' '}
-        {TRIVIA_PASS_MIN_CORRECT} pays 60%, 4 pays 80%, {TRIVIA_QUESTION_COUNT} pays it all.
-      </p>
-      {/**
-       * The per-question time limit is set per drop and is not in
-       * `GET /api/games/:publicId` — it arrives with a started session. So this
-       * line says the question is timed, which is true, rather than a number
-       * that would be a guess.
-       */}
-      <p className="mt-2 text-sm leading-relaxed text-chalk/65">
-        The server times each question, and the seconds are on screen while you answer.
+        Get {TRIVIA_PASS_MIN_CORRECT} or more right. The server times each question, with the
+        countdown on screen while you answer.
       </p>
       <p className="mt-2 text-sm leading-relaxed text-chalk/65">
         Nothing is signed while you play. If you pass, you claim on this drop&rsquo;s own page. The

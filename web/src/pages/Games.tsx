@@ -37,9 +37,15 @@ const KIND_HEADINGS: Record<GateKind, string> = {
 
 const KIND_BLURBS: Record<GateKind, string> = {
   passphrase: 'Somebody said a phrase out loud. Type it and the share is yours to claim.',
-  trivia:
-    'Five questions, four options each. Three or more right and a share is yours: your score sets how much of it you claim.',
+  trivia: 'Five timed questions. Score three or more to unlock a share.',
   attested: 'Whoever runs the drop confirms who is eligible. There is nothing to answer.',
+}
+
+const TIER_DESCRIPTIONS: Record<string, string> = {
+  novice: 'basics',
+  easy: 'everyday',
+  medium: 'mixed knowledge',
+  hard: 'specialist',
 }
 
 export default function Games() {
@@ -86,6 +92,7 @@ export default function Games() {
                 <section key={kind} data-testid={`group-${kind}`} className="mt-10">
                   <h2 className="text-base font-semibold tracking-tight">{KIND_HEADINGS[kind]}</h2>
                   <p className="mt-1 text-xs leading-relaxed text-chalk/55">{KIND_BLURBS[kind]}</p>
+                  {kind === 'trivia' ? <ScoreLadder /> : null}
                   <ul className="mt-4 flex flex-col gap-3">
                     {group.map((game) => (
                       <li key={game.publicId}>
@@ -111,20 +118,20 @@ function GameCard({ game }: { game: ListedGame }) {
     <Link
       to={`/game/${game.publicId}`}
       data-testid={`game-${game.publicId}`}
-      className="block rounded-2xl border border-chalk/10 bg-(--nd-recess-field) p-4"
+      className="block rounded-2xl border border-chalk/10 bg-(--nd-recess-field) p-4 transition-transform duration-150 ease-out active:scale-[0.99] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-chalk/70"
     >
       <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
         {/* Exact, never rounded, tabular so a column of them cannot jitter. */}
         <span className="nd-amount nd-num text-2xl">{amount} NIM</span>
         {game.tier ? (
           <span className="rounded-full border border-chalk/15 px-2 py-0.5 text-[0.6875rem] font-medium text-chalk/55">
-            {game.tier}
+            {game.tier} · {TIER_DESCRIPTIONS[game.tier] ?? 'open'}
           </span>
         ) : null}
       </div>
 
       <p className="mt-1 text-xs text-chalk/55">
-        {game.kind === 'trivia' ? 'up to, by your score' : 'each'}
+        {game.kind === 'trivia' ? 'maximum payout' : 'each'}
       </p>
 
       {game.hint ? (
@@ -136,22 +143,37 @@ function GameCard({ game }: { game: ListedGame }) {
         </p>
       ) : null}
 
-      <p className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs tabular-nums text-chalk/55">
-        <span data-testid={`slots-${game.publicId}`}>
-          {game.slotsRemaining === null
-            ? 'Open'
-            : `${game.slotsRemaining} ${game.slotsRemaining === 1 ? 'share' : 'shares'} left`}
+      <div className="mt-3 flex items-end justify-between gap-4">
+        <p className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs tabular-nums text-chalk/55">
+          <span data-testid={`slots-${game.publicId}`}>
+            {game.slotsRemaining === null
+              ? 'Open'
+              : `${game.slotsRemaining} ${game.slotsRemaining === 1 ? 'share' : 'shares'} left`}
+          </span>
+          {game.expiresAt ? (
+            <>
+              <span aria-hidden="true" className="text-chalk/25">
+                ·
+              </span>
+              <Expiry expiresAt={game.expiresAt} />
+            </>
+          ) : null}
+        </p>
+        <span className="shrink-0 text-xs font-semibold text-chalk/75">
+          Play <span aria-hidden="true">→</span>
         </span>
-        {game.expiresAt ? (
-          <>
-            <span aria-hidden="true" className="text-chalk/25">
-              ·
-            </span>
-            <Expiry expiresAt={game.expiresAt} />
-          </>
-        ) : null}
-      </p>
+      </div>
     </Link>
+  )
+}
+
+function ScoreLadder() {
+  return (
+    <p aria-label="Score payouts" className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[0.6875rem] tabular-nums text-chalk/60">
+      <span><strong className="font-semibold text-chalk/80">3/5</strong> · 60%</span>
+      <span><strong className="font-semibold text-chalk/80">4/5</strong> · 80%</span>
+      <span><strong className="font-semibold text-chalk/80">5/5</strong> · 100%</span>
+    </p>
   )
 }
 
@@ -167,6 +189,8 @@ function Expiry({ expiresAt }: { expiresAt: string }) {
 
   const minutes = Math.floor(remainingMs / 60_000)
   const hours = Math.floor(minutes / 60)
+  const days = Math.floor(hours / 24)
+  if (days >= 1) return <span>Ends in {`${days}d ${hours % 24}h`}</span>
   if (hours >= 1) return <span>Ends in {`${hours}h ${minutes % 60}m`}</span>
   if (minutes >= 1) return <span>Ends in {minutes}m</span>
   return <span>Ends in under a minute</span>
