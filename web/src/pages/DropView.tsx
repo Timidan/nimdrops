@@ -241,7 +241,10 @@ export default function DropView({
             />
           )}
           {state === 'awaiting-funding' ? null : (
-            <CustodyDisclosure expiryHours={drop?.expiryHours} />
+            <CustodyDisclosure
+              expiryHours={drop?.expiryHours}
+              repeatableTrivia={drop?.gateKind === 'trivia'}
+            />
           )}
           {/*
             The sponsor's way back to their own money, and deliberately the
@@ -636,7 +639,13 @@ function Face({ publicId, state, drop, serverState, txHash, amount, sponsor, onC
  * `PRIVACY.md`; it is lifted rather than rewritten so the two audiences are
  * told the same thing.
  */
-function CustodyDisclosure({ expiryHours }: { expiryHours?: number }) {
+function CustodyDisclosure({
+  expiryHours,
+  repeatableTrivia,
+}: {
+  expiryHours?: number
+  repeatableTrivia: boolean
+}) {
   const [open, setOpen] = useState(false)
   return (
     <>
@@ -668,12 +677,19 @@ function CustodyDisclosure({ expiryHours }: { expiryHours?: number }) {
             When you claim, it is sent to the wallet that signed, and to no other address. Nothing
             you type into this app can change where it goes.
           </p>
-          <p className="mt-3">
-            Shares are fixed and first come, first served,{' '}
-            <strong className="font-semibold text-plate">one per wallet</strong>. A signature proves
-            control of one wallet. It does not prove one person, so anyone holding several wallets
-            can take several shares.
-          </p>
+          {repeatableTrivia ? (
+            <p className="mt-3">
+              Every passed quiz earns one score-based payout. The same wallet may play and earn
+              again after the cooldown; each win can be claimed once.
+            </p>
+          ) : (
+            <p className="mt-3">
+              Shares are fixed and first come, first served,{' '}
+              <strong className="font-semibold text-plate">one per wallet</strong>. A signature
+              proves control of one wallet. It does not prove one person, so anyone holding several
+              wallets can take several shares.
+            </p>
+          )}
           {/* The window is the sponsor's choice, so it is read off THIS drop.
               Where the server has not said — an older build, or a body that
               did not parse — the sentence keeps the fact and drops the number,

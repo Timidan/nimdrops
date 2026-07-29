@@ -57,6 +57,7 @@ describe.skipIf(!hasDb)('issueGrant', () => {
 
   beforeEach(async () => {
     await pool.query('DELETE FROM gate_grants')
+    await pool.query('DELETE FROM trivia_sessions')
     await pool.query('DELETE FROM drop_gates')
     await pool.query('DELETE FROM drops')
     dropId = await gatedDrop()
@@ -68,13 +69,29 @@ describe.skipIf(!hasDb)('issueGrant', () => {
   const countGrants = async () =>
     (await pool.query<{ count: string }>('SELECT count(*) FROM gate_grants')).rows[0].count
 
+  async function passedTriviaSession(walletAddress = WALLET): Promise<string> {
+    const { rows } = await pool.query<{ id: string }>(
+      `INSERT INTO trivia_sessions (
+         drop_id, wallet_address, state, bank_version, question_ids, expires_at, completed_at
+       ) VALUES ($1, $2, 'passed', 'test-bank', '[]'::jsonb, now() + interval '10 minutes', now())
+       RETURNING id`,
+      [dropId, walletAddress],
+    )
+    return rows[0].id
+  }
+
   it('creates a grant and reports it fresh', async () => {
     await expect(grant()).resolves.toMatchObject({ fresh: true })
     expect(await countGrants()).toBe('1')
   })
 
   it('records the kind that issued it', async () => {
-    await grant(WALLET, 'trivia')
+    await issueGrant(pool, {
+      dropId,
+      walletAddress: WALLET,
+      kind: 'trivia',
+      triviaSessionId: await passedTriviaSession(),
+    })
     const { rows } = await pool.query<{ kind: string }>('SELECT kind FROM gate_grants')
     expect(rows[0].kind).toBe('trivia')
   })
@@ -122,7 +139,13 @@ describe.skipIf(!hasDb)('issueGrant', () => {
   })
 
   it('stores the payout fraction when given one', async () => {
-    await issueGrant(pool, { dropId, walletAddress: WALLET, kind: 'trivia', payoutPermille: 600 })
+    await issueGrant(pool, {
+      dropId,
+      walletAddress: WALLET,
+      kind: 'trivia',
+      payoutPermille: 600,
+      triviaSessionId: await passedTriviaSession(),
+    })
     const { rows } = await pool.query<{ payout_permille: number | null }>(
       'SELECT payout_permille FROM gate_grants WHERE wallet_address = $1',
       [WALLET],
@@ -143,11 +166,24 @@ describe.skipIf(!hasDb)('issueGrant', () => {
   // would be a grant for nothing, which a failed session never issues, and a
   // failed insert here is preferable to a slot silently consumed for no share.
   it('rejects a payout fraction outside the valid range', async () => {
+    const triviaSessionId = await passedTriviaSession()
     await expect(
-      issueGrant(pool, { dropId, walletAddress: WALLET, kind: 'trivia', payoutPermille: 0 }),
+      issueGrant(pool, {
+        dropId,
+        walletAddress: WALLET,
+        kind: 'trivia',
+        payoutPermille: 0,
+        triviaSessionId,
+      }),
     ).rejects.toThrow(/payout_permille/)
     await expect(
-      issueGrant(pool, { dropId, walletAddress: WALLET, kind: 'trivia', payoutPermille: 1001 }),
+      issueGrant(pool, {
+        dropId,
+        walletAddress: WALLET,
+        kind: 'trivia',
+        payoutPermille: 1001,
+        triviaSessionId,
+      }),
     ).rejects.toThrow(/payout_permille/)
   })
 

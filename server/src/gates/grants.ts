@@ -4,11 +4,9 @@
  * Every kind funnels through here so that a new kind cannot invent its own grant
  * semantics. The semantics are:
  *
- *  - **One grant per wallet per drop, ever.** Enforced by
- *    `UNIQUE (drop_id, wallet_address)`, not by a partial index on unconsumed
- *    grants: `claims` already permits one claim per wallet per drop via
- *    `UNIQUE (drop_id, recipient_address)`, so a second grant could never be
- *    spent and its only effect would be to confuse an audit.
+ *  - **One grant per non-trivia wallet, or per passed trivia session.** A quiz
+ *    replay earns a new payout, while retrying the same finished session stays
+ *    idempotent.
  *  - **A grant names an address, and that is all it asserts.** It does not prove
  *    the holder of that address asked for it — no kind requires a signature to
  *    attempt a condition. What makes that safe is downstream: `reserveClaim`
@@ -21,7 +19,7 @@ import { type GateKind, requireGateWallet } from './types'
 
 export interface IssuedGrant {
   grantId: string
-  /** False when the wallet already held a grant for this drop. */
+  /** False when this non-trivia wallet or trivia session was already granted. */
   fresh: boolean
 }
 
@@ -47,31 +45,38 @@ export async function issueGrant(
     kind: GateKind
     /** Permille of the full share this grant pays; omitted (or null) means full. */
     payoutPermille?: number
+    /** Required for trivia, absent for every other gate kind. */
+    triviaSessionId?: string
   },
 ): Promise<IssuedGrant> {
   // The last checkpoint, and the reason it is here rather than only in the kinds:
   // this is the choke point every kind already funnels through, so a kind added
   // later cannot store an address in a spelling of its own by forgetting a call.
-  // `UNIQUE (drop_id, wallet_address)` is what makes one grant per wallet true,
-  // and a unique index on a text column is only a rule about a WALLET when one
-  // wallet is one string.
+  // The non-trivia unique index is only a rule about a wallet when one wallet
+  // is one string; trivia is instead unique by the passed session id.
   const walletAddress = requireGateWallet(o.walletAddress)
+  if (o.kind === 'trivia' && !o.triviaSessionId) {
+    throw new Error('a trivia grant requires its passed session id')
+  }
+  if (o.kind !== 'trivia' && o.triviaSessionId) {
+    throw new Error('only trivia grants may name a trivia session')
+  }
 
   const { rows: inserted } = await db.query<{ id: string }>(
-    `INSERT INTO gate_grants (drop_id, wallet_address, kind, payout_permille)
-     VALUES ($1, $2, $3, $4)
-     ON CONFLICT (drop_id, wallet_address) DO NOTHING
+    `INSERT INTO gate_grants (
+       drop_id, wallet_address, kind, payout_permille, trivia_session_id
+     ) VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT DO NOTHING
      RETURNING id`,
-    [o.dropId, walletAddress, o.kind, o.payoutPermille ?? null],
+    [o.dropId, walletAddress, o.kind, o.payoutPermille ?? null, o.triviaSessionId ?? null],
   )
   if (inserted[0]) return { grantId: inserted[0].id, fresh: true }
 
-  // The conflict target already held a row. Read it rather than reporting
-  // failure: the caller's condition IS satisfied for this wallet, whichever
-  // kind got there first.
   const { rows: existing } = await db.query<{ id: string }>(
-    'SELECT id FROM gate_grants WHERE drop_id = $1 AND wallet_address = $2',
-    [o.dropId, walletAddress],
+    o.kind === 'trivia'
+      ? 'SELECT id FROM gate_grants WHERE trivia_session_id = $1'
+      : 'SELECT id FROM gate_grants WHERE drop_id = $1 AND wallet_address = $2',
+    o.kind === 'trivia' ? [o.triviaSessionId] : [o.dropId, walletAddress],
   )
   const row = existing[0]
   if (!row) {

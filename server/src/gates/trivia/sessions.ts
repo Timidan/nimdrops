@@ -877,6 +877,7 @@ export function makeTrivia(o: { pool: Pool; bank: Bank; salt: string }): TriviaS
           dropId: session.drop_id,
           walletAddress: session.wallet_address,
           kind: 'trivia',
+          triviaSessionId: sessionId,
           // Exact for questionCount 5: 600, 800, 1000. Integer math, floors.
           payoutPermille: Math.floor((score * 1000) / config.questionCount),
         })

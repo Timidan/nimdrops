@@ -18,6 +18,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BridgeError, getBridge, resolveBridge } from '../sdk/adapter'
+import { CLAIM_STORAGE_PREFIX } from '../state/claim'
 import Game, { WALLET_STORAGE_KEY } from './Game'
 
 // The wallet boundary is mocked, never the SDK: `getBridge` is the seam the page
@@ -427,6 +428,18 @@ describe('Game — trivia outcomes', () => {
     expect(document.querySelector('.nd-keyline')).toBe(null)
     expect(document.querySelector('.nd-bloom')).toBe(null)
     expect(document.body.textContent ?? '').not.toMatch(/one[\s-]?tap/i)
+  })
+
+  it('starts the new quiz payout instead of resuming this difficulty\'s old receipt', async () => {
+    localStorage.setItem(
+      `${CLAIM_STORAGE_PREFIX}${PUBLIC_ID}`,
+      JSON.stringify({ claimId: 'old-claim', statusToken: 'old-token' }),
+    )
+    await play({ status: 200, body: { state: 'passed', answered: 5, questionCount: 5 } })
+
+    fireEvent.click(await screen.findByRole('link', { name: /go to the claim/i }))
+
+    expect(localStorage.getItem(`${CLAIM_STORAGE_PREFIX}${PUBLIC_ID}`)).toBeNull()
   })
 
   it('prints the scored fraction and share on the passed screen', async () => {

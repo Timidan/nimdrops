@@ -312,7 +312,7 @@ async function claimResult(db: Queryable, claimId: string): Promise<ClaimResult 
 
 /**
  * The two ways a request can already have a claim: the exact idempotency key was
- * recorded, or this wallet already holds a slot in this drop.
+ * recorded, or this wallet has no fresh grant and already holds a slot.
  *
  * Runs twice per reservation — once before any lock (cheap, and the only path
  * open while paused) and once after the locks are taken, which is what closes
@@ -335,8 +335,23 @@ async function findExistingClaim(
     }
   }
 
+  // A fresh grant outranks an older claim. This is what makes trivia replay
+  // payouts possible without teaching the money path what a trivia game is:
+  // every condition still presents the same consumable row.
+  const canonicalRecipient = normaliseNimiqAddress(o.recipient) ?? o.recipient
+  const { rows: spendable } = await db.query<{ exists: boolean }>(
+    `SELECT true AS exists FROM gate_grants
+     WHERE drop_id = $1 AND wallet_address = $2 AND consumed_claim_id IS NULL
+     LIMIT 1`,
+    [o.dropId, canonicalRecipient],
+  )
+  if (spendable[0]) return null
+
   const { rows } = await db.query<{ id: string }>(
-    'SELECT id FROM claims WHERE drop_id = $1 AND recipient_address = $2',
+    `SELECT id FROM claims
+     WHERE drop_id = $1 AND recipient_address = $2
+     ORDER BY reserved_at DESC, id DESC
+     LIMIT 1`,
     [o.dropId, o.recipient],
   )
   if (!rows[0]) return null
@@ -555,6 +570,8 @@ export async function reserveClaim(pool: Pool, o: ReserveClaimInput): Promise<Cl
       const { rows: held } = await client.query<{ id: string; payout_permille: number | null }>(
         `SELECT id, payout_permille FROM gate_grants
          WHERE drop_id = $1 AND wallet_address = $2 AND consumed_claim_id IS NULL
+         ORDER BY granted_at, id
+         LIMIT 1
          FOR UPDATE`,
         [drop.id, canonicalRecipient],
       )
@@ -614,9 +631,10 @@ export async function reserveClaim(pool: Pool, o: ReserveClaimInput): Promise<Cl
     const claimId = randomUUID()
     const token = statusToken(claimId)
     await client.query(
-      `INSERT INTO claims (id, drop_id, slot_index, recipient_address, status_token_hash, state)
-       VALUES ($1, $2, $3, $4, $5, 'reserved')`,
-      [claimId, drop.id, slotIndex, recipient, hashToken(token)],
+      `INSERT INTO claims (
+         id, drop_id, slot_index, recipient_address, status_token_hash, state, gate_grant_id
+       ) VALUES ($1, $2, $3, $4, $5, 'reserved', $6)`,
+      [claimId, drop.id, slotIndex, recipient, hashToken(token), grantId],
     )
     await client.query(
       `INSERT INTO outgoing_transfers (
@@ -657,10 +675,12 @@ export async function reserveClaim(pool: Pool, o: ReserveClaimInput): Promise<Cl
     // limiter hook, by a constraint — leaves the claimant free to try again. A
     // commit binds the two together, so it can never fund a second slot.
     if (grantId !== null) {
-      await client.query('UPDATE gate_grants SET consumed_claim_id = $2 WHERE id = $1', [
-        grantId,
-        claimId,
-      ])
+      const spent = await client.query(
+        `UPDATE gate_grants SET consumed_claim_id = $2
+         WHERE id = $1 AND consumed_claim_id IS NULL`,
+        [grantId, claimId],
+      )
+      if (spent.rowCount !== 1) throw new Error('locked grant was not consumed exactly once')
     }
     await bindIdem(client, {
       scope,

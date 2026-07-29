@@ -2,7 +2,6 @@ import pg from 'pg'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { testAddress } from './fixtures/address'
 import { migrate } from '../src/db/migrate'
-import { issueGrant } from '../src/gates/grants'
 import { type Bank, parseBank } from '../src/gates/trivia/bank'
 import {
   COOLDOWN_MINUTES,
@@ -144,13 +143,14 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
   // then the drops they hang off.
   beforeEach(async () => {
     for (const table of [
+      // Grants now reference the passed trivia session that earned them.
+      'gate_grants',
       // First: it references trivia_sessions, and it is what stops a wallet
       // being asked the same question twice. Leaving it between cases exhausts
       // the twelve-question test bank after two sessions.
       'trivia_seen',
       'trivia_answers',
       'trivia_sessions',
-      'gate_grants',
       'passphrase_attempts',
       'attestation_nonces',
       'drop_gates',
@@ -420,20 +420,28 @@ describe.skipIf(!hasDb)('trivia sessions', () => {
       /already-seen|categories left/,
     )
   })
-  it('allows another session after the cooldown when the wallet already holds a grant', async () => {
+  it('issues one fresh payout grant for every passed session', async () => {
     const svc = service()
     const gate = await gateFor()
-    const s = await svc.startOrResume(gate, PLAYER)
+    const first = await svc.startOrResume(gate, PLAYER)
+    await answerAll(svc, first.sessionId, true)
     await pool.query(
       `UPDATE trivia_sessions
-       SET state = 'passed', completed_at = now(),
-           started_at = now() - make_interval(mins => $2::int)
+       SET started_at = now() - make_interval(mins => $2::int)
        WHERE id = $1`,
-      [s.sessionId, COOLDOWN_MINUTES + 1],
+      [first.sessionId, COOLDOWN_MINUTES + 1],
     )
-    await issueGrant(pool, { dropId: gate.dropId, walletAddress: PLAYER, kind: 'trivia' })
-    const replay = await svc.startOrResume(gate, PLAYER)
-    expect(replay.sessionId).not.toBe(s.sessionId)
+    const second = await svc.startOrResume(gate, PLAYER)
+    await answerN(svc, second.sessionId, 3)
+
+    const { rows } = await pool.query<{ payout_permille: number }>(
+      `SELECT payout_permille
+       FROM gate_grants
+       WHERE drop_id = $1 AND wallet_address = $2
+       ORDER BY payout_permille DESC`,
+      [gate.dropId, PLAYER],
+    )
+    expect(rows).toEqual([{ payout_permille: 1000 }, { payout_permille: 600 }])
   })
 
   it('does not resume a session past its expiry, and marks it expired', async () => {

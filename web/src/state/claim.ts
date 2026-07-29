@@ -138,7 +138,7 @@ function writeStored(publicId: string, claim: StoredClaim): void {
   }
 }
 
-function clearStored(publicId: string): void {
+export function clearStoredClaim(publicId: string): void {
   try {
     localStorage.removeItem(storageKey(publicId))
   } catch {
@@ -379,7 +379,7 @@ export function useClaim(publicId: string, options: UseClaimOptions = {}): Claim
         if (err instanceof ApiError && (err.status === 404 || err.status === 401)) {
           // The server does not recognise this token any more. Holding on to it
           // would poll a claim that cannot answer, forever.
-          clearStored(publicId)
+          clearStoredClaim(publicId)
           if (cancelled) return
           setTracking(null)
           const known = dropRef.current

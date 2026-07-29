@@ -60,7 +60,7 @@ describe.skipIf(!hasDb)('021_canonical_gate_addresses', () => {
     await pool.query('DELETE FROM schema_migrations WHERE name = $1', [MIGRATION])
   }
 
-  async function gatedDrop(): Promise<string> {
+  async function gatedDrop(kind = 'trivia'): Promise<string> {
     const { rows } = await pool.query<{ id: string }>(
       `INSERT INTO drops (
          public_id, sponsor_label, claim_count, amount_each_luna,
@@ -70,8 +70,8 @@ describe.skipIf(!hasDb)('021_canonical_gate_addresses', () => {
       [`seed-${Math.random().toString(36).slice(2, 12)}`],
     )
     await pool.query(
-      `INSERT INTO drop_gates (drop_id, kind, config) VALUES ($1, 'trivia', '{}'::jsonb)`,
-      [rows[0].id],
+      `INSERT INTO drop_gates (drop_id, kind, config) VALUES ($1, $2, '{}'::jsonb)`,
+      [rows[0].id, kind],
     )
     return rows[0].id
   }
@@ -90,13 +90,14 @@ describe.skipIf(!hasDb)('021_canonical_gate_addresses', () => {
 
   beforeEach(async () => {
     for (const table of [
+      // Repeatable trivia grants reference the session that earned them.
+      'gate_grants',
       'trivia_seen',
       'trivia_answers',
       'trivia_sessions',
       // Before `claims`: a consumed grant points at one, and the merge case
       // writes both. FK order is the whole reason this is a list and not a loop
       // over information_schema.
-      'gate_grants',
       'claims',
       'passphrase_attempts',
       'attestation_nonces',
@@ -108,10 +109,10 @@ describe.skipIf(!hasDb)('021_canonical_gate_addresses', () => {
   })
 
   it('rewrites a legacy grant into the spelling the claim path looks for', async () => {
-    const dropId = await gatedDrop()
+    const dropId = await gatedDrop('passphrase')
     await rewind()
     await pool.query(
-      `INSERT INTO gate_grants (drop_id, wallet_address, kind) VALUES ($1, $2, 'trivia')`,
+      `INSERT INTO gate_grants (drop_id, wallet_address, kind) VALUES ($1, $2, 'passphrase')`,
       [dropId, SPACED],
     )
 
@@ -129,7 +130,7 @@ describe.skipIf(!hasDb)('021_canonical_gate_addresses', () => {
     // unique constraint is textual. Rewriting both would violate it and abort the
     // whole migration, so one has to win — and it has to be the CONSUMED one, or
     // the link between a paid claim and the grant that authorised it is lost.
-    const dropId = await gatedDrop()
+    const dropId = await gatedDrop('passphrase')
     await rewind()
     const { rows: claim } = await pool.query<{ id: string }>(
       `INSERT INTO claims (drop_id, slot_index, recipient_address, status_token_hash, state)
@@ -140,12 +141,12 @@ describe.skipIf(!hasDb)('021_canonical_gate_addresses', () => {
     // age alone would pick the wrong survivor.
     await pool.query(
       `INSERT INTO gate_grants (drop_id, wallet_address, kind, granted_at)
-       VALUES ($1, $2, 'trivia', now() - interval '1 hour')`,
+       VALUES ($1, $2, 'passphrase', now() - interval '1 hour')`,
       [dropId, LOWER],
     )
     await pool.query(
       `INSERT INTO gate_grants (drop_id, wallet_address, kind, consumed_claim_id)
-       VALUES ($1, $2, 'trivia', $3)`,
+       VALUES ($1, $2, 'passphrase', $3)`,
       [dropId, SPACED, claim[0].id],
     )
 
@@ -248,10 +249,10 @@ describe.skipIf(!hasDb)('021_canonical_gate_addresses', () => {
   })
 
   it('leaves an already-canonical database untouched', async () => {
-    const dropId = await gatedDrop()
+    const dropId = await gatedDrop('passphrase')
     await rewind()
     await pool.query(
-      `INSERT INTO gate_grants (drop_id, wallet_address, kind) VALUES ($1, $2, 'trivia')`,
+      `INSERT INTO gate_grants (drop_id, wallet_address, kind) VALUES ($1, $2, 'passphrase')`,
       [dropId, CANONICAL],
     )
 
@@ -267,11 +268,11 @@ describe.skipIf(!hasDb)('021_canonical_gate_addresses', () => {
     // `issueGrant` canonicalises, but "the only writer" is a fact about today's
     // code rather than about the schema. This is what survives a spike script, a
     // psql session, or a kind added later.
-    const dropId = await gatedDrop()
+    const dropId = await gatedDrop('passphrase')
     for (const spelling of [SPACED, LOWER]) {
       await expect(
         pool.query(
-          `INSERT INTO gate_grants (drop_id, wallet_address, kind) VALUES ($1, $2, 'trivia')`,
+          `INSERT INTO gate_grants (drop_id, wallet_address, kind) VALUES ($1, $2, 'passphrase')`,
           [dropId, spelling],
         ),
       ).rejects.toThrow(new RegExp(CONSTRAINT))

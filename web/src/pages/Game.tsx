@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { ApiError, submitPassphrase, type GateKind, type ReviewedQuestion } from '../api'
 import { formatNim } from '../money'
+import { clearStoredClaim } from '../state/claim'
 import { ADDRESS_RE, PASSPHRASE_MAX_ATTEMPTS, useGate } from '../state/gate'
 import {
   TRIVIA_COOLDOWN_MINUTES,
@@ -306,11 +307,15 @@ function Pass({
       <p className="mt-3 text-sm leading-relaxed text-chalk/65">
         Nothing has been sent yet. Claim it on the drop&rsquo;s page with one signature.
       </p>
-      <Link to={`/drop/${publicId}`} className="nd-action mt-8 block w-full text-center">
+      <Link
+        to={`/drop/${publicId}`}
+        onClick={() => clearStoredClaim(publicId)}
+        className="nd-action mt-8 block w-full text-center"
+      >
         Go to the claim
       </Link>
       <p className="mt-3 text-center text-xs leading-relaxed text-chalk/50">
-        One share per wallet. It has to be the wallet you named here.
+        This payout has to go to the wallet you played with.
       </p>
 
       <Review questions={review} correctCount={correctCount ?? undefined} />

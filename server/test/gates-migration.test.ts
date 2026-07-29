@@ -84,25 +84,25 @@ describe.skipIf(!hasDb)('019_gates', () => {
     ).rejects.toThrow(/drop_gates_kind_allowed/)
   })
 
-  it('allows only one grant per wallet per drop', async () => {
-    const dropId = await gatedDrop()
+  it('allows only one non-trivia grant per wallet per drop', async () => {
+    const dropId = await gatedDrop('passphrase')
     const grant = () =>
       pool.query(
         `INSERT INTO gate_grants (drop_id, wallet_address, kind)
-         VALUES ($1, $2, 'trivia')`,
+         VALUES ($1, $2, 'passphrase')`,
         [dropId, PLAYER],
       )
     await grant()
-    await expect(grant()).rejects.toThrow(/gate_grants_drop_id_wallet_address_key/)
+    await expect(grant()).rejects.toThrow(/gate_grants_non_trivia_wallet_once/)
   })
 
   it('allows the same wallet a grant on a different drop', async () => {
-    const a = await gatedDrop()
-    const b = await gatedDrop()
+    const a = await gatedDrop('passphrase')
+    const b = await gatedDrop('passphrase')
     for (const dropId of [a, b]) {
       await pool.query(
         `INSERT INTO gate_grants (drop_id, wallet_address, kind)
-         VALUES ($1, $2, 'trivia')`,
+         VALUES ($1, $2, 'passphrase')`,
         [dropId, BOTH],
       )
     }
@@ -275,7 +275,7 @@ describe.skipIf(!hasDb)('019_gates', () => {
     await expect(
       pool.query(
         `INSERT INTO gate_grants (drop_id, wallet_address, kind)
-         VALUES ($1, $2, 'trivia')`,
+         VALUES ($1, $2, 'passphrase')`,
         [rows[0].id, SNEAK],
       ),
     ).rejects.toThrow(/gate_grants_drop_id_fkey/)

@@ -125,6 +125,17 @@ async function grantTo(
   return grantId
 }
 
+async function passedTriviaSession(dropId: string, walletAddress: string): Promise<string> {
+  const { rows } = await pool.query<{ id: string }>(
+    `INSERT INTO trivia_sessions (
+       drop_id, wallet_address, state, bank_version, question_ids, expires_at, completed_at
+     ) VALUES ($1, $2, 'passed', 'test-bank', '[]'::jsonb, now() + interval '10 minutes', now())
+     RETURNING id`,
+    [dropId, walletAddress.replace(/\s/g, '')],
+  )
+  return rows[0].id
+}
+
 // `idemKey` is annotated rather than inferred: `randomUUID()` returns the
 // template-literal type `${string}-${string}-...`, which would reject the plain
 // readable keys the race cases pass in.
@@ -430,6 +441,33 @@ describe.skipIf(!hasDb)('gated claim reservation (real Postgres)', () => {
     expect(rowB.consumed_claim_id).not.toBeNull()
     expect(rowA.consumed_claim_id).not.toBe(rowB.consumed_claim_id)
     expect(await counts(publicId)).toEqual({ claims: '2', transfers: '2' })
+  })
+
+  it('pays the same wallet once for each passed trivia session', async () => {
+    const { publicId, dropId } = await liveDrop()
+    await attachGate(dropId, 'trivia')
+    const wallet = newWallet()
+
+    for (const payoutPermille of [600, 1000]) {
+      const triviaSessionId = await passedTriviaSession(dropId, wallet.address)
+      await issueGrant(pool, {
+        dropId,
+        walletAddress: wallet.address,
+        kind: 'trivia',
+        payoutPermille,
+        triviaSessionId,
+      })
+      await claim(publicId, wallet, `trivia-win-${payoutPermille}`)
+    }
+
+    expect(await counts(publicId)).toEqual({ claims: '2', transfers: '2' })
+    const { rows } = await pool.query<{ amount_luna: string }>(
+      `SELECT amount_luna FROM outgoing_transfers
+       WHERE drop_id = $1 AND purpose = 'payout'
+       ORDER BY amount_luna`,
+      [dropId],
+    )
+    expect(rows).toEqual([{ amount_luna: '60000' }, { amount_luna: '100000' }])
   })
 
   // ---- a refusal for any other reason must not spend the grant ---------------
