@@ -172,7 +172,7 @@ export default function Game({ walletAddress }: GameProps) {
               <>
                 <PlayingAs address={wallet} onChange={forgetWallet} />
                 {gate.kind === 'trivia' ? (
-                  <Trivia publicId={publicId} walletAddress={wallet} tier={gate.tier} onPass={onMet} />
+                  <Trivia publicId={publicId} walletAddress={wallet} onPass={onMet} />
                 ) : gate.kind === 'passphrase' ? (
                   <Passphrase
                     publicId={publicId}
@@ -233,7 +233,7 @@ function Offer({
       </p>
       <p className="mt-3 text-center text-xs leading-relaxed text-chalk/55">
         {kind === 'trivia' ? (
-          <>Up to this amount. Your score sets your share: 3 of 5 pays 60%, 4 pays 80%, 5 pays all of it.</>
+          <>Up to this amount. 3 of 5 right pays 60%, 4 pays 80%, 5 pays it all.</>
         ) : (
           <>The same fixed amount for everyone who meets this drop&rsquo;s condition.</>
         )}
@@ -286,15 +286,11 @@ function Pass({
       </h1>
       {correctCount !== null ? (
         <p className="mt-2 text-sm leading-relaxed text-chalk/75">
-          {correctCount} of {questionCount ?? TRIVIA_QUESTION_COUNT} right: you claim{' '}
-          {Math.floor((correctCount / (questionCount ?? TRIVIA_QUESTION_COUNT)) * 100)}% of the
-          share.
+          {correctCount} of {questionCount ?? TRIVIA_QUESTION_COUNT} right.
         </p>
       ) : null}
       <p className="mt-3 text-sm leading-relaxed text-chalk/65">
-        This drop&rsquo;s condition is met for the wallet you named. Nothing has been sent yet. You
-        claim on the drop&rsquo;s own page: tap and approve one signature there, and the NIM goes to
-        the wallet that signed.
+        Nothing has been sent yet. Claim it on the drop&rsquo;s page with one signature.
       </p>
       <Link to={`/drop/${publicId}`} className="nd-action mt-8 block w-full text-center">
         Go to the claim
@@ -622,12 +618,10 @@ function PlayingAs({ address, onChange }: { address: string; onChange: () => voi
 function Trivia({
   publicId,
   walletAddress,
-  tier,
   onPass,
 }: {
   publicId: string
   walletAddress: string
-  tier: string | null
   onPass: (
     review: ReviewedQuestion[] | null,
     correctCount: number | null,
@@ -658,22 +652,14 @@ function Trivia({
     return (
       <div data-testid="trivia-failed" className="mt-8">
         <h1 className="text-2xl font-semibold tracking-tight">This attempt has ended</h1>
-        {/**
-         * The server's own sentence when it refused the submission — a missed
-         * deadline says so in those words. Otherwise the plain fact: one answer
-         * was wrong and the round stops there.
-         *
-         * Which option was right is said BELOW, and only from `review`. A
-         * refused submission never carries one, so that path still says nothing
-         * about the answers rather than inventing them.
-         */}
         <p className="mt-3 text-sm leading-relaxed text-chalk/65">
           {session.error ??
-            `One answer was wrong, so the round stopped there. You answered ${session.answered} of ${session.questionCount}.`}
+            (session.correctCount != null
+              ? `You got ${session.correctCount} of ${session.questionCount} right. You need ${TRIVIA_PASS_MIN_CORRECT} to win.`
+              : `You answered ${session.answered} of ${session.questionCount}.`)}
         </p>
         <p className="mt-3 text-sm leading-relaxed text-chalk/65">
-          You can try this drop again in {TRIVIA_COOLDOWN_MINUTES} minutes. Nothing was signed and
-          nothing was sent, so nothing has been lost.
+          Try again in {TRIVIA_COOLDOWN_MINUTES} minutes. Nothing was signed and nothing was sent.
         </p>
         <Link to="/games" className="nd-quiet mt-8 block w-full text-center">
           See the other drops
@@ -745,10 +731,8 @@ function Trivia({
         {TRIVIA_QUESTION_COUNT} questions, four options each
       </h1>
       <p className="mt-2 text-sm leading-relaxed text-chalk/65">
-        Get at least {TRIVIA_PASS_MIN_CORRECT} of {TRIVIA_QUESTION_COUNT} right
-        {tier ? ` at ${tier}` : ''} and a share is yours: your score sets how much of it you claim,
-        and all {TRIVIA_QUESTION_COUNT} pays it in full. Fall short and you can try again in{' '}
-        {TRIVIA_COOLDOWN_MINUTES} minutes.
+        Get {TRIVIA_PASS_MIN_CORRECT} or more right to win. Your score sets your share:{' '}
+        {TRIVIA_PASS_MIN_CORRECT} pays 60%, 4 pays 80%, {TRIVIA_QUESTION_COUNT} pays it all.
       </p>
       {/**
        * The per-question time limit is set per drop and is not in

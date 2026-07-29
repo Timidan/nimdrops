@@ -293,7 +293,7 @@ describe('Game — trivia before play', () => {
     await screen.findByTestId('trivia-idle')
     const body = document.body.textContent ?? ''
     expect(body).toMatch(/up to this amount/i)
-    expect(body).toMatch(/3 of 5 pays 60%, 4 pays 80%, 5 pays all of it/i)
+    expect(body).toMatch(/3 of 5 right pays 60%, 4 pays 80%, 5 pays it all/i)
     expect(body).not.toMatch(/the same fixed amount for everyone/i)
   })
 })
@@ -406,7 +406,7 @@ describe('Game — trivia outcomes', () => {
     expect(pass.textContent).toMatch(/you can claim 2\.5 NIM/i)
     // It says the money has NOT moved, and where it will.
     expect(pass.textContent).toMatch(/nothing has been sent yet/i)
-    expect(pass.textContent).toMatch(/tap and approve/i)
+    expect(pass.textContent).toMatch(/one signature/i)
 
     const link = screen.getByRole('link', { name: /go to the claim/i })
     expect(link.getAttribute('href')).toBe(`/drop/${PUBLIC_ID}`)
@@ -429,7 +429,7 @@ describe('Game — trivia outcomes', () => {
 
     const pass = await screen.findByTestId('gate-passed')
     expect(pass.textContent).toMatch(/4 of 5/)
-    expect(pass.textContent).toMatch(/80% of the share/)
+    expect(pass.textContent).toMatch(/4 of 5 right/)
   })
 
   /**
@@ -456,7 +456,7 @@ describe('Game — trivia outcomes', () => {
     expect(failed.textContent).toMatch(/this attempt has ended/i)
     expect(failed.textContent).toMatch(/answered 2 of 5/i)
     expect(failed.textContent).toMatch(/2 minutes/)
-    expect(failed.textContent).toMatch(/nothing has been lost/i)
+    expect(failed.textContent).toMatch(/nothing was signed and nothing was sent/i)
 
     // Never the wallet's fault, and never a reveal of the answer.
     expect(failed.textContent).not.toMatch(/wallet/i)
