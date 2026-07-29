@@ -2,7 +2,14 @@ import { createHash } from 'node:crypto'
 import { Hono, type Context, type MiddlewareHandler } from 'hono'
 import type { ContentfulStatusCode } from 'hono/utils/http-status'
 import type { Pool } from 'pg'
-import { addressFromPublicKey } from '../auth/verify'
+import {
+  buildCreatorChallengeMessage,
+  CreatorAuthError,
+  issueCreatorChallenge,
+  verifyCreatorChallenge,
+  type CreatorAuthCode,
+} from '../auth/creator'
+import { addressFromPublicKey, requireSigScheme } from '../auth/verify'
 import { ChainCallTimeoutError } from '../chain/deadline'
 import type { ChainClient } from '../chain/types'
 import { DropShapeError, formatNim, lunaFromNim } from '../money'
@@ -32,7 +39,9 @@ import {
   createDraft,
   fundingMemoFor,
   getPublic,
+  listCreatorDrops,
   submitFunding,
+  type CreatorDrop,
   type DropPublic,
   type FundingRejectionCode,
 } from '../services/drops'
@@ -246,6 +255,12 @@ const CLOSE_MESSAGES: Record<CloseRejectionCode, string> = {
   drop_not_live: 'this drop is not running, so it cannot be closed',
 }
 
+const CREATOR_AUTH_MESSAGES: Record<CreatorAuthCode, string> = {
+  invalid_challenge: 'this wallet request is not valid — start again',
+  challenge_expired: 'this wallet request expired — start again',
+  invalid_signature: 'we could not verify that wallet approval — try again',
+}
+
 const FUNDING_MESSAGES: Record<FundingRejectionCode, string> = {
   wrong_network: 'that transaction is on a different network',
   execution_failed: 'that transaction did not succeed on chain',
@@ -417,6 +432,14 @@ function requireAttestationMessage(body: Record<string, unknown>): string {
   const value = body.message
   if (typeof value !== 'string' || value === '' || value.length > ATTESTATION_MAX_LENGTH) {
     throw invalidRequest('the attestation message must be text, and it cannot be empty')
+  }
+  return value
+}
+
+function requireSignedMessage(body: Record<string, unknown>, key: string, max: number): string {
+  const value = body[key]
+  if (typeof value !== 'string' || value.length === 0 || value.length > max) {
+    throw invalidRequest()
   }
   return value
 }
@@ -599,6 +622,10 @@ function publicBody(drop: DropPublic): Record<string, unknown> {
     gateKind: drop.gateKind,
     ...(drop.fundingTxHash === undefined ? {} : { fundingTxHash: drop.fundingTxHash }),
   }
+}
+
+function creatorDropBody(drop: CreatorDrop): Record<string, unknown> {
+  return { ...publicBody(drop), createdAt: drop.createdAt.toISOString() }
 }
 
 interface DraftBody {
@@ -989,6 +1016,43 @@ export function makeApp(deps: AppDeps): Hono {
 
   app.get('/api/drops/:publicId', async (c) => {
     return c.json(publicBody(await getPublic(pool, requirePublicId(c))))
+  })
+
+  app.post('/api/creator/challenge', async (c) => {
+    const body = await readJsonObject(c)
+    only(body, [])
+    const challenge = issueCreatorChallenge({
+      origin: requireOrigin(),
+      network: chain.network(),
+      nowSeconds: Math.floor(now() / 1000),
+    })
+    return c.json({
+      message: buildCreatorChallengeMessage(challenge),
+      expiresAt: new Date(challenge.exp * 1000).toISOString(),
+    })
+  })
+
+  app.post('/api/creator/drops', async (c) => {
+    const body = await readJsonObject(c)
+    only(body, ['message', 'publicKey', 'signature'])
+    const message = requireSignedMessage(body, 'message', 1_024)
+    const publicKeyHex = matching(body, 'publicKey', PUBLIC_KEY_RE)
+    const signatureHex = matching(body, 'signature', SIGNATURE_RE)
+    const walletAddress = verifyCreatorChallenge({
+      message,
+      publicKeyHex,
+      signatureHex,
+      origin: requireOrigin(),
+      network: chain.network(),
+      scheme: requireSigScheme(),
+      nowSeconds: Math.floor(now() / 1000),
+    })
+    const result = await listCreatorDrops(pool, walletAddress)
+    return c.json({
+      walletAddress,
+      drops: result.drops.map(creatorDropBody),
+      truncated: result.truncated,
+    })
   })
 
   // ---- POST /api/drops/:publicId/challenge -------------------------------------------
@@ -1404,6 +1468,13 @@ function mapError(err: unknown): HttpError {
       err.code === 'not_the_funder' ? 403 : 409,
       err.code,
       CLOSE_MESSAGES[err.code] ?? 'this drop cannot be closed',
+    )
+  }
+  if (err instanceof CreatorAuthError) {
+    return new HttpError(
+      401,
+      err.code,
+      CREATOR_AUTH_MESSAGES[err.code] ?? 'we could not verify that wallet approval',
     )
   }
   // Unlike claim and funding refusals, gate refusals do not share one status:

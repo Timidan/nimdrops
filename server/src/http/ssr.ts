@@ -478,6 +478,7 @@ export function registerSsr(app: Hono, opts: SsrOptions = {}): void {
   app.get('/', () => spaShell(true))
   /** Client-routed pages that are not campaign links. */
   app.get('/create', () => spaShell())
+  app.get('/my-drops', () => spaShell())
 
   /**
    * The sponsor's close screen.

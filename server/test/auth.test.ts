@@ -9,6 +9,12 @@ import {
   issueChallenge,
   type Challenge,
 } from '../src/auth/challenge'
+import {
+  buildCreatorChallengeMessage,
+  CreatorAuthError,
+  issueCreatorChallenge,
+  verifyCreatorChallenge,
+} from '../src/auth/creator'
 import { addressFromPublicKey, verifyWalletSignature } from '../src/auth/verify'
 
 const ORIGIN = 'https://nimdrops.example'
@@ -245,6 +251,73 @@ describe('addressFromPublicKey', () => {
 
   it('throws on an unparseable public key', () => {
     expect(() => addressFromPublicKey('not-hex')).toThrow()
+  })
+})
+
+describe('creator wallet challenge', () => {
+  const now = 1_800_000_000
+  const keyPair = KeyPair.generate()
+
+  function signed(over: { origin?: string; network?: string; issuedAt?: number } = {}) {
+    const challenge = issueCreatorChallenge({
+      origin: over.origin ?? ORIGIN,
+      network: over.network ?? NETWORK,
+      nowSeconds: over.issuedAt ?? now,
+    })
+    const message = buildCreatorChallengeMessage(challenge)
+    const signatureHex = keyPair.sign(new Uint8Array(Buffer.from(message, 'utf8'))).toHex()
+    return { challenge, message, signatureHex }
+  }
+
+  it('derives the creator address from a valid signed read challenge', () => {
+    const value = signed()
+    expect(
+      verifyCreatorChallenge({
+        message: value.message,
+        publicKeyHex: keyPair.publicKey.toHex(),
+        signatureHex: value.signatureHex,
+        origin: ORIGIN,
+        network: NETWORK,
+        scheme: 'raw',
+        nowSeconds: now,
+      }),
+    ).toBe(keyPair.toAddress().toUserFriendlyAddress())
+  })
+
+  it('rejects another audience, another network and an expired approval', () => {
+    for (const value of [
+      signed({ origin: 'https://evil.example' }),
+      signed({ network: 'MainAlbatross' }),
+      signed({ issuedAt: now - 301 }),
+    ]) {
+      expect(() =>
+        verifyCreatorChallenge({
+          message: value.message,
+          publicKeyHex: keyPair.publicKey.toHex(),
+          signatureHex: value.signatureHex,
+          origin: ORIGIN,
+          network: NETWORK,
+          scheme: 'raw',
+          nowSeconds: now,
+        }),
+      ).toThrow(CreatorAuthError)
+    }
+  })
+
+  it('rejects a signature from another wallet', () => {
+    const value = signed()
+    const other = KeyPair.generate()
+    expect(() =>
+      verifyCreatorChallenge({
+        message: value.message,
+        publicKeyHex: other.publicKey.toHex(),
+        signatureHex: value.signatureHex,
+        origin: ORIGIN,
+        network: NETWORK,
+        scheme: 'raw',
+        nowSeconds: now,
+      }),
+    ).toThrowError(expect.objectContaining({ code: 'invalid_signature' }))
   })
 })
 

@@ -316,6 +316,15 @@ export interface DropPublic {
   gateKind: string | null
 }
 
+export interface CreatorDrop extends DropPublic {
+  createdAt: Date
+}
+
+export interface CreatorDropList {
+  drops: CreatorDrop[]
+  truncated: boolean
+}
+
 export interface CreateDraftInput {
   sponsorLabel: string
   message?: string
@@ -643,15 +652,20 @@ interface DropRow {
   closing_reason: string | null
   claims_reserved: string
   gate_kind: string | null
+  created_at: Date
 }
 
-const SELECT_DROP = `
+const DROP_PROJECTION = `
   SELECT d.id, d.public_id, d.sponsor_label, d.message, d.claim_count,
          d.amount_each_luna, d.expected_funding_luna, d.state, d.funding_tx_hash,
-         d.activated_height, d.expiry_hours, d.expires_at, d.closing_reason,
+         d.activated_height, d.expiry_hours, d.expires_at, d.closing_reason, d.created_at,
          (SELECT count(*) FROM claims c WHERE c.drop_id = d.id)::text AS claims_reserved,
          (SELECT g.kind FROM drop_gates g WHERE g.drop_id = d.id) AS gate_kind
   FROM drops d
+`
+
+const SELECT_DROP = `
+  ${DROP_PROJECTION}
   WHERE d.public_id = $1
 `
 
@@ -683,6 +697,25 @@ function toPublic(row: DropRow): DropPublic {
 /** Public-safe drop state. Safe to serve unauthenticated. */
 export async function getPublic(pool: Pool, publicId: string): Promise<DropPublic> {
   return toPublic(await loadDrop(pool, publicId))
+}
+
+const CREATOR_DROP_LIMIT = 100
+
+export async function listCreatorDrops(pool: Pool, creatorAddress: string): Promise<CreatorDropList> {
+  const { rows } = await pool.query<DropRow>(
+    `${DROP_PROJECTION}
+     WHERE d.creator_address = $1
+     ORDER BY d.created_at DESC, d.id DESC
+     LIMIT $2`,
+    [creatorAddress, CREATOR_DROP_LIMIT + 1],
+  )
+  return {
+    drops: rows.slice(0, CREATOR_DROP_LIMIT).map((row) => ({
+      ...toPublic(row),
+      createdAt: row.created_at,
+    })),
+    truncated: rows.length > CREATOR_DROP_LIMIT,
+  }
 }
 
 /**

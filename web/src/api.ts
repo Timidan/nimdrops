@@ -222,6 +222,27 @@ export interface SignedClose {
   signature: string
 }
 
+export interface CreatorChallenge {
+  message: string
+  expiresAt: string
+}
+
+export interface CreatorDrop extends DropPublic {
+  createdAt: string
+}
+
+export interface CreatorDropList {
+  walletAddress: string
+  drops: CreatorDrop[]
+  truncated: boolean
+}
+
+export interface SignedCreatorRead {
+  message: string
+  publicKey: string
+  signature: string
+}
+
 /**
  * `GET /api/stats` — the public aggregates the landing page reads.
  *
@@ -721,6 +742,22 @@ export async function submitFunding(publicId: string, txHash: string): Promise<D
 
 export async function getDrop(publicId: string): Promise<DropPublic> {
   return request<DropPublic>(`/drops/${encodeURIComponent(publicId)}`)
+}
+
+export async function requestCreatorChallenge(): Promise<CreatorChallenge> {
+  return request<CreatorChallenge>('/creator/challenge', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({}),
+  })
+}
+
+export async function getCreatorDrops(signed: SignedCreatorRead): Promise<CreatorDropList> {
+  return request<CreatorDropList>('/creator/drops', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(signed),
+  })
 }
 
 /**

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import {
   ApiError,
   createDrop,
@@ -951,6 +951,9 @@ export default function Create({ discoverBridge = resolveBridge }: CreateProps) 
         <p className="nd-note text-center">
           Nothing is sent until you approve it in Nimiq Pay.
         </p>
+        <Link to="/my-drops" className="nd-textlink mt-2 block text-center">
+          Manage drops funded by this wallet
+        </Link>
       </GlassSheet>
     </Shell>
   )
@@ -1781,7 +1784,9 @@ function Live({
             neither, and then the sentence names no number rather than the
             wrong one. */}
         <p className="nd-note">{refundLine(drop?.expiryHours ?? draft.expiryHours)}</p>
-        <p className="nd-note">Reopen NimDrops on this device to come back to this link.</p>
+        <Link to="/my-drops" className="nd-textlink mt-2 block w-full text-center">
+          Manage all drops from this wallet
+        </Link>
 
         <button
           type="button"

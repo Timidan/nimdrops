@@ -5,11 +5,13 @@ import Drop from './pages/Drop'
 import Game from './pages/Game'
 import Games from './pages/Games'
 import Landing from './pages/Landing'
+import MyDrops from './pages/MyDrops'
 
 /**
  * The routes the server actually serves a shell for (`http/ssr.ts`): `/`,
- * `/create`, `/drop/:publicId`, `/drop/:publicId/close`, `/game/:publicId` and
- * `/games`. Anything else is a mistyped or stale link, and the useful answer to
+ * `/create`, `/my-drops`, `/drop/:publicId`, `/drop/:publicId/close`,
+ * `/game/:publicId` and `/games`. Anything else is a mistyped or stale link,
+ * and the useful answer to
  * that is the create screen, not a 404 page.
  *
  * `AppRoutes` is exported without the router so tests can mount it inside a
@@ -33,6 +35,7 @@ export function AppRoutes() {
       */}
       <Route path="/" element={<Landing />} />
       <Route path="/create" element={<Create />} />
+      <Route path="/my-drops" element={<MyDrops />} />
       <Route path="/drop/:publicId" element={<Drop />} />
       {/*
         The sponsor's own screen for the drop they funded. A route rather than a

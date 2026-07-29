@@ -276,6 +276,13 @@ describe('static serving', () => {
     expect(await res.text()).toContain('<div id="root"></div>')
   })
 
+  it('serves the creator management shell on a cold load', async () => {
+    const res = await app.request('/my-drops')
+    expect(res.status).toBe(200)
+    expect(res.headers.get('content-type')).toMatch(/^text\/html/)
+    expect(await res.text()).toContain('<div id="root"></div>')
+  })
+
   it('refuses to walk out of the static root', async () => {
     for (const path of ['/assets/../../etc/passwd', '/assets/%2e%2e%2f%2e%2e%2fetc%2fpasswd']) {
       const res = await app.request(path)

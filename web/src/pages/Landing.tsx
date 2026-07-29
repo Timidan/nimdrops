@@ -425,6 +425,7 @@ export default function Landing() {
           <div className="nd-land-foot-copy">
             <p className="nd-land-foot-line">NimDrops runs inside Nimiq Pay as a mini app.</p>
             <AppDoor to="/create" label="Send a drop" tone="secondary" />
+            <AppDoor to="/my-drops" label="Manage my drops" tone="secondary" />
           </div>
           <GetNimiqPay />
         </div>

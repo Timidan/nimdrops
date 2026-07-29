@@ -28,6 +28,12 @@ describe('router', () => {
     expect(screen.getByLabelText(/NIM per person/i)).toBeTruthy()
   })
 
+  it('renders the creator management page at /my-drops', () => {
+    at('/my-drops')
+    expect(screen.getByRole('heading', { level: 1, name: /your drops/i })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /show my drops/i })).toBeTruthy()
+  })
+
   it('renders the drop page for /drop/:publicId', () => {
     at('/drop/abc')
     // The sealed envelope is the drop page's first frame: a claimant lands on
