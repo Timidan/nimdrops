@@ -14,7 +14,22 @@
  * drop will consume, create the draft, then write the gate row. It prints the
  * funding memo and the `/game/:publicId` URL an operator needs next.
  *
- * ── what it deliberately does NOT do ────────────────────────────────────────
+ * ── --operator-funded (operator-funded drops design doc) ───────────────────
+ * With this switch the drop is created LIVE, funded from the operator float
+ * that is already in custody, in ONE database transaction — no draft, no
+ * funding memo, no `fund-one-drop.ts` round trip. It is the replacement for
+ * that round trip's "custody seeds a wallet that pays itself back" ceremony,
+ * which cost two chain transactions, a 64-block wait, and a working light
+ * client at creation time, all to prove the operator paid the operator. See
+ * `services/drops.ts` `createOperatorFundedDrop` for the accounting: the drop
+ * counts as outstanding principal from the instant its row commits, and
+ * creation is refused outright — not merely warned about — if the float
+ * cannot cover it. Every argument above it (kind, claims, amount, gate
+ * config) means exactly the same thing; only what happens after validation
+ * changes. Omit the flag and this script's behaviour is unchanged from
+ * before this switch existed.
+ *
+ * ── what it deliberately does NOT do (without --operator-funded) ───────────
  * It does not fund, sign, broadcast, or activate anything, and it holds NO
  * custody key: the chain client is `readOnlyNimiqChainFromEnv`, which takes
  * `CUSTODY_ADDRESS` and cannot sign. It never connects to a node either — the
@@ -88,9 +103,12 @@ import {
   formatNim,
   lunaFromNim,
 } from '../src/money'
-import { createDraft, fundingMemoFor } from '../src/services/drops'
+import { DEFAULT_EXPIRY_HOURS, createDraft, createOperatorFundedDrop, fundingMemoFor } from '../src/services/drops'
 import {
   type CapacitySnapshot,
+  CapExceededError,
+  InsolventError,
+  StaleReconciliationError,
   ensureChainBinding,
   readCapacity,
   readControls,
@@ -139,6 +157,9 @@ every kind:
   --listed[=true|false]       show it in GET /api/games (default false)
   --label <text>              sponsor label on the claim screen (default "NimDrops")
   --message <text>            optional note on the claim screen
+  --operator-funded           create it LIVE now, funded from the operator float —
+                               no draft, no funding memo, no fund-one-drop.ts step.
+                               Refused outright (not warned) if the float is short.
 
 --kind trivia:
   --tier novice|easy|medium|hard
@@ -173,7 +194,7 @@ const VALUE_FLAGS = new Set([
   '--attester-key',
   '--max-age',
 ])
-const SWITCH_FLAGS = new Set(['--listed', '--help'])
+const SWITCH_FLAGS = new Set(['--listed', '--operator-funded', '--help'])
 
 // ---------------------------------------------------------------------------
 // output
@@ -507,6 +528,7 @@ async function run(): Promise<void> {
   const expectedFundingLuna = amountEachLuna * BigInt(claimCount)
 
   const listed = boolFlag(flags, '--listed')
+  const operatorFunded = boolFlag(flags, '--operator-funded')
   const sponsorLabel = flags.get('--label')?.trim() || 'NimDrops'
   assert(
     sponsorLabel.length <= MAX_LABEL_CHARS,
@@ -572,6 +594,16 @@ async function run(): Promise<void> {
         'unpause`. Do not unpause to get this script to run.',
     )
   }
+  if (controls.paused && operatorFunded) {
+    // Unlike a draft, an operator-funded drop is created LIVE, in the same
+    // transaction that asserts solvency against the float — there is no
+    // draft state for it to sit in until an operator unpauses, so this
+    // refuses outright rather than warning and proceeding.
+    fail(
+      'custody_controls.paused is true, and --operator-funded drops are created live with no ' +
+        'draft state to wait in. `pnpm tsx src/recover.ts unpause` first.',
+    )
+  }
   if (controls.paused) {
     console.log(
       '\n!! custody is PAUSED. The draft below can be created but never activated, so its ' +
@@ -581,10 +613,67 @@ async function run(): Promise<void> {
 
   // -- 3. guard rail 3: headroom, BEFORE the draft ---------------------------
   // Read without the singleton lock, so it is an observation rather than a
-  // decision — `createDraft` makes the decision under `lockControlsForCapacity`
-  // moments later. Printing it first is what makes a refusal legible instead of
-  // a bare `NoHeadroomError`.
+  // decision — `createDraft` (or, with --operator-funded, `createOperatorFunded
+  // Drop`) makes the decision under the singleton lock moments later. Printing
+  // it first is what makes a refusal legible instead of a bare error.
   printCapacity('cap headroom now', await readCapacity(pool, controls), expectedFundingLuna)
+
+  // -- 4a. --operator-funded: create it LIVE, and stop here -------------------
+  if (operatorFunded) {
+    let drop: { publicId: string }
+    try {
+      drop = await createOperatorFundedDrop(pool, {
+        sponsorLabel,
+        ...(message === undefined ? {} : { message }),
+        amountEachLuna,
+        claimCount,
+        gate: { kind, listed, config },
+      })
+    } catch (err) {
+      if (err instanceof StaleReconciliationError) {
+        fail(
+          `custody balance has not been reconciled recently enough to trust: ${err.message}\n\n` +
+            '  The worker reconciles every 60s once it is running; if it is not running, ' +
+            '`pnpm tsx src/recover.ts reconcile` first.',
+        )
+      }
+      if (err instanceof InsolventError) {
+        fail(
+          `solvency refused this drop: ${err.message}\n\n` +
+            '  This is the whole rule an operator-funded drop obeys: it may only be created ' +
+            'while custody holds NIM that no drop has already claimed. Make the drop smaller, ' +
+            'wait for a live drop to settle, or raise the operator float first.',
+        )
+      }
+      if (err instanceof CapExceededError) {
+        fail(
+          `the deployment's optional policy cap refused this drop: ${err.message}\n\n` +
+            '  max_live_principal_luna or max_live_drops (services/solvency.ts) is set and this ' +
+            'drop — together with whatever sponsors currently have reserved — does not fit under ' +
+            'it. Wait for room, make the drop smaller, or raise the cap deliberately.',
+        )
+      }
+      throw err
+    }
+
+    console.log('\n=== LIVE (operator-funded) ===')
+    field('public id', drop.publicId)
+    field('kind', `${kind}${listed ? ' (listed)' : ' (unlisted)'}`)
+    field('funding', 'the operator float — no funding transaction, no memo, nothing to send')
+    field('claim window', `${DEFAULT_EXPIRY_HOURS}h, starting now`)
+
+    printCapacity(
+      'live principal after this drop',
+      await readCapacity(pool, await readControls(pool)),
+      null,
+    )
+
+    console.log('\ngame url     :', `${origin}/game/${drop.publicId}`)
+    console.log('share url    :', `${origin}/d/${drop.publicId}`)
+    console.log('\nthis drop is LIVE now. There is nothing to fund and nothing to activate.')
+    console.log('')
+    return
+  }
 
   // -- 4. the draft ----------------------------------------------------------
   const draft = await createDraft(pool, chain, {

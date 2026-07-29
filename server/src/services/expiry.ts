@@ -94,6 +94,12 @@ export interface ClosableDropRow {
   /** The verified funding sender. The ONLY address a refund can ever go to. */
   refund_address: string | null
   expired: boolean
+  /**
+   * `'sponsor'` or `'operator'` (migration 024). An operator drop has no
+   * `refund_address` and never will — see the branch in {@link closeLiveDrop}
+   * that reads this before the missing-refund-address check does.
+   */
+  funding_source: string
 }
 
 /** Why a close did nothing. Every one of these leaves the drop untouched. */
@@ -267,7 +273,7 @@ export async function closeLiveDrop(
     }
 
     const { rows } = await client.query<ClosableDropRow>(
-      `SELECT id, public_id, state, claim_count, amount_each_luna, refund_address,
+      `SELECT id, public_id, state, claim_count, amount_each_luna, refund_address, funding_source,
               (expires_at IS NOT NULL AND expires_at <= now()) AS expired
        FROM drops WHERE id = $1 FOR UPDATE`,
       [dropId],
@@ -331,10 +337,38 @@ export async function closeLiveDrop(
       BigInt(drop.claim_count) * BigInt(drop.amount_each_luna) - BigInt(committed[0].paid_luna)
     const unallocatedLuna = refundBeforeClamp > 0n ? refundBeforeClamp : 0n
 
+    // Operator-funded drops (migration 024) write NO refund transfer, whatever
+    // is left unclaimed. The NIM never left custody — it was the operator
+    // float before this drop existed and it is the operator float again the
+    // moment the drop is terminal — so there is nothing to send back, and
+    // `refund_address` is NULL for the drop's whole life for exactly that
+    // reason. This branch runs BEFORE the missing-refund-address check below
+    // on purpose: that check exists because a SPONSOR drop always has a
+    // verified sender recorded, so seeing none there is a corrupted invariant.
+    // For an operator drop, `refund_address IS NULL` is not corruption, it is
+    // the design — routing it into `manual_review` would page a human for a
+    // condition that is not a fault.
+    if (drop.funding_source === 'operator') {
+      await client.query(`UPDATE drops SET state = 'closing', closing_reason = $2 WHERE id = $1`, [
+        dropId,
+        reason,
+      ])
+      await client.query('COMMIT')
+      logInfo('drop_closed', {
+        dropId,
+        reason,
+        reservedClaims,
+        unclaimedSlots: unclaimed,
+        refundLuna: '0',
+        fundingSource: 'operator',
+      })
+      return { outcome: 'closed', reservedClaims, unclaimedSlots: unclaimed, refundLuna: 0n }
+    }
+
     if (unallocatedLuna > 0n && !drop.refund_address) {
-      // A live drop always has the verified funding sender recorded, so this is
-      // a corrupted invariant, not a routine case. Do not close it into a state
-      // where the money has nowhere to go: hand it to a human.
+      // A live SPONSOR drop always has the verified funding sender recorded,
+      // so this is a corrupted invariant, not a routine case. Do not close it
+      // into a state where the money has nowhere to go: hand it to a human.
       await client.query(`UPDATE drops SET state = 'manual_review' WHERE id = $1`, [dropId])
       await client.query('COMMIT')
       await alerts.notify('manual_review', {
@@ -415,6 +449,20 @@ export async function closeLiveDrop(
  *
  * Takes only the drop row lock and acquires nothing after it, so it cannot form
  * a cycle with the `custody_controls` → drop order taken everywhere else.
+ *
+ * **Operator drops (migration 024).** The backstop's `refund_address IS NOT
+ * NULL` guard already excludes them on its own — an operator drop's
+ * `refund_address` is NULL for its whole life — so no operator drop is ever
+ * offered a backstop refund, and it settles rather than refunds, matching
+ * `closeLiveDrop`'s own operator branch. One consequence needs its own
+ * readiness rule: a sponsor drop always has at least one `outgoing_transfers`
+ * row by the time it reaches `closing` (a payout, a refund, or both — its
+ * `refund_address` guarantees a refund gets written for whatever nobody
+ * claimed), but an operator drop that expired with NOTHING claimed has
+ * neither, because `closeLiveDrop` writes it no refund and nobody ever
+ * claimed a payout. The readiness query below has one extra clause for
+ * exactly that drop: it is ready the moment it has no unconfirmed claims,
+ * because there is nothing outstanding to wait for in the first place.
  */
 export async function settleTerminal(pool: Pool): Promise<number> {
   // The backstop refund. Filtered to `refund_luna > 0` rather than computed
@@ -459,7 +507,16 @@ export async function settleTerminal(pool: Pool): Promise<number> {
               ) AS has_refund
        FROM drops d
        WHERE d.state = 'closing'
-         AND EXISTS (SELECT 1 FROM outgoing_transfers t WHERE t.drop_id = d.id)
+         -- A sponsor drop always owns at least one outgoing_transfers row by
+         -- now (its refund_address guarantees a refund for anything
+         -- unclaimed); an operator drop that expired fully unclaimed owns
+         -- none at all, because closeLiveDrop wrote it no refund and nobody
+         -- claimed a payout — and there is nothing left to wait for, so it is
+         -- ready on that basis alone.
+         AND (
+           d.funding_source = 'operator'
+           OR EXISTS (SELECT 1 FROM outgoing_transfers t WHERE t.drop_id = d.id)
+         )
          AND NOT EXISTS (
            SELECT 1 FROM outgoing_transfers t
            WHERE t.drop_id = d.id

@@ -8,7 +8,7 @@ import { migrate } from '../src/db/migrate'
 import { issueGrant } from '../src/gates/grants'
 import type { AlertKind, Alerts } from '../src/services/alerts'
 import { ClaimRejectedError, issueChallenge, reserveClaim } from '../src/services/claims'
-import { createDraft, submitFunding } from '../src/services/drops'
+import { createDraft, createOperatorFundedDrop, submitFunding } from '../src/services/drops'
 import {
   DRAFT_GC_AFTER_HOURS,
   closeLiveDrop,
@@ -17,6 +17,7 @@ import {
   sweepExpiry,
   type CloseLiveDropOptions,
 } from '../src/services/expiry'
+import { outstandingPrincipalLuna, reconcile } from '../src/services/solvency'
 import { runWorkerTick } from '../src/services/transfers'
 // Side-effect import: installs the int8-as-string parser so BIGINT luna never
 // passes through a lossy JS number. This suite builds its own pool, so it still
@@ -171,6 +172,51 @@ async function liveDrop(o: { claimCount?: number; expiryHours?: number } = {}): 
   const pub = await submitFunding(pool, chain, { publicId: draft.publicId, txHash: hash })
   expect(pub.state).toBe('live')
   return draft.publicId
+}
+
+/** A gate every operator-funded drop in this suite is created with. */
+const OPERATOR_GATE = {
+  kind: 'passphrase' as const,
+  listed: false,
+  config: { hash: 'operator-test-hash', hint: 'operator test hint' },
+}
+
+/**
+ * Raise the operator float — attested AND actually on chain — by `extraLuna`,
+ * and reconcile so the raise is clean before the caller spends it against
+ * `assertSolvent`. An operator-funded drop's own creation adds no chain
+ * transaction at all, so the float has to already be there.
+ */
+async function raiseOperatorFloat(extraLuna: bigint): Promise<void> {
+  chain.deposit({
+    hash: `operator-float-top-up-${randomUUID()}`,
+    sender: 'NQ07 OPERATOR',
+    recipient: CUSTODY,
+    valueLuna: extraLuna,
+    includedHeight: await chain.headHeight(),
+  })
+  await pool.query(
+    `UPDATE custody_controls SET operator_float_luna = operator_float_luna + $1 WHERE singleton`,
+    [extraLuna.toString()],
+  )
+  await reconcile(pool, chain, alerts)
+}
+
+/**
+ * Create an operator-funded drop directly live (migration 024): no draft, no
+ * funding transaction. Raises the float by exactly this drop's principal
+ * first, so it always has enough headroom.
+ */
+async function liveOperatorDrop(o: { claimCount?: number } = {}): Promise<string> {
+  const claimCount = o.claimCount ?? CLAIM_COUNT
+  await raiseOperatorFloat(AMOUNT_EACH * BigInt(claimCount))
+  const drop = await createOperatorFundedDrop(pool, {
+    sponsorLabel: 'Operator',
+    amountEachLuna: AMOUNT_EACH,
+    claimCount,
+    gate: OPERATOR_GATE,
+  })
+  return drop.publicId
 }
 
 /** Reserve one slot on a live drop with a fresh wallet. */
@@ -676,6 +722,103 @@ describe.skipIf(!hasDb)('expiry, exact refunds, settlement and draft GC (real Po
     // Neither settled nor refunded: the drop stays open around stuck money.
     expect(await settleTerminal(pool)).toBe(0)
     expect((await readDrop(publicId)).state).toBe('closing')
+  })
+
+  // ---- migration 024: operator-funded drops ------------------------------------
+
+  it('reserves and pays a claim against an operator-funded drop normally', async () => {
+    // Every operator-funded drop is gated (design doc: "every gated game is
+    // funded by the operator"), so the claimant needs a grant first, exactly
+    // as any other gated drop's claimant would — claims are UNCHANGED by
+    // funding_source.
+    const publicId = await liveOperatorDrop()
+    const dropId = (await readDrop(publicId)).id
+    const claimant = newWallet()
+    await grantTo(dropId, claimant.address)
+    const claimId = await reserveAs(publicId, claimant)
+    expect(claimId).toBeTruthy()
+
+    await drainWorker()
+
+    const payouts = (await readTransfers(publicId)).filter((t) => t.purpose === 'payout')
+    expect(payouts).toHaveLength(1)
+    expect(payouts[0]).toMatchObject({ amount_luna: AMOUNT_EACH.toString(), state: 'confirmed' })
+
+    // The payout is a real chain transaction, exactly as a sponsor drop's is —
+    // claims are untouched by funding_source (design doc "What is deliberately
+    // not changed").
+    const payoutTx = chain
+      .allTxs()
+      .find((tx) => tx.sender === CUSTODY && tx.valueLuna === AMOUNT_EACH)
+    expect(payoutTx).toBeDefined()
+  })
+
+  it('settles an operator-funded drop at expiry, writes NO refund, and headroom returns', async () => {
+    const publicId = await liveOperatorDrop({ claimCount: 3 })
+    const dropId = (await readDrop(publicId)).id
+    const claimant = newWallet()
+    await grantTo(dropId, claimant.address)
+    await reserveAs(publicId, claimant) // one of three slots claimed; two stay unclaimed
+    expect(await outstandingPrincipalLuna(pool)).toBe(AMOUNT_EACH * 3n)
+
+    await expireNow(publicId)
+    expect(await sweepExpiry(pool, alerts)).toBe(1)
+
+    const closing = await readDrop(publicId)
+    expect(closing).toMatchObject({ state: 'closing', closing_reason: 'expired' })
+    // Unclaimed principal is unallocated, but nothing ever left custody for an
+    // operator drop, so no refund transfer is written for it — unlike the
+    // equivalent sponsor-drop sweep above.
+    expect(await readRefunds(publicId)).toHaveLength(0)
+
+    await drainWorker()
+    expect(await settleTerminal(pool)).toBe(1)
+
+    const settled = await readDrop(publicId)
+    // Settles — never refunds: an operator drop was never owed a refund
+    // classification, because it never had a refund_address to begin with.
+    expect(settled.state).toBe('settled')
+    expect(await readRefunds(publicId)).toHaveLength(0)
+
+    // Headroom returns to the float by itself: the drop's principal stops
+    // being outstanding the instant it is terminal.
+    expect(await outstandingPrincipalLuna(pool)).toBe(0n)
+  })
+
+  it('settles an operator-funded drop with NOTHING claimed at all, and writes no refund', async () => {
+    // The edge case the readiness query needs its own clause for: zero claims
+    // means zero payouts, and no refund is ever written for an operator drop,
+    // so this drop reaches `closing` owning literally no outgoing_transfers.
+    const publicId = await liveOperatorDrop({ claimCount: 2 })
+    await expireNow(publicId)
+    expect(await sweepExpiry(pool, alerts)).toBe(1)
+    expect(await readTransfers(publicId)).toHaveLength(0)
+
+    expect(await settleTerminal(pool)).toBe(1)
+    expect((await readDrop(publicId)).state).toBe('settled')
+    expect(await outstandingPrincipalLuna(pool)).toBe(0n)
+  })
+
+  it('exhausts and settles an operator-funded drop once every slot is claimed', async () => {
+    const publicId = await liveOperatorDrop({ claimCount: 2 })
+    const dropId = (await readDrop(publicId)).id
+    const a = newWallet()
+    const b = newWallet()
+    await grantTo(dropId, a.address)
+    await grantTo(dropId, b.address)
+    await reserveAs(publicId, a)
+    await reserveAs(publicId, b)
+
+    expect(await readDrop(publicId)).toMatchObject({
+      state: 'closing',
+      closing_reason: 'exhausted',
+    })
+
+    await drainWorker()
+    expect(await settleTerminal(pool)).toBe(1)
+    expect((await readDrop(publicId)).state).toBe('settled')
+    expect(await readRefunds(publicId)).toHaveLength(0)
+    expect(await outstandingPrincipalLuna(pool)).toBe(0n)
   })
 
   // ---- one refund, ever -------------------------------------------------------

@@ -56,15 +56,33 @@ interface DropInput {
   amountEachLuna: bigint
   state?: string
   activated?: boolean
+  /**
+   * `'sponsor'` (default) or `'operator'` (migration 024). An operator drop
+   * never activates — `activated` is forced `false` for it regardless of what
+   * the caller passed — but a `live` one still gets a real `expires_at`,
+   * exactly as `createOperatorFundedDrop` stamps one at creation.
+   */
+  fundingSource?: 'sponsor' | 'operator'
 }
 
 async function insertDrop(db: Queryable, o: DropInput): Promise<{ id: string }> {
-  const activated = o.activated ?? true
+  const fundingSource = o.fundingSource ?? 'sponsor'
+  const activated = fundingSource === 'operator' ? false : (o.activated ?? true)
+  const state = o.state ?? 'live'
+  const expiresAt =
+    fundingSource === 'operator'
+      ? state === 'live'
+        ? new Date(Date.now() + 86_400_000)
+        : null
+      : activated
+        ? new Date(Date.now() + 86_400_000)
+        : null
   const { rows } = await db.query<{ id: string }>(
     `INSERT INTO drops (
        public_id, sponsor_label, claim_count, amount_each_luna, expected_funding_luna,
-       state, funding_tx_hash, activated_height, creator_address, refund_address, expires_at
-     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10)
+       state, funding_tx_hash, activated_height, creator_address, refund_address, expires_at,
+       funding_source
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10, $11)
      RETURNING id`,
     [
       randomUUID(),
@@ -72,11 +90,12 @@ async function insertDrop(db: Queryable, o: DropInput): Promise<{ id: string }> 
       o.claimCount,
       o.amountEachLuna.toString(),
       (o.amountEachLuna * BigInt(o.claimCount)).toString(),
-      o.state ?? 'live',
+      state,
       activated ? randomUUID() : null,
       activated ? '1000' : null,
       activated ? 'NQ07 CREATOR' : null,
-      activated ? new Date(Date.now() + 86_400_000) : null,
+      expiresAt,
+      fundingSource,
     ],
   )
   return rows[0]
@@ -295,6 +314,63 @@ describe.skipIf(!hasDb)('solvency and custody controls (real Postgres)', () => {
     // Even a transfer row optimistically marked confirmed stays outstanding
     // until the ATTEMPT is confirmed: broadcast is not paid.
     await pool.query(`UPDATE outgoing_transfers SET state = 'confirmed' WHERE id = $1`, [t.id])
+    expect(await outstandingPrincipalLuna(pool)).toBe(500n)
+  })
+
+  // ---- migration 024: operator-funded drops -----------------------------------
+  //
+  // Design doc "The replacement": an operator drop moves no money, so it must
+  // be counted as OUTSTANDING (a real claimant liability from the instant it
+  // exists) but must NOT be credited as a ledger movement (nothing entered
+  // custody). The two facts together are what makes `ledgerBalanceLuna` stay
+  // put while `outstandingPrincipalLuna` rises by exactly the drop's principal.
+
+  it('counts an operator drop as outstanding, but the ledger balance does not move', async () => {
+    await setControls({ operatorFloatLuna: 10_000_000n })
+    expect(await outstandingPrincipalLuna(pool)).toBe(0n)
+
+    const before = await pool.connect()
+    let ledgerBefore: bigint
+    try {
+      await before.query('BEGIN')
+      const controls = await lockControls(before)
+      ledgerBefore = await ledgerBalanceLuna(before, controls)
+      await before.query('ROLLBACK')
+    } finally {
+      before.release()
+    }
+
+    await insertDrop(pool, { claimCount: 5, amountEachLuna: 100n, fundingSource: 'operator' })
+
+    // Outstanding rises by exactly the drop's principal…
+    expect(await outstandingPrincipalLuna(pool)).toBe(500n)
+
+    // …and the ledger balance — operator float + ledger movements — has not
+    // moved at all: `ledgerMovementsLuna` only credits
+    // `activated_height IS NOT NULL`, and an operator drop never has one.
+    const after = await pool.connect()
+    try {
+      await after.query('BEGIN')
+      const controls = await lockControls(after)
+      expect(await ledgerMovementsLuna(pool)).toBe(0n)
+      expect(await ledgerBalanceLuna(after, controls)).toBe(ledgerBefore)
+      await after.query('ROLLBACK')
+    } finally {
+      after.release()
+    }
+  })
+
+  it('a settled operator drop stops being outstanding, exactly like a settled sponsor drop', async () => {
+    await insertDrop(pool, { claimCount: 5, amountEachLuna: 100n, fundingSource: 'operator', state: 'live' })
+    expect(await outstandingPrincipalLuna(pool)).toBe(500n)
+
+    await insertDrop(pool, {
+      claimCount: 5,
+      amountEachLuna: 100n,
+      fundingSource: 'operator',
+      state: 'settled',
+    })
+    // The terminal one contributes nothing extra.
     expect(await outstandingPrincipalLuna(pool)).toBe(500n)
   })
 

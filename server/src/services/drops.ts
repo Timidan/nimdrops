@@ -3,6 +3,7 @@ import { ChainCallTimeoutError, withChainDeadline } from '../chain/deadline'
 import { MEMO_MAX_BYTES, type ChainClient, type ChainTx } from '../chain/types'
 import { errorMessage, requireNetwork } from '../config'
 import type { Queryable } from '../db/pool'
+import type { GateKind } from '../gates/types'
 import { newPublicId } from '../ids'
 import { assertDropShape, formatNim } from '../money'
 import {
@@ -433,6 +434,177 @@ export async function createDraft(
       reservationExpiresAt: rows[0].funding_reservation_expires_at,
       capacity,
     }
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw err
+  } finally {
+    client.release()
+  }
+}
+
+export interface CreateOperatorFundedDropInput {
+  sponsorLabel: string
+  message?: string
+  amountEachLuna: bigint
+  claimCount: number
+  /** Omitted means {@link DEFAULT_EXPIRY_HOURS}, same as a sponsor draft. */
+  expiryHours?: number
+  /**
+   * The gate this drop is created with. Operator-funded drops exist for gated
+   * games (design doc "The ceremony being removed") — every gated game is
+   * funded by the operator and by nobody else — so, unlike {@link createDraft},
+   * there is no ungated shape here.
+   *
+   * `config` must already be validated THROUGH THE KIND'S OWN PARSER
+   * (`parseTriviaConfig`, `parsePassphraseConfig`, `parseAttestedConfig`) by
+   * the caller, exactly as `spike/create-gated-drop.ts` validates it today.
+   * This function does not re-validate it: duplicating that validation here
+   * would be a second place for a kind's config shape to be gotten wrong.
+   */
+  gate: {
+    kind: GateKind
+    listed: boolean
+    config: Record<string, unknown>
+  }
+}
+
+export interface OperatorFundedDrop {
+  publicId: string
+}
+
+/**
+ * Create a drop that is funded by the OPERATOR, not by a sponsor — the
+ * replacement for the round trip in `spike/fund-one-drop.ts` (operator-funded
+ * drops design doc, "The replacement").
+ *
+ * An operator drop moves no money: the NIM is already in custody, sitting in
+ * the operator float, and this function only changes which bucket it is
+ * counted in. It is therefore created directly `live`, in ONE transaction,
+ * with `activated_height` NULL (it never goes through `activate()`) and
+ * `refund_address` NULL (there is no verified sender to name — migration 024).
+ *
+ * Three things make this safe to run against real custody money:
+ *
+ *  1. **The lock order is the mandated one.** `lockControls` takes the
+ *     singleton `custody_controls` row first, exactly as every other
+ *     money-moving path does; this INSERT is the only "drop row" a create
+ *     needs to take second, since there is no existing row to lock.
+ *     `lockControls` (not `lockControlsForCapacity`) is used deliberately:
+ *     unlike a sponsor's draft, this call commits a REAL liability in the
+ *     same transaction, so it needs the same fresh-reconciliation guarantee
+ *     `activate()` needs, not a capacity promise that spends nothing yet.
+ *  2. **The optional policy caps are asserted too, via {@link assertCapacityFor}
+ *     — the SAME check `createDraft` makes, and for the same reason.** This
+ *     function is the one place a caller both PROMISES capacity and SPENDS it
+ *     in a single transaction, so skipping this check would be a real gap, not
+ *     a redundant one: `assertSolvent` (used for the balance check below)
+ *     deliberately does NOT weigh a sponsor's outstanding draft reservations
+ *     (`reservedPrincipalLuna`) — by design, because it decides whether to
+ *     honour money that has ALREADY arrived, and a reservation is a promise to
+ *     a sponsor who has not paid yet. `assertCapacityFor` is the check that
+ *     DOES weigh those reservations, because it decides whether to make a NEW
+ *     promise — exactly what this call is doing. Without it, an operator drop
+ *     could commit principal a concurrent sponsor's reservation was already
+ *     counting on, and that sponsor's finalized deposit would then fail
+ *     `activate()`'s cap check with real NIM already on chain and nowhere to
+ *     go. Called BEFORE the INSERT, on the pre-drop state, exactly as
+ *     `createDraft` calls it before its own INSERT.
+ *  3. **Solvency is asserted with the drop's principal ALREADY COUNTED as
+ *     outstanding**, which is why the row is inserted BEFORE
+ *     {@link assertSolvent} runs, and why that call passes `0n` rather than
+ *     the principal. This is the one place this function deliberately does
+ *     NOT copy `activate()`'s shape, and the reason is arithmetic, not style:
+ *     `assertSolvent(client, controls, addLuna)` computes
+ *     `ledger + addLuna >= outstanding + addLuna + reserve + …`, and `addLuna`
+ *     CANCELS OUT of that comparison by construction — which is correct for
+ *     `activate()` only because a sponsor's funding is a CREDIT to the ledger
+ *     (`ledgerMovementsLuna` counts `activated_height IS NOT NULL`) at the
+ *     exact same instant it becomes a liability, so the credit and the
+ *     liability are the same number and net to nothing. An operator drop has
+ *     no credit — `ledgerMovementsLuna` never counts it — so calling
+ *     `assertSolvent` with `addLuna` set to the principal would silently
+ *     charge nothing for the drop's size and pass for a float that covers
+ *     only the fee reserve. Inserting the row first makes
+ *     `outstandingPrincipalLuna` see the new liability on its own (it counts
+ *     `funding_source = 'operator'` with no `activated_height` required), so
+ *     `assertSolvent(client, controls, 0n)` — the same call `reserveClaim`
+ *     and the signing path make for "this principal is already outstanding,
+ *     add nothing new" — checks the true post-creation balance. A refusal
+ *     here throws before `COMMIT`, so the INSERT never becomes visible
+ *     outside this transaction.
+ *
+ * `ledgerMovementsLuna` is untouched by this drop: no funding transaction is
+ * ever recorded for it, so `ledgerBalanceLuna` does not move. The arithmetic
+ * that falls out is the whole point — headroom drops by exactly this
+ * principal, and it returns by itself once the drop reaches `settled`
+ * (`services/expiry.ts` writes no refund for an operator drop, because
+ * nothing ever left custody to send back).
+ *
+ * The `drop_gates` row is written in the SAME transaction as the drop, so a
+ * drop can never exist gate-less: unlike `spike/create-gated-drop.ts`'s
+ * two-statement sequence (the drop must exist before `drop_gates.drop_id` can
+ * reference it), there is no ungated intermediate state a claim could ever
+ * observe here.
+ */
+export async function createOperatorFundedDrop(
+  pool: Pool,
+  o: CreateOperatorFundedDropInput,
+): Promise<OperatorFundedDrop> {
+  assertDropShape(o.amountEachLuna, o.claimCount)
+  const expiryHours = o.expiryHours ?? DEFAULT_EXPIRY_HOURS
+  assertExpiryHours(expiryHours)
+  const expectedFundingLuna = o.amountEachLuna * BigInt(o.claimCount)
+  const publicId = newPublicId()
+
+  const client: PoolClient = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    const controls = await lockControls(client)
+
+    // The optional policy caps, on the PRE-drop state — the same call and the
+    // same reasoning `createDraft` uses before its own INSERT. Weighs
+    // concurrent sponsors' draft reservations, which `assertSolvent` below
+    // deliberately does not: see point 2 of the docstring above.
+    await assertCapacityFor(client, controls, expectedFundingLuna)
+
+    // Inserted BEFORE the solvency check — see the docstring above for why:
+    // `funding_source = 'operator'` alone makes `outstandingPrincipalLuna`
+    // count this row from here on, in THIS transaction, so `assertSolvent`
+    // below sees the true post-creation liability. A refusal rolls this back
+    // before it is ever visible to another transaction.
+    const { rows } = await client.query<{ id: string }>(
+      `INSERT INTO drops (
+         public_id, sponsor_label, message, claim_count, amount_each_luna,
+         expected_funding_luna, expiry_hours, state, funding_source,
+         activated_height, refund_address, expires_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, 'live', 'operator',
+                 NULL, NULL, now() + make_interval(hours => $7))
+       RETURNING id`,
+      [
+        publicId,
+        o.sponsorLabel,
+        o.message ?? null,
+        o.claimCount,
+        o.amountEachLuna.toString(),
+        expectedFundingLuna.toString(),
+        expiryHours,
+      ],
+    )
+    const dropId = rows[0].id
+
+    // `0n`: the principal is already outstanding (the row above), and this
+    // drop credits the ledger nothing — see the docstring for why passing the
+    // principal itself here would be the wrong (sponsor) shape.
+    await assertSolvent(client, controls, 0n)
+
+    await client.query(
+      `INSERT INTO drop_gates (drop_id, kind, listed, config)
+       VALUES ($1, $2, $3, $4::jsonb)`,
+      [dropId, o.gate.kind, o.gate.listed, JSON.stringify(o.gate.config)],
+    )
+
+    await client.query('COMMIT')
+    return { publicId }
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {})
     throw err

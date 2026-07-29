@@ -303,9 +303,23 @@ export async function readControls(db: Queryable): Promise<Controls> {
  *
  * Deliberately NOT derived from claim/refund rows: a fully unclaimed live drop
  * still owes its entire principal to future claimants or to its creator, so the
- * funding side is `expected_funding_luna` of every drop whose funding was
- * accepted and finalized (`activated_height IS NOT NULL`) and which has not yet
- * reached a terminal state.
+ * funding side is `expected_funding_luna` of every drop that owes claimants
+ * money and has not yet reached a terminal state. Two disjoint reasons put a
+ * drop in that set (operator-funded-drops design doc):
+ *
+ *  - `activated_height IS NOT NULL` — a SPONSOR drop, whose funding
+ *    transaction passed every design §7 predicate and our own finality depth.
+ *  - `funding_source = 'operator'` — an OPERATOR drop (migration 024), created
+ *    directly `live` with `activated_height` left NULL because it never goes
+ *    through `activate()`. Its principal is owed to claimants from the moment
+ *    it is created, exactly as a sponsor drop's is from the moment its funding
+ *    activates — the difference is WHERE the money already was, not whether it
+ *    is owed. This is the half of the operator-drop arithmetic that must move:
+ *    `ledgerMovementsLuna` below is deliberately UNCHANGED, crediting only
+ *    `activated_height IS NOT NULL`, because no money entered custody for an
+ *    operator drop and nothing may be credited for it. Counting the drop here
+ *    without changing that is what makes `ledgerBalanceLuna` fall by exactly
+ *    this principal instead of staying flat against a liability nobody sees.
  *
  * The outgoing side subtracts only FINALIZED principal, and only for drops in
  * that same set, so a drop's funding and its payouts leave the sum together
@@ -323,7 +337,7 @@ export async function outstandingPrincipalLuna(db: Queryable): Promise<bigint> {
     WITH open_drops AS (
       SELECT id, expected_funding_luna
       FROM drops
-      WHERE activated_height IS NOT NULL
+      WHERE (activated_height IS NOT NULL OR funding_source = 'operator')
         AND state NOT IN ('settled', 'refunded', 'cancelled')
     ),
     finalized_out AS (

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -15,6 +16,7 @@ import {
   MAX_EXPIRY_HOURS,
   MIN_EXPIRY_HOURS,
   createDraft,
+  createOperatorFundedDrop,
   getPublic,
   submitFunding,
 } from '../src/services/drops'
@@ -22,9 +24,12 @@ import { gcDrafts } from '../src/services/expiry'
 import {
   CapExceededError,
   DropTooLargeError,
+  InsolventError,
   NoHeadroomError,
   PausedError,
   outstandingPrincipalLuna,
+  readControls,
+  reconcile,
   reservedPrincipalLuna,
 } from '../src/services/solvency'
 // Side-effect import: installs the int8-as-string parser so BIGINT luna never
@@ -135,9 +140,10 @@ async function readDrop(publicId: string) {
     activated_height: string | null
     expiry_hours: number
     expires_at: Date | null
+    funding_source: string
   }>(
     `SELECT state, creator_address, refund_address, funding_tx_hash, activated_height,
-            expiry_hours, expires_at
+            expiry_hours, expires_at, funding_source
      FROM drops WHERE public_id = $1`,
     [publicId],
   )
@@ -771,6 +777,10 @@ describe.skipIf(!hasDb)('drop drafts and exact funding activation (real Postgres
     expect(row.refund_address).toBe(SPONSOR)
     expect(row.funding_tx_hash).toBe(hash)
     expect(BigInt(row.activated_height!)).toBe(BigInt(FUND_HEIGHT))
+    // migration 024 regression: an ordinary sponsor drop still defaults to
+    // funding_source = 'sponsor' and still needed a verified funding
+    // transaction — nothing about operator-funded drops changed this path.
+    expect(row.funding_source).toBe('sponsor')
 
     const expires = row.expires_at!.getTime()
     expect(expires).toBeGreaterThanOrEqual(before + 24 * 3600_000 - 5_000)
@@ -1142,6 +1152,137 @@ describe.skipIf(!hasDb)('drop drafts and exact funding activation (real Postgres
       `UPDATE custody_controls SET last_reconciled_at = now() - interval '1 day' WHERE singleton`,
     )
     await expect(draft()).resolves.toBeDefined()
+  })
+
+  // ---- migration 024: operator-funded drops ----------------------------------
+  //
+  // Created directly `live`, no draft, no funding transaction. The float has
+  // to be attested AND actually on chain for `reconcile()` to stay clean, so
+  // `floatOperator` deposits real chain money before attesting it — an
+  // operator drop's own creation adds no chain transaction at all.
+
+  describe('operator-funded drops (operator-funded drops design doc)', () => {
+    const GATE = {
+      kind: 'passphrase' as const,
+      listed: false,
+      config: { hash: 'operator-test-hash', hint: 'operator test hint' },
+    }
+
+    /** Attest AND deposit a float of exactly `totalFloatLuna`, then reconcile
+     * so it is clean before the caller spends it against `assertSolvent`. */
+    async function floatOperator(totalFloatLuna: bigint): Promise<void> {
+      const already = await chain.confirmedBalanceLuna(CUSTODY)
+      const extra = totalFloatLuna - already
+      if (extra > 0n) {
+        chain.deposit({
+          hash: `operator-float-top-up-${randomUUID()}`,
+          sender: 'NQ07 OPERATOR',
+          recipient: CUSTODY,
+          valueLuna: extra,
+          includedHeight: 1,
+        })
+      }
+      await setControls({ operatorFloatLuna: totalFloatLuna })
+      finalize()
+      await reconcile(pool, chain)
+    }
+
+    function operatorDrop(o: { amountEachLuna?: bigint; claimCount?: number } = {}) {
+      return createOperatorFundedDrop(pool, {
+        sponsorLabel: 'Operator',
+        amountEachLuna: o.amountEachLuna ?? AMOUNT_EACH,
+        claimCount: o.claimCount ?? CLAIM_COUNT,
+        gate: GATE,
+      })
+    }
+
+    it('creates a drop directly live and gated, with no activation and no refund address', async () => {
+      await floatOperator(PRINCIPAL + FEE_FLOAT)
+
+      const created = await operatorDrop()
+
+      const row = await readDrop(created.publicId)
+      expect(row.state).toBe('live')
+      expect(row.activated_height).toBeNull()
+      expect(row.refund_address).toBeNull()
+      expect(row.funding_tx_hash).toBeNull()
+      expect(row.funding_source).toBe('operator')
+      expect(row.expires_at).not.toBeNull()
+
+      const { rows: gateRows } = await pool.query<{ kind: string; listed: boolean }>(
+        `SELECT g.kind, g.listed FROM drop_gates g JOIN drops d ON d.id = g.drop_id
+         WHERE d.public_id = $1`,
+        [created.publicId],
+      )
+      expect(gateRows).toHaveLength(1)
+      expect(gateRows[0]).toMatchObject({ kind: 'passphrase', listed: false })
+
+      expect(await outstandingPrincipalLuna(pool)).toBe(PRINCIPAL)
+    })
+
+    it('is refused when headroom is one luna short of the principal, accepted at exactly enough', async () => {
+      await floatOperator(PRINCIPAL + FEE_FLOAT - 1n)
+      await expect(operatorDrop()).rejects.toBeInstanceOf(InsolventError)
+      expect(await outstandingPrincipalLuna(pool)).toBe(0n)
+      expect(await draftCount()).toBe(0)
+
+      await floatOperator(PRINCIPAL + FEE_FLOAT)
+      await expect(operatorDrop()).resolves.toBeDefined()
+      expect(await outstandingPrincipalLuna(pool)).toBe(PRINCIPAL)
+    })
+
+    it('reconcile finds no shortfall after creation: the ledger still equals the chain', async () => {
+      await floatOperator(PRINCIPAL + FEE_FLOAT)
+      await operatorDrop()
+
+      const result = await reconcile(pool, chain)
+      expect(result.short).toBe(false)
+      const controls = await readControls(pool)
+      expect(controls.paused).toBe(false)
+      expect(controls.shortfallDetectedAt).toBeNull()
+    })
+
+    it('refuses to run while custody is paused, unlike a draft', async () => {
+      await floatOperator(PRINCIPAL + FEE_FLOAT)
+      await setControls({ paused: true, operatorFloatLuna: PRINCIPAL + FEE_FLOAT })
+      await expect(operatorDrop()).rejects.toBeInstanceOf(PausedError)
+      expect(await outstandingPrincipalLuna(pool)).toBe(0n)
+    })
+
+    // Regression for a review finding: `assertSolvent` deliberately does not
+    // weigh a sponsor's draft reservation (`reservedPrincipalLuna`) — by
+    // design, because it decides whether to honour money that has ALREADY
+    // arrived (see its own docstring). An operator drop is a NEW promise, not
+    // money that has arrived, so it must be checked against the same cap
+    // `createDraft` is checked against — including reservations a sponsor is
+    // already holding — via `assertCapacityFor`. Without that call, an
+    // operator drop could commit principal a concurrent sponsor's reservation
+    // was counting on, and that sponsor's real, finalized on-chain deposit
+    // would then fail `activate()`'s cap check with nowhere for the NIM to go.
+    it('is refused when a concurrent sponsor draft reservation already holds the cap', async () => {
+      // The ledger balance is generous on its own — assertSolvent alone would
+      // allow this drop — so this only fails if the policy cap also weighs
+      // the sponsor's reservation.
+      await floatOperator(PRINCIPAL * 2n + FEE_FLOAT)
+      await pool.query('UPDATE custody_controls SET max_live_principal_luna = $1 WHERE singleton', [
+        (PRINCIPAL + PRINCIPAL / 2n).toString(),
+      ])
+
+      const sponsorDraft = await draft()
+      expect(sponsorDraft.capacity.reservedLuna).toBe(PRINCIPAL)
+
+      await expect(operatorDrop()).rejects.toBeInstanceOf(CapExceededError)
+      expect(await outstandingPrincipalLuna(pool)).toBe(0n)
+
+      // The sponsor's reservation lapses (they never paid) and the identical
+      // operator drop now fits.
+      await pool.query(
+        `UPDATE drops SET funding_reservation_expires_at = now() - interval '1 minute'
+         WHERE public_id = $1`,
+        [sponsorDraft.publicId],
+      )
+      await expect(operatorDrop()).resolves.toBeDefined()
+    })
   })
 
   // ---- public projection ----------------------------------------------------
