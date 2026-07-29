@@ -790,6 +790,31 @@ describe.skipIf(!hasDb)('drop drafts and exact funding activation (real Postgres
     expect(await outstandingPrincipalLuna(pool)).toBe(PRINCIPAL)
   })
 
+  it('records the verified funding authorizer instead of a temporary contract sender', async () => {
+    const d = await draft()
+    const hash = fund(d.publicId, { sender: 'NQ07 HTLC' })
+    finalize()
+    const contractFunding: ChainClient = {
+      network: () => chain.network(),
+      custodyAddress: () => chain.custodyAddress(),
+      headHeight: () => chain.headHeight(),
+      isFinal: (tx: ChainTx, head: number) => chain.isFinal(tx, head),
+      getTransaction: async (txHash: string) => {
+        const tx = await chain.getTransaction(txHash)
+        return tx ? { ...tx, fundingOwner: SPONSOR } : null
+      },
+      confirmedBalanceLuna: (address: string) => chain.confirmedBalanceLuna(address),
+      buildSignedBasic: (options) => chain.buildSignedBasic(options),
+      broadcast: (raw: string) => chain.broadcast(raw),
+    }
+
+    await submitFunding(pool, contractFunding, { publicId: d.publicId, txHash: hash })
+
+    const row = await readDrop(d.publicId)
+    expect(row.creator_address).toBe(SPONSOR)
+    expect(row.refund_address).toBe(SPONSOR)
+  })
+
   // ---- the sponsor's claim window -----------------------------------------------
 
   it('stamps the sponsor-chosen window at activation, measured from activation', async () => {

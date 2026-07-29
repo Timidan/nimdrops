@@ -236,6 +236,21 @@ function toUserFriendly(addr: string): string {
   return Address.fromAny(addr).toUserFriendlyAddress()
 }
 
+function fundingOwner(details: PlainTransactionDetails): string | null {
+  if (details.senderType === 'basic') return toUserFriendly(details.sender)
+
+  const proof = details.proof
+  if (proof.type === 'standard' && (details.senderType === 'vesting' || details.senderType === 'staking')) {
+    return toUserFriendly(proof.signer)
+  }
+  if (details.senderType !== 'htlc') return null
+  if (proof.type === 'regular-transfer') return toUserFriendly(proof.signer)
+  if (proof.type === 'early-resolve' || proof.type === 'timeout-resolve') {
+    return toUserFriendly(proof.creator)
+  }
+  return null
+}
+
 export class NimiqChain implements ChainClient {
   private readonly net: NimiqNetwork
   private readonly networkId: number
@@ -496,6 +511,7 @@ export class NimiqChain implements ChainClient {
     return {
       hash: details.transactionHash,
       sender: toUserFriendly(details.sender),
+      fundingOwner: fundingOwner(details),
       recipient: toUserFriendly(details.recipient),
       // API-DIVERGENCE 7: `value` is a JS number.
       valueLuna: BigInt(details.value),

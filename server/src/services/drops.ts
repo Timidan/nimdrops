@@ -896,7 +896,8 @@ export async function submitFunding(
   if (tx.dataUtf8 !== fundingMemoFor(publicId)) {
     throw new FundingRejectedError('wrong_memo', 'funding memo does not match this drop')
   }
-  if (!tx.sender) {
+  const owner = tx.fundingOwner === undefined ? tx.sender : tx.fundingOwner
+  if (!owner) {
     throw new FundingRejectedError('invalid_sender', 'funding transaction has no valid sender')
   }
 
@@ -933,7 +934,7 @@ export async function submitFunding(
   // cross-check would notice custody holding less than the books claim — before
   // a new liability is added rather than after.
   await reconcile(pool, chain)
-  await activate(pool, drop.id, publicId, txHash, tx, expectedFundingLuna)
+  await activate(pool, drop.id, publicId, txHash, tx, owner, expectedFundingLuna)
   return getPublic(pool, publicId)
 }
 
@@ -984,6 +985,7 @@ async function activate(
   publicId: string,
   txHash: string,
   tx: ChainTx,
+  owner: string,
   expectedFundingLuna: bigint,
 ): Promise<void> {
   const client: PoolClient = await pool.connect()
@@ -1046,7 +1048,7 @@ async function activate(
            expires_at = now() + make_interval(hours => expiry_hours),
            funding_reservation_expires_at = NULL
        WHERE id = $1`,
-      [dropId, tx.sender, txHash, tx.includedHeight.toString()],
+      [dropId, owner, txHash, tx.includedHeight.toString()],
     )
     await client.query('COMMIT')
   } catch (err) {

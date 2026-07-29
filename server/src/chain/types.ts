@@ -5,6 +5,8 @@
 
 export interface ChainTx {
   hash: string; sender: string; recipient: string
+  /** Wallet address that authorized incoming funding; contracts are not refund destinations. */
+  fundingOwner?: string | null
   valueLuna: bigint; dataUtf8: string | null
   executionOk: boolean; includedHeight: number
 }
