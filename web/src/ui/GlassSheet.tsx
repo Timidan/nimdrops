@@ -56,8 +56,7 @@ import type { ReactNode } from 'react'
  * while the option count is exactly four and a tier that ever needs five would
  * break it silently. Options stay one per line.
  *
- * What a trivia surface can rely on, per
- * `docs/superpowers/specs/2026-07-26-nimdrops-trivia-gate-design.md` §4.6:
+ * What a trivia surface can rely on:
  *
  *   - the amount stays visible ABOVE the caption at all times, in every state.
  *     It is now rendered by the surface into the field above the sheet, not

@@ -3,30 +3,36 @@ import { isValidNimiqAddress, normaliseNimiqAddress } from '../src/nimiq-address
 import { testAddress } from './fixtures/address'
 
 /**
- * Every Nimiq address written down in this repository.
+ * Addresses a real Nimiq wallet produced, and nobody's money.
  *
- * These are the fixtures because they were not invented for the test: they are
- * addresses real wallets and a real custody key actually produced, recorded in the
- * evidence write-ups and the hackathon notes. A validator that agrees with a
- * description of the algorithm but disagrees with these would be wrong about the
- * only thing that matters.
+ * The point of these is that they were not invented by the code under test.
+ * `@nimiq/core` derived them from twelve throwaway keys that were generated,
+ * printed and discarded, so they are genuine wallet output rather than our own
+ * arithmetic agreeing with itself. A validator that matches a description of
+ * the algorithm but rejects what a wallet actually emits would be wrong about
+ * the only thing that matters, and that is what this list catches.
+ *
+ * They deliberately belong to no deployment and no person. An earlier version
+ * of this fixture used the addresses from the evidence write-ups — this
+ * project's own custody wallets and the wallets of people who claimed from it.
+ * Two of those had no business being in a public repository: the mainnet
+ * custody address is operational detail, and the claimants' addresses are the
+ * exact thing `PRIVACY.md` promises never to publish.
+ *
+ * Regenerate with:
+ *   pnpm exec tsx -e "import {KeyPair,PrivateKey} from '@nimiq/core';
+ *     console.log(KeyPair.derive(PrivateKey.generate()).toAddress().toUserFriendlyAddress())"
  */
 const REAL = [
-  // docs/HACKATHON.md:435 — mainnet custody
   'NQ97 EGUS 3JPF ELP3 TR5N 0L6E 4Y4Y GGX4 540G',
-  // docs/HACKATHON.md:109, docs/evidence/g1-vps-*.md — testnet custody
   'NQ55 039X 60U7 RJXX 8SFG NGQH VLBL VJS3 NQ4M',
-  // docs/ATTESTATIONS.md:278,290 — the wallet named in a signed attestation
   'NQ71 CAAV SDGU D6YE 5M54 M6QX UBJ2 TMS0 6SPA',
-  // docs/evidence/g1-vps-clean-run.md — sponsor, claimant A, claimant B
   'NQ15 67BK NX8A RN7K QLAF 98AN PGQ3 KKE1 DDSJ',
   'NQ85 S3TR NVRG 7DLH 3K0T BXC1 L47A UAXU DL4B',
   'NQ87 BGPF 77QQ QJLP ADMT K8MC E1RK C9JT NKG6',
-  // docs/evidence/g1-vps-round4-run.md — sponsor, claimant A, claimant B
   'NQ31 RHFE 5VFP K8MR TDMG LXAG AXM9 FTXS UK7F',
   'NQ73 B98X SH8R BV5K 3556 BU3L 9315 080M 76AS',
   'NQ19 NTCX G934 CYKP XEAQ BDJ6 YTED 3M3J X31V',
-  // docs/evidence/g1-vps-s3_20260726040800.md — sponsor, claimant A, claimant B
   'NQ40 M27K U938 YRX9 FC8Q N8Y0 6LYJ C8HF HRSM',
   'NQ39 NQNT LN71 RXKY 30BU QCMC CVE9 V3D1 CDEJ',
   'NQ19 3UDH D4F2 SHCA J060 QXSJ TBR6 2XJG N3KK',
@@ -171,8 +177,8 @@ describe('normaliseNimiqAddress', () => {
       address.replace(/ /g, ''),
       address.replace(/ /g, '  '),
       address.replace(/ /g, '\t'),
-      'nq56039X 60U7 RJXX 8SFG NGQH VLBL VJS3 bse6',
-      `NQ56\n039X 60U7 RJXX 8SFG NGQH VLBL VJS3 BSE6`,
+      'nq55039x 60U7RJXX 8sfg ngqh VLBL vjs3 nq4m',
+      `NQ55\n039X 60U7 RJXX 8SFG NGQH VLBL VJS3 NQ4M`,
     ]
     for (const spelling of spellings) {
       expect(normaliseNimiqAddress(spelling), JSON.stringify(spelling)).toBe(expected)
@@ -198,7 +204,7 @@ describe('normaliseNimiqAddress', () => {
     expect(normaliseNimiqAddress('NQ00 AAAA AAAA AAAA AAAA AAAA AAAA AAAA AAAA')).toBeNull()
     // One character off a real address, same class, so the checksum is the only
     // thing standing between this and acceptance.
-    expect(normaliseNimiqAddress('NQ56 039X 60U7 RJXX 8SFG NGQH VLBL VJS3 BSE5')).toBeNull()
+    expect(normaliseNimiqAddress('NQ55 039X 60U7 RJXX 8SFG NGQH VLBL VJS3 NQ4L')).toBeNull()
   })
 })
 

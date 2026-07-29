@@ -2,7 +2,7 @@
  * LIQUID GLASS — the brand register's surface, and its display voice
  * ===========================================================================
  *
- * `PRODUCT.md` splits the product in two. The claim screen and the create flow
+ * The product splits in two. The claim screen and the create flow
  * are **product**: design there serves the transaction. The landing page at the
  * root is **brand**: it has no job except to explain what NimDrops is to
  * someone who arrived without a link. This file is the brand register's half of
@@ -100,8 +100,8 @@
  * The problem it solves is narrow and real: the product self-hosts exactly one
  * family, and Mulish is a good UI sans and a flat headline. A landing page
  * whose only hierarchy is "the same face, larger and heavier" reads as a
- * template — `PRODUCT.md` names SaaS landing scaffolding as an anti-reference,
- * and undifferentiated headings are the typographic half of that. Pairing for
+ * template — SaaS landing scaffolding is treated as an anti-reference, and
+ * undifferentiated headings are the typographic half of that. Pairing for
  * CONTRAST rather than similarity is the whole point: a serif headline over a
  * sans body reads as deliberate where two near-identical sans-serifs read as a
  * mistake.
@@ -341,7 +341,7 @@
   /**
    * So an interactive panel — a nav bar going compact, a card under a pointer —
    * gets the system's own curve for free instead of inventing one. Well under
-   * the 300ms `PRODUCT.md` allows outside the single reveal beat.
+   * the 300ms allowed outside the single reveal beat.
    */
   transition:
     background-color var(--nd-t-state) var(--nd-ease),
@@ -398,7 +398,7 @@
  * `@supports` around it is not decoration. Without the mask this pseudo-element
  * is a filled rectangle sitting ON TOP of the panel's content, which on a
  * landing page is a headline that has vanished — the exact class of failure
- * `PRODUCT.md` calls a visual costume. A renderer that cannot cut the hole does
+ * this codebase calls a visual costume. A renderer that cannot cut the hole does
  * not get the ring; it keeps the plain `1px solid var(--nd-rule)` border the
  * base rules already gave it, which is the same hairline `index.css` draws on
  * the claim card. Both prefixes are tested because Firefox implements

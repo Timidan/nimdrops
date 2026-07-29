@@ -29,3 +29,6 @@ questions.v*.json
 
 # Agent scratch space.
 /.superpowers/
+
+# Operator notes, never repository content.
+/docs/ops/

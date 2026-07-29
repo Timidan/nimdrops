@@ -10,13 +10,13 @@
  *
  * Three rules bound the whole file.
  *
- * **1. Motion carries no information** (`PRODUCT.md`). Every hook here changes
+ * **1. Motion carries no information.** Every hook here changes
  * *when* something appears and *how* it arrives. None of them changes whether it
  * exists, what it says, or what a number reads. There is no counter climbing to
  * an amount, nothing that fires on success, and nothing celebratory: the
  * celebration belongs to the moment of receiving, and this is a brochure.
  *
- * **2. Content is never gated on a trigger firing** (`PRODUCT.md` principle 4).
+ * **2. Content is never gated on a trigger firing.**
  * This is the failure this file is written against. A reveal that hides an
  * element and then never un-hides it is a blank page. So, exactly as
  * `scrollReveal.ts` argues: the hidden state is written by JavaScript and never
@@ -507,9 +507,9 @@ export function useSectionReveals(scope: MotionScope, options: SectionRevealOpti
  * ---------------------------------------------------------------------- */
 
 /**
- * Hover is a pointer luxury and this product runs in a phone WebView
- * (`PRODUCT.md`: no feature may depend on hover). A coarse pointer gets nothing,
- * which is correct rather than degraded — there is no hover state to enhance.
+ * Hover is a pointer luxury and this product runs in a phone WebView, where no
+ * feature may depend on hover. A coarse pointer gets nothing, which is correct
+ * rather than degraded — there is no hover state to enhance.
  */
 function fineHover(): boolean {
   if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false

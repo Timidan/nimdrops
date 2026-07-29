@@ -1694,8 +1694,8 @@ export class FloatAttestationError extends Error {}
  * real payouts against them.
  *
  * The intended cutover does not create this state at all — a mainnet run starts
- * on a fresh database (see `docs/HACKATHON.md`, "Mainnet cutover runbook"), and
- * `bindNetwork` refuses to move an existing one anyway. This is the guard for
+ * on a fresh database, and `bindNetwork` refuses to move an existing one
+ * anyway. This is the guard for
  * the paths that go around both: a hand-edited `network` column, a restored
  * dump, a database copied for a rehearsal. It is checked at boot, before the
  * socket opens and before the worker signs anything.

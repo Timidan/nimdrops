@@ -347,7 +347,7 @@ export default function Landing() {
               it. One share per wallet, first come, first served.
             </p>
             {/* Two doors, and the earning one leads. This page exists for
-                somebody who arrived WITHOUT a link (PRODUCT.md), and that person
+                somebody who arrived WITHOUT a link, and that person
                 has no NIM to give away — so "fund a giveaway" is the wrong first
                 ask. Both are deeplinks: the page is a web explainer whose job is
                 to hand the visitor to the mini app. */}

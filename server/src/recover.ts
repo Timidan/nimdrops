@@ -1819,7 +1819,7 @@ async function stateCounts(db: PoolClient, table: string): Promise<StateCounts> 
 }
 
 /**
- * The first thing an on-call operator runs (HACKATHON.md §8).
+ * The first thing an on-call operator runs.
  *
  * One read-only screen: is custody paused, which chain is it bound to, does the
  * ledger still cover its liabilities, how much work is in each state, what has

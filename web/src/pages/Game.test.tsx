@@ -627,8 +627,8 @@ describe('Game — the review of a finished round', () => {
   })
 
   it('shows no score line when the verdicts are present, so the rows are the only word', async () => {
-    // A tally beside per-question verdicts reads as a grade, which PRODUCT.md
-    // rules out on a screen about a payout. The rows already say it.
+    // A tally beside per-question verdicts reads as a grade, which is ruled
+    // out on a screen about a payout. The rows already say it.
     await play({
       status: 200,
       body: {

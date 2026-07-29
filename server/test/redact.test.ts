@@ -18,7 +18,7 @@ import {
  *
  * The negative control matters as much as the positives. A redactor that eats a
  * transaction hash or a drop id passes every "is it masked" test and destroys
- * the operator's ability to trace money — HACKATHON.md §8 requires exactly that
+ * the operator's ability to trace money — an incident response requires exactly that
  * lookup — so "a normal operational log is untouched" is asserted explicitly.
  */
 

@@ -35,8 +35,8 @@ import '../src/db/pool'
  *  2. a float attestation proven on another chain, or a float the deposits do
  *     not add up to, stops both entrypoints from starting.
  *
- * The second is the guard behind the recommendation in `docs/HACKATHON.md`:
- * mainnet runs on a FRESH database, because the testnet one's drops, attempts
+ * The second is the guard behind the recommendation that mainnet runs on a
+ * FRESH database, because the testnet one's drops, attempts
  * and float mean nothing on mainnet and several of them mean something wrong.
  * Nothing in the supported path produces the states below — `bindNetwork`
  * refuses to move a bound database at all — so these are the guards for the

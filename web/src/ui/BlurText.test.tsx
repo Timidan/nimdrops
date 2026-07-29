@@ -1,8 +1,8 @@
 /**
  * The contract under test is not "does it blur". It is **can this component
  * ever leave a sentence invisible**, which is the only way a decorative text
- * reveal turns into a product defect (`PRODUCT.md`: never let the visual layer
- * gate the content). Every test below is a different way of taking the
+ * reveal turns into a product defect: the visual layer must never gate the
+ * content. Every test below is a different way of taking the
  * animation away — the preference, the media query, the observer, the frame
  * loop, the component's own lifetime — and asserting the words survived it.
  *

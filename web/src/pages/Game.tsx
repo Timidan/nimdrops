@@ -19,13 +19,12 @@ import { GetNimiqPay } from '../ui/OpenInApp'
  * vouched for by whoever runs the drop.
  *
  * **The pass screen is plain, and that is the load-bearing decision here.**
- * `PRODUCT.md`: *the celebration belongs to the moment of receiving, and
- * nowhere else.* Meeting a condition is not receiving — nothing has moved and
- * nothing has been signed. So passing says "You can claim N NIM" and hands off
- * to `/drop/:publicId`, where the reveal already lives. A reveal here would
- * both steal that moment from the payout and use delight to hurry a stranger
- * toward a signature, which `PRODUCT.md` names as the thing that makes a scam
- * feel like one.
+ * *The celebration belongs to the moment of receiving, and nowhere else.*
+ * Meeting a condition is not receiving — nothing has moved and nothing has
+ * been signed. So passing says "You can claim N NIM" and hands off to
+ * `/drop/:publicId`, where the reveal already lives. A reveal here would both
+ * steal that moment from the payout and use delight to hurry a stranger
+ * toward a signature — which is the thing that makes a scam feel like one.
  *
  * **Nothing here is built on the sealed-paper component.** Three redesign
  * directions are live and undecided and one of them removes it entirely, so
@@ -200,8 +199,7 @@ export default function Game({ walletAddress }: GameProps) {
  * What is on the table and what it costs to reach it.
  *
  * The amount is the largest thing on the screen because it is the number the
- * reader is deciding about (`PRODUCT.md` design principle 1), in tabular
- * figures so it cannot jitter, and exact — five NIM is `5`, two and a half is
+ * reader is deciding about, in tabular figures so it cannot jitter, and exact — five NIM is `5`, two and a half is
  * `2.5`, and neither is ever rounded to look tidier.
  *
  * The share count is here rather than left to the claim screen because a player
@@ -261,8 +259,8 @@ function Offer({
  * **The review sits BELOW the claim, and that ordering is the whole decision.**
  * It is information, not a trophy: it carries no score, no "five out of five"
  * and no praise, because a scoreboard here would turn meeting a condition into
- * the moment of receiving that `PRODUCT.md` reserves for the payout. Putting it
- * above the link would also push the primary action off a phone screen behind
+ * the moment of receiving that belongs to the payout. Putting it above the
+ * link would also push the primary action off a phone screen behind
  * five questions nobody has to read, which is the practical half of the same
  * rule: the claim is what this screen is for.
  */
@@ -328,8 +326,8 @@ function Pass({
  * **Correctness is carried by words, not by hue.** Every row states its outcome
  * in text — "Correct", "Not correct", "Ran out of time" — with a mark beside it
  * that is `aria-hidden`, so the label is what both a screen reader and a
- * greyscale render receive. `PRODUCT.md`: assume red and green are
- * indistinguishable to some claimants. There is no colour coding at all here,
+ * greyscale render receive. Assume red and green are indistinguishable to
+ * some claimants. There is no colour coding at all here,
  * which also means nothing to fix for anyone who cannot see it.
  *
  * **There is no reveal.** No transition, no stagger, no expansion — the whole
@@ -350,7 +348,7 @@ function Review({
    * Shown only when the per-question verdicts are withheld, and then it is the
    * ONLY score on the screen. With verdicts present the rows already say it
    * question by question, and repeating it as a tally would read as a grade —
-   * which `PRODUCT.md` rules out on a screen that is about a payout.
+   * which is ruled out on a screen that is about a payout.
    */
   const withheld = questions.every((q) => q.wasCorrect === null)
   const score = withheld && correctCount !== undefined ? correctCount : null
@@ -477,13 +475,13 @@ function ReviewRow({ question }: { question: ReviewedQuestion }) {
  * The one thing this page has to ask for.
  *
  * It comes after the offer, never before it: a stranger should learn what this
- * is before being asked for anything (`PRODUCT.md` design principle 5).
+ * is before being asked for anything.
  *
  * The address is READ FROM THE WALLET, not typed. This was a text field, on the
  * reasoning that the page should not spend a native prompt on a condition the
  * player has not met yet — but the cost of that reasoning was asking someone to
- * copy thirty-six characters on a phone, and `PRODUCT.md` names "without typing
- * an address" as part of what success looks like. One tap on a wallet dialog is
+ * copy thirty-six characters on a phone, and "without typing an address" is
+ * part of what success looks like. One tap on a wallet dialog is
  * cheaper than that for everyone, and it cannot be mistyped.
  *
  * The prompt is bought here and nowhere else. `WalletBridge.address()` is not
@@ -790,8 +788,8 @@ function Trivia({
  * `prefers-reduced-motion` — the global block in `index.css` zeroes the bar's
  * transition and nothing else. A countdown that stopped counting because
  * animation was off would be a correctness bug wearing a visual costume, and
- * `PRODUCT.md` holds timers to AA contrast for the same reason it holds
- * amounts: misreading one has consequences.
+ * timers are held to AA contrast for the same reason amounts are: misreading
+ * one has consequences.
  */
 function Countdown({ secondsLeft }: { secondsLeft: number }) {
   return (

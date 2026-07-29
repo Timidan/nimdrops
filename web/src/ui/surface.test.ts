@@ -592,8 +592,8 @@ describe('the z-index scale is semantic and complete', () => {
 
 describe('the warm-neutral default is gone', () => {
   /**
-   * `#fbf9f4` sat in the near-white warm band `PRODUCT.md` names as an
-   * anti-reference, and the token name `--paper` is on the same list. The name
+   * `#fbf9f4` sat in the near-white warm band treated as an anti-reference,
+   * and the token name `--paper` is on the same list. The name
    * survives as a one-line bridge for the create flow, which may not be edited
    * from this task, but it resolves to the chroma-0 plate and the VALUE is
    * gone. The bridge line and this assertion go together.

@@ -28,7 +28,7 @@
  *
  * ## Why it is a hexagon and not a coin
  *
- * `PRODUCT.md` bans hexagon motifs under "crypto-dark", and that ban is about
+ * Hexagon motifs are banned under "crypto-dark", and that ban is about
  * hexagons used as *atmosphere*: tessellated backdrops, hexagonal frames,
  * hex-shaped avatars. One instance, at unit size, standing for the unit, is the
  * opposite of atmosphere. The surface uses the shape once and never as

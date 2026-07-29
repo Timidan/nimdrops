@@ -11,7 +11,7 @@
  * it back. This file does not extend that trust to anything.
  *
  * **The rule that outranks the effect: this text can never end up permanently
- * invisible.** `PRODUCT.md` forbids letting the visual layer gate content, and
+ * invisible.** The visual layer must never gate content, and
  * `Landing.motion.ts` records what breaking that rule actually looked like — a
  * real page with no visible call to action, because a GSAP entrance hid its
  * elements and waited for a ticker that never advanced. Nothing threw. This

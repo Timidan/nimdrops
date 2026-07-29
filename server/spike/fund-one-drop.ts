@@ -79,7 +79,7 @@
  *
  * ── environment ─────────────────────────────────────────────────────────────
  *   PUBLIC_ID                 (required) the drop to fund
- *   PUBLIC_ORIGIN             (default https://nimdrops.timidan.xyz)
+ *   PUBLIC_ORIGIN             (required) https origin of the deployment to fund
  *   CUSTODY_PRIVATE_KEY_HEX   (required) — read, never printed
  *   DATABASE_URL              (required) — the solvency preflight and `float set`
  *   NIMIQ_NETWORK             (required) — must be TestAlbatross unless
@@ -113,7 +113,6 @@ import '../src/db/pool'
 // configuration
 // ---------------------------------------------------------------------------
 
-const DEFAULT_ORIGIN = 'https://nimdrops.timidan.xyz'
 /** `ids.ts`: 16 random bytes, base64url — exactly 22 URL-safe characters. */
 const PUBLIC_ID_RE = /^[A-Za-z0-9_-]{22}$/
 const TX_HASH_RE = /^[0-9a-fA-F]{64}$/
@@ -399,7 +398,16 @@ async function run(): Promise<void> {
     PUBLIC_ID_RE.test(publicId),
     `PUBLIC_ID ${JSON.stringify(publicId)} is not a 22-character public id`,
   )
-  const origin = (process.env.PUBLIC_ORIGIN ?? DEFAULT_ORIGIN).replace(/\/+$/, '')
+  // No default. This script signs with the custody key and moves real money, so
+  // the deployment it acts on is named deliberately every time rather than
+  // inherited from a constant somebody forgot was pointing at production.
+  const originRaw = process.env.PUBLIC_ORIGIN
+  assert(
+    originRaw !== undefined && originRaw.trim() !== '',
+    'PUBLIC_ORIGIN is not set. Name the deployment this should fund, e.g. ' +
+      'PUBLIC_ORIGIN=https://drops.example.com',
+  )
+  const origin = originRaw.replace(/\/+$/, '')
   assert(origin.startsWith('https://'), `PUBLIC_ORIGIN must be https, got ${origin}`)
 
   const custodyKeyHex = process.env.CUSTODY_PRIVATE_KEY_HEX

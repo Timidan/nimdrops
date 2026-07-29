@@ -382,10 +382,9 @@ describe.skipIf(!hasDb)('submitAttestation', () => {
   })
 
   it('accepts the wallet scheme when the deployment runs it', async () => {
-    // `docs/ATTESTATIONS.md` tells an integrator to sign whichever bytes
-    // `SIG_SCHEME` names, and a production deployment names this one. The rest of
-    // this suite runs `raw`, so without this case the documented production path
-    // would be the untested one.
+    // An integrator signs whichever bytes `SIG_SCHEME` names, and a production
+    // deployment names this one. The rest of this suite runs `raw`, so without
+    // this case the documented production path would be the untested one.
     process.env.SIG_SCHEME = 'nimiq-signed-message'
     const message = attestation()
     await expect(submit(message, signLikeNimiqPay(message))).resolves.toMatchObject({

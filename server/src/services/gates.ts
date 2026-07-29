@@ -82,9 +82,9 @@ export interface GameView {
    * Seconds per question, for a kind that has them; null otherwise.
    *
    * Here rather than only on `POST /session` because the pre-play screen has to
-   * state it BEFORE the player commits — `PRODUCT.md` requires the product to say
-   * what will happen before it happens, and "each question is timed" without the
-   * number is the part of that promise that costs someone a question.
+   * state it BEFORE the player commits — the product must say what will happen
+   * before it happens, and "each question is timed" without the number is the
+   * part of that promise that costs someone a question.
    */
   secondsPerQuestion: number | null
   amountEachLuna: string

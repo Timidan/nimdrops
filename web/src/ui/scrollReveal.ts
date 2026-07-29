@@ -3,9 +3,9 @@
  * ScrollTrigger for the reveals. Isolated here so pages stay declarative.
  *
  * One rule outranks everything else in this file. **The page must be completely
- * legible with none of this running.** `PRODUCT.md` forbids letting the visual
- * layer gate content, and a reveal that hides an element and then never fires
- * does precisely that. Three consequences:
+ * legible with none of this running.** The visual layer must never gate
+ * content, and a reveal that hides an element and then never fires does
+ * precisely that. Three consequences:
  *
  *  1. The hidden state is written by JavaScript, never by CSS. If this module
  *     fails to load or is stripped from the bundle, the markup was visible the
@@ -19,8 +19,8 @@
  *     scroll and reveals are decoration; native scroll and readable text are
  *     the product.
  *
- * Motion also carries no information here (`PRODUCT.md`): these reveals change
- * when a paragraph appears, never whether it exists or what it says.
+ * Motion also carries no information here: these reveals change when a
+ * paragraph appears, never whether it exists or what it says.
  */
 import { useEffect, useLayoutEffect, useState, type RefObject } from 'react'
 import gsap from 'gsap'

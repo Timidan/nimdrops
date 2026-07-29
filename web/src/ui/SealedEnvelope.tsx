@@ -42,9 +42,9 @@ import {
  *
  * ## Why concealing the amount is allowed here at all
  *
- * `docs/research/red-packet-ui-study.md` argues that concealment IS the lottery
- * mechanic. That is true of WeChat, whose group packets split a sum at random,
- * so the covered number is a gamble. NimDrops shares are fixed, equal and
+ * Concealment IS the lottery mechanic in WeChat's red packets, whose group
+ * packets split a sum at random, so the covered number is a gamble. NimDrops
+ * shares are fixed, equal and
  * pre-committed, and the sealed screen says so in words while the envelope is
  * still shut. Concealing a number that cannot vary risks nothing; it only
  * delays a fact by a couple of seconds, which is the difference between a

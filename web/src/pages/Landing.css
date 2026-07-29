@@ -717,7 +717,7 @@
 }
 
 /* The unit rides the amount rather than competing with it: smaller, tracked
-   out, and never on its own line — PRODUCT.md forbids an ambiguous amount. */
+   out, and never on its own line — an ambiguous amount is not allowed. */
 .nd-ledger-unit {
   margin-inline-start: 0.22em;
   font-size: 0.38em;
@@ -900,7 +900,7 @@
 
 /* Four facts, so two columns and then four — never three. A `repeat(3)` grid
    left the fourth fact alone on a second row, which reads as a mistake and is
-   also the SaaS three-card reflex PRODUCT.md names as an anti-reference. */
+   also the SaaS three-card reflex treated as an anti-reference. */
 @media (min-width: 34rem) {
   .nd-land-gate-facts {
     grid-template-columns: repeat(2, minmax(0, 1fr));

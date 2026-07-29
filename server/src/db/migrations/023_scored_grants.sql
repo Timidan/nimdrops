@@ -2,8 +2,7 @@
 --
 -- NULL means the full share, which is every grant issued before this migration
 -- and every kind that has no notion of partial success. Trivia writes 600, 800
--- or 1000 (score/questionCount x 1000; spec:
--- docs/superpowers/specs/2026-07-28-trivia-scored-payouts-design.md).
+-- or 1000 (score/questionCount x 1000).
 --
 -- On the GRANT, not the claim, so the money path stays kind-agnostic: claims.ts
 -- reads a number off a row it already locks and never learns what a score is.

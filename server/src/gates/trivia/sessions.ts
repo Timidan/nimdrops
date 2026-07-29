@@ -64,16 +64,13 @@ export const SESSION_LOCK_TIMEOUT_MS = 5_000
  * a random guesser passes roughly once per 10 attempts and finishes in ~half an
  * hour of 3-minute cycles, converging retries faster via the finished-session
  * review. The owner chose reach over friction (design §5); no attempt cap ships.
- * See docs/superpowers/specs/2026-07-28-trivia-scored-payouts-design.md §Decisions
- * point 5 for the accepted-risk framing.
  */
 export const COOLDOWN_MINUTES = 3
 
 /**
  * A session passes at this many correct answers. Below it, failing works
- * exactly as it always has. The payout scales with the score (spec:
- * 2026-07-28-trivia-scored-payouts-design.md), so a bare pass is not a full
- * share and the perfect run still stands apart.
+ * exactly as it always has. The payout scales with the score, so a bare pass
+ * is not a full share and the perfect run still stands apart.
  */
 export const PASS_MIN_CORRECT = 3
 

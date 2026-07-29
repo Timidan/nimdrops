@@ -29,8 +29,8 @@ import {
  * The six branches draw TOGETHER and the six nodes settle TOGETHER. They are
  * never staggered. A stagger is cheap and it looks good and it is wrong here:
  * whichever recipient animates first reads as the first, the nearest, or the
- * favoured one, and "shares are fixed and equal by design" (`PRODUCT.md`,
- * anti-reference: Gambling) is the entire claim this page is making. The
+ * favoured one, and "shares are fixed and equal by design" is the entire
+ * claim this page is making. The
  * equality has to survive the animation, so all six share one CSS rule — one
  * duration, one delay, one keyframe name — and there is no per-index delay
  * anywhere in this file to drift out of sync later.
@@ -44,8 +44,8 @@ import {
  *   nodes    720 → 1140ms   all six, one frame
  *
  * Everything eases on `--nd-ease`, the product's one entering curve. Nothing
- * rotates, nothing spins, nothing is random, nothing bursts: `PRODUCT.md` bars
- * wheel and slot-machine language outright, and a fan of equal spokes is one
+ * rotates, nothing spins, nothing is random, nothing bursts: wheel and
+ * slot-machine language is barred outright, and a fan of equal spokes is one
  * bad instinct away from a prize wheel. Only `transform`, `opacity` and
  * `stroke-dashoffset` are animated, so the whole sequence is compositor work
  * and paint, never layout.
@@ -60,8 +60,9 @@ import {
  * the same complete graphic appears — never blank, never half-drawn, never a
  * dash waiting for a frame that will not come. Motion is opt-IN: the gate only
  * opens after `matchMedia` has been found AND has said the reader has no
- * preference against it. `PRODUCT.md` principle 4 is written about the claim
- * screen, but a hero that ships blank is the same bug in a cheaper place.
+ * preference against it. The rule that content must never be gated on a
+ * trigger firing is written about the claim screen, but a hero that ships
+ * blank is the same bug in a cheaper place.
  *
  * The guard is belt and braces on purpose. The JS gate is what jsdom and the
  * server hit; the `prefers-reduced-motion` block in the stylesheet is what

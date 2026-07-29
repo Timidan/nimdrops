@@ -462,8 +462,8 @@ describe('the blur budget', () => {
   })
 
   /**
-   * `PRODUCT.md` allows motion past 300ms at exactly one moment, and it is the
-   * reveal. A surface transition is functional feedback.
+   * Motion past 300ms is allowed at exactly one moment, and it is the reveal.
+   * A surface transition is functional feedback.
    */
   it('keeps its transitions inside the functional-feedback budget', () => {
     const durations = [...css.matchAll(/transition:[^;]*?var\((--nd-t-[\w-]+)\)/g)].map((m) => m[1])

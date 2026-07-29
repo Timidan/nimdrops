@@ -1,8 +1,8 @@
 /**
  * The contract under test is not "does it animate". It is **can this module
  * ever leave content invisible**, which is the only way a decorative scroll
- * reveal turns into a product defect (`PRODUCT.md`: never let the visual layer
- * gate the money).
+ * reveal turns into a product defect: the visual layer must never gate the
+ * money.
  *
  * jsdom is a useful adversary here rather than a limitation. It has no
  * `matchMedia` and no `ResizeObserver`, so both libraries genuinely fail in it —

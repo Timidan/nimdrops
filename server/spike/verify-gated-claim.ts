@@ -35,7 +35,7 @@
  *
  * ── environment ─────────────────────────────────────────────────────────────
  *   PUBLIC_ID        (required) the funded, live, trivia-gated drop
- *   PUBLIC_ORIGIN    (default https://nimdrops.timidan.xyz)
+ *   PUBLIC_ORIGIN    (default http://localhost:8080; set it explicitly to reach a deployment)
  *   TRIVIA_BANK_PATH (required) the same bank the deployment serves
  *   NIMIQ_NETWORK    (required) must match the deployment
  *   SIG_SCHEME       (default nimiq-signed-message)
@@ -44,7 +44,7 @@ import { KeyPair, PrivateKey } from '@nimiq/core'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { loadBank } from '../src/gates/trivia/bank'
 
-const ORIGIN = process.env.PUBLIC_ORIGIN ?? 'https://nimdrops.timidan.xyz'
+const ORIGIN = process.env.PUBLIC_ORIGIN ?? 'http://localhost:8080'
 const PUBLIC_ID = process.env.PUBLIC_ID ?? ''
 const BANK_PATH = process.env.TRIVIA_BANK_PATH ?? ''
 

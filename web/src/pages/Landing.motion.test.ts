@@ -1,9 +1,8 @@
 /**
  * The contract under test is not "does it animate". It is **can this module ever
  * leave the landing page invisible, or leave a control it decorated broken**.
- * That is the only way a brochure's motion layer becomes a product defect
- * (`PRODUCT.md`: never let the visual layer gate the money, and content is
- * visible by default).
+ * That is the only way a brochure's motion layer becomes a product defect: the
+ * visual layer must never gate the money, and content is visible by default.
  *
  * jsdom is the adversary rather than the limitation, for the reason
  * `scrollReveal.test.ts` gives: it ships no `matchMedia` and no `ResizeObserver`,

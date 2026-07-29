@@ -314,7 +314,7 @@ const RULE_STRONG = '--nd-rule-strong'
 
 /**
  * Everything that sits on the card, for one path and one accent option.
- * `PRODUCT.md`'s floors: body 4.5:1, large text 3:1, placeholders held to the
+ * The contrast floors: body 4.5:1, large text 3:1, placeholders held to the
  * body standard, and monetary amounts and countdowns held to AA regardless of
  * size.
  */

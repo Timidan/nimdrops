@@ -1,6 +1,6 @@
 /**
- * Log redaction (design §10.3, HACKATHON.md §8: "Logs omit keys, signatures,
- * device IDs, full wallet addresses, and serialized secrets").
+ * Log redaction: logs omit keys, signatures, device IDs, full wallet
+ * addresses, and serialized secrets.
  *
  * Until this module existed, redaction here was CALL-SITE DISCIPLINE: every
  * `console.info(JSON.stringify({...}))` in the codebase was hand-audited to
@@ -36,7 +36,7 @@
  * Ed25519 private key, which is why the value pass would eat it. It is also
  * PUBLIC (it is the explorer URL), and it is the single identifier that lets an
  * operator tie a log line to money on chain; `transfers.ts` logs it on the line
- * that says a payment finished, and HACKATHON.md §8 requires exactly that
+ * that says a payment finished, and the operator requires exactly that
  * lookup. So keys in {@link PUBLIC_ID_KEYS} keep their value verbatim.
  *
  * The exemption is by KEY NAME only. A 64-hex run inside an error string is

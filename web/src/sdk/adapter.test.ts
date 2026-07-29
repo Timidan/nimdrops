@@ -2,9 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { getBridge, resolveBridge } from './adapter'
 
 /**
- * Kill criterion (docs/goals/nimdrops-cycle1/PLAN.md): "Mock/fake reachable
- * from production entrypoints → blocker." The selection rule is the guard, so
- * it gets a test of its own.
+ * Kill criterion: "Mock/fake reachable from production entrypoints →
+ * blocker." The selection rule is the guard, so it gets a test of its own.
  */
 afterEach(() => {
   vi.unstubAllEnvs()

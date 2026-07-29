@@ -56,7 +56,7 @@
  *   DATABASE_URL              (required)
  *   NIMIQ_NETWORK             (required) TestAlbatross | MainAlbatross
  *   CUSTODY_ADDRESS           (required) the address sponsors are told to pay
- *   PUBLIC_ORIGIN             (default https://nimdrops.timidan.xyz)
+ *   PUBLIC_ORIGIN             (default http://localhost:8080; set it explicitly to reach a deployment)
  *   TRIVIA_SELECTION_SALT     required for `trivia` and `passphrase`
  *   TRIVIA_BANK_PATH          required for `trivia`
  *   GATE_PHRASE               `passphrase` only, preferred over `--phrase`
@@ -103,7 +103,7 @@ import '../src/db/pool'
 // configuration
 // ---------------------------------------------------------------------------
 
-const DEFAULT_ORIGIN = 'https://nimdrops.timidan.xyz'
+const DEFAULT_ORIGIN = 'http://localhost:8080'
 const KINDS = ['trivia', 'passphrase', 'attested'] as const
 type Kind = (typeof KINDS)[number]
 const TIERS: readonly Tier[] = ['novice', 'easy', 'medium', 'hard']

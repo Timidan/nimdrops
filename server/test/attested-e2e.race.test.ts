@@ -461,8 +461,8 @@ describe.skipIf(!hasDb)('attested drop, attestation to payout intent (real Postg
   // ---- blast radius is one drop ----------------------------------------------
 
   /**
-   * `docs/ATTESTATIONS.md` §5 states the bound: a key is trusted by the drop that
-   * named it and by nothing else. Two live attested drops, two different attester
+   * The bound: a key is trusted by the drop that named it and by nothing else.
+   * Two live attested drops, two different attester
    * keys, and drop A's attester tries to grant on drop B — refused whichever gate
    * it is posted to, and neither drop grows a grant.
    */
@@ -555,13 +555,13 @@ describe.skipIf(!hasDb)('attested drop, attestation to payout intent (real Postg
 // ---- the documented worked example -------------------------------------------
 
 /**
- * `docs/ATTESTATIONS.md` §6 publishes a throwaway keypair, a message and one
- * signature per `SIG_SCHEME`, and tells an integrator to reproduce them before
- * pointing a signer at a funded drop. If these vectors are wrong, every
- * integrator who follows that instruction concludes their own signer is broken.
- * Needs no database: it is arithmetic over published bytes.
+ * A throwaway keypair, a message and one signature per `SIG_SCHEME`, published
+ * as a worked example an integrator can reproduce before pointing a signer at
+ * a funded drop. If these vectors are wrong, every integrator who follows that
+ * instruction concludes their own signer is broken. Needs no database: it is
+ * arithmetic over published bytes.
  */
-describe('docs/ATTESTATIONS.md §6 worked example', () => {
+describe('worked example: attestation vectors for each SIG_SCHEME', () => {
   const PRIVATE_KEY_HEX = 'd0b4e01b2b0e1a2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f6071829304'
   const PUBLIC_KEY_HEX = '5cf2855581bfaec85405b6e411f353826fafbe5b2dfa0e48ede2e92488b124f8'
 
@@ -577,11 +577,11 @@ describe('docs/ATTESTATIONS.md §6 worked example', () => {
     'nonce=7f3a1c9e2b48d05617ae3c8f2d194b60'
 
   const RAW_SIGNATURE_HEX =
-    'fef21feb156f8ed07906b17666d0f2d0e3723254ada87bcd1a2651fbe4f854df' +
-    '3d2bb6e2890c158d7ddcd4fbbbd4f225570d9317053525abfedfad4570bf050b'
+    '8f67fd6ab678f493987c2faa43adb3e39fd96725e302d5979a5ca6fda192c428' +
+    '61a332c5ecfd7e55a7c714bdb4cec23327a9fe395c7867b435e29996b085020c'
   const SIGNED_MESSAGE_SIGNATURE_HEX =
-    '2eec20729a1c94a0c59e4f341291c576bcee83b9e43de21bf49098e37196045b' +
-    'e6d9ff7873b58bc06c6371f3a420ba0dcb91945e34bc720e0309ea8e4a4e2202'
+    'f297e9781a1145faf7bd5ae159c0156310efbac3cedc8e5bf6b77e5ee4ddf1eb' +
+    'b3aa4ae13bd868ac381e0fc53a080027a00a30232677244f67e4c95ef9df860b'
 
   it('publishes a private key that derives the published public key', () => {
     const kp = KeyPair.derive(PrivateKey.fromHex(PRIVATE_KEY_HEX))
