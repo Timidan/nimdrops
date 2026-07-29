@@ -11,8 +11,8 @@
  * those exist. If a state renders its amount and its action here, it renders
  * them in a headless renderer, in a background tab, and under reduced motion.
  * The stylesheet half of the same rule is in `ui/surface.test.ts`, and the
- * rendered-in-a-real-browser half is the animation-disabled screenshot pass in
- * `docs/design/shipped/`.
+ * rendered-in-a-real-browser half is the animation-disabled screenshot pass,
+ * recorded in the design archive that is kept outside this repository.
  *
  * ## Why the table passes `revealed`
  *
@@ -193,7 +193,7 @@ describe('what counts as already opened', () => {
     expect(screen.getByTestId('claim-sheet')).toBeTruthy()
   })
 
-  /** Production derives it. Only `/preview` and this file force it. */
+  /** Production derives it. Only this file forces it. */
   it('is not forced by the page that owns the claim machine', () => {
     const source = readFileSync(resolve(process.cwd(), 'src/pages/Drop.tsx'), 'utf8')
     expect(source).not.toMatch(/revealed/)

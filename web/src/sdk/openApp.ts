@@ -77,7 +77,7 @@ export function openInNimiqPay(o: OpenInNimiqPayOptions): () => void {
 
   // The app took focus: whatever we see next, do not send this person to a store.
   function onHide() {
-    if (win!.document.visibilityState === 'hidden' || true) finish()
+    finish()
   }
 
   win.document.addEventListener('visibilitychange', onHide)

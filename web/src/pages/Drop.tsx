@@ -24,7 +24,8 @@ import DropView from './DropView'
  * server said so.
  *
  * The pixels live in `DropView`. This file is the claim machine and nothing
- * else, which is what lets `/preview` render every state from fixtures.
+ * else, which is what lets `DropView.test.tsx` drive every state from
+ * fixtures without a live claim in flight.
  */
 
 export interface DropProps {

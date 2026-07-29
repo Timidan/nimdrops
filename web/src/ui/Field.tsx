@@ -18,8 +18,7 @@ import { useEffect, useRef, type ReactNode } from 'react'
  * the safe-area inset and the masthead, and then hands the rest of the screen
  * to `children` as a full-height flex column. The claim surface splits that
  * column into an open upper field and a sheet that rises over it (the s4
- * "Stack" system, `docs/design/samples/README.md`); the sealed gate uses the
- * same column for one envelope. There is no `variant` prop and there will not
+ * "Stack" system); the sealed gate uses the same column for one envelope. There is no `variant` prop and there will not
  * be one — the two screens are two children, not two configurations.
  *
  * `.nd-field-inner` carries NO horizontal padding, which is what lets the sheet

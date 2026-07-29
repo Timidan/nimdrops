@@ -28,7 +28,8 @@ import Receipt from './Receipt'
  * Everything the drop page looks like, with none of what it knows.
  *
  * `Drop` owns the claim machine; this owns the surface. Splitting them is what
- * lets `/preview` render all thirteen states at once from fixtures.
+ * lets `DropView.test.tsx` drive all thirteen states at once from fixtures,
+ * without a live claim in flight.
  *
  * ## The composition — s4 "Stack"
  *
@@ -147,9 +148,9 @@ export interface DropViewProps {
    *
    * A dev and test seam, and the only prop on this component production does
    * not pass: `Drop.tsx` leaves it undefined, so the shipped screen derives the
-   * gate and nothing else can. `/preview` sets it so all thirteen states can be
-   * looked at without opening an envelope nineteen times, and the tests set it
-   * to hold the claim surface to rule 1 on every state.
+   * gate and nothing else can. `DropView.test.tsx` sets it so all thirteen
+   * states can be looked at without opening an envelope nineteen times,
+   * holding the claim surface to rule 1 on every state.
    */
   revealed?: boolean
   /**

@@ -7,8 +7,9 @@
  * `clientWidth` and every rect it hands back are hardcoded zeros, so an
  * overflow assertion made against it would pass whatever the CSS said and
  * defend nothing. The invariants are therefore checked where they actually
- * live, in the declarations, and the measured versions live in `/preview` and
- * in the Playwright pass recorded in `docs/design/shipped/`.
+ * live, in the declarations, and the measured versions live in a Playwright
+ * pass against a real browser, recorded in the design archive that is kept
+ * outside this repository.
  *
  * ## What was carried over from `Envelope.test.tsx`, and what was not
  *

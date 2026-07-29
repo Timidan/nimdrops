@@ -69,8 +69,7 @@
  *
  * The drop is a live surface. One dark, translucent card over something that is
  * still changing while you read it, lit by a single vermilion bloom. Direction
- * C, approved 2026-07-27, specified in `docs/design/direction-options.md`;
- * retuned to the owner's approved palette 2026-07-27.
+ * C, approved 2026-07-27 and retuned to the approved palette the same day.
  *
  * Three rules the whole system is built to keep, in priority order:
  *
@@ -394,8 +393,7 @@
    * `[data-nd-accent='bright']` is the alternative the owner asked to see
    * built: keep one accent doing every job, and push it to `#ffce45` so it
    * separates from vermilion by lightness instead of by hue. It is a decision
-   * switch, not a theme, and it goes when the owner picks. See
-   * `docs/design/palette/` for both captured.
+   * switch, not a theme, and it goes when the owner picks.
    */
   --nd-accent: var(--color-gold);
   --nd-action: var(--color-chalk);
@@ -811,7 +809,7 @@ body {
  * right.
  *
  * `@container` against the field's own width rather than a media query, so the
- * same component renders correctly inside `/preview`'s 390px frame and at full
+ * same component renders correctly at a 390px phone viewport and at full
  * width without either knowing anything about the page. It is also why every
  * type size below is in `cqw` rather than `vw`: a 390px frame on a 1440px
  * monitor has to render the phone's type, not the monitor's.
