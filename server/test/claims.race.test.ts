@@ -15,7 +15,7 @@ import {
 import { ConflictError } from '../src/http/idempotency'
 import { DropNotFoundError, createDraft, submitFunding } from '../src/services/drops'
 import { settleTerminal } from '../src/services/expiry'
-import { outstandingPrincipalLuna, PausedError } from '../src/services/solvency'
+import { InsolventError, outstandingPrincipalLuna, PausedError, reconcile } from '../src/services/solvency'
 import { runWorkerTick } from '../src/services/transfers'
 // Side-effect import: installs the int8-as-string parser so BIGINT luna never
 // passes through a lossy JS number. This suite builds its own pool, so it still
@@ -777,5 +777,94 @@ describe.skipIf(!hasDb)('claim reservation, idempotency and races (real Postgres
     await expect(claimStatus(pool, randomUUID(), reserved.statusToken)).rejects.toBeInstanceOf(
       ClaimNotFoundError,
     )
+  })
+
+  // ---- migration 025: uncapped operator drops --------------------------------
+  //
+  // `claim_count IS NULL`: no slot ceiling and no "last slot closes the drop"
+  // transition. The gate instead is solvency for the ONE payout about to be
+  // committed, asserted before the claim and its transfer are written.
+
+  describe('uncapped operator drops (migration 025)', () => {
+    /** Attest and deposit a float of exactly `totalFloatLuna`, then reconcile clean. */
+    async function floatOperator(totalFloatLuna: bigint): Promise<void> {
+      const already = await chain.confirmedBalanceLuna(CUSTODY)
+      const extra = totalFloatLuna - already
+      if (extra > 0n) {
+        chain.deposit({
+          hash: `uncapped-float-top-up-${randomUUID()}`,
+          sender: 'NQ07 OPERATOR',
+          recipient: CUSTODY,
+          valueLuna: extra,
+          includedHeight: 1,
+        })
+      }
+      await pool.query('UPDATE custody_controls SET operator_float_luna = $1 WHERE singleton', [
+        totalFloatLuna.toString(),
+      ])
+      await reconcile(pool, chain)
+    }
+
+    // Inserted directly rather than through `createOperatorFundedDrop`
+    // (`services/drops.ts` forces a gate on every operator drop it creates —
+    // the real production shape, exercised in `drops.race.test.ts`). This
+    // suite is about `reserveClaim`'s `claim_count IS NULL` branch on its own,
+    // so it takes the shortest path to a legal ungated uncapped row: the
+    // `drops_uncapped_requires_operator` CHECK asks only for
+    // `funding_source = 'operator'`, not for a `drop_gates` row.
+    async function uncappedDrop(): Promise<string> {
+      const publicId = randomUUID()
+      await pool.query(
+        `INSERT INTO drops (
+           public_id, sponsor_label, claim_count, amount_each_luna, expected_funding_luna,
+           state, funding_source, expires_at
+         ) VALUES ($1, 'Operator', NULL, $2, NULL, 'live', 'operator', now() + interval '24 hours')`,
+        [publicId, AMOUNT_EACH.toString()],
+      )
+      return publicId
+    }
+
+    it('keeps reserving claims past what would have been a slot cap', async () => {
+      // Twice CLAIM_COUNT (5) plus the fee reserve: nothing here caps it at 5.
+      const SHARES = CLAIM_COUNT * 2
+      await floatOperator(AMOUNT_EACH * BigInt(SHARES) + FEE_FLOAT)
+      const publicId = await uncappedDrop()
+
+      for (let i = 0; i < SHARES; i += 1) {
+        const result = await claim(publicId, newWallet())
+        expect(result.state).toBe('reserved')
+      }
+
+      const claims = await readClaims(publicId)
+      expect(claims).toHaveLength(SHARES)
+      expect(claims.map((c) => c.slot_index)).toEqual(Array.from({ length: SHARES }, (_, i) => i))
+      // Still live: an uncapped drop has no last slot to close on.
+      expect(await readDrop(publicId)).toMatchObject({ state: 'live', closing_reason: null })
+      expect(await outstandingPrincipalLuna(pool)).toBe(AMOUNT_EACH * BigInt(SHARES))
+    })
+
+    it('refuses a claim the float cannot cover, leaving no claim or transfer row, and a top-up lets the next one through', async () => {
+      // Exactly two shares' worth of float, no more.
+      await floatOperator(AMOUNT_EACH * 2n + FEE_FLOAT)
+      const publicId = await uncappedDrop()
+
+      await claim(publicId, newWallet())
+      await claim(publicId, newWallet())
+      expect(await readClaims(publicId)).toHaveLength(2)
+      expect(await outstandingPrincipalLuna(pool)).toBe(AMOUNT_EACH * 2n)
+
+      // A third share needs float this deployment does not have.
+      await expect(claim(publicId, newWallet())).rejects.toBeInstanceOf(InsolventError)
+      expect(await readClaims(publicId)).toHaveLength(2)
+      expect(await readPayouts(publicId)).toHaveLength(2)
+      expect(await outstandingPrincipalLuna(pool)).toBe(AMOUNT_EACH * 2n)
+
+      // Topping up the float is what lets the next claim succeed, not a retry.
+      await floatOperator(AMOUNT_EACH * 3n + FEE_FLOAT)
+      const third = await claim(publicId, newWallet())
+      expect(third.state).toBe('reserved')
+      expect(await readClaims(publicId)).toHaveLength(3)
+      expect(await readPayouts(publicId)).toHaveLength(3)
+    })
   })
 })

@@ -89,7 +89,8 @@ export interface ClosableDropRow {
   id: string
   public_id: string
   state: string
-  claim_count: number
+  /** `null` for an uncapped drop (migration 025) — always `funding_source = 'operator'`. */
+  claim_count: number | null
   amount_each_luna: string
   /** The verified funding sender. The ONLY address a refund can ever go to. */
   refund_address: string | null
@@ -114,7 +115,8 @@ export type CloseResult =
   | {
       outcome: 'closed'
       reservedClaims: number
-      unclaimedSlots: number
+      /** `null` for an uncapped drop — there is no slot count to report. */
+      unclaimedSlots: number | null
       /** Zero when every slot was reserved; no intent is written in that case. */
       refundLuna: bigint
     }
@@ -309,8 +311,31 @@ export async function closeLiveDrop(
     )
     const reservedClaims = counted[0].reserved
     // `unclaimedSlots` stays a plain slot COUNT — the shape callers already read
-    // it as — even though it no longer drives the money below.
-    const unclaimed = Math.max(0, drop.claim_count - reservedClaims)
+    // it as — even though it no longer drives the money below. `null` for an
+    // uncapped drop: there is no slot ceiling to count against.
+    const unclaimed = drop.claim_count === null ? null : Math.max(0, drop.claim_count - reservedClaims)
+
+    // Uncapped drops (migration 025) are always `funding_source = 'operator'`
+    // (the CHECK that migration adds) and have no `claim_count` to multiply
+    // against below — they never promised a total, so there is nothing here
+    // for the refund arithmetic to run over. Checked BEFORE that arithmetic,
+    // not after: `BigInt(drop.claim_count)` would throw on NULL otherwise.
+    if (drop.claim_count === null) {
+      await client.query(`UPDATE drops SET state = 'closing', closing_reason = $2 WHERE id = $1`, [
+        dropId,
+        reason,
+      ])
+      await client.query('COMMIT')
+      logInfo('drop_closed', {
+        dropId,
+        reason,
+        reservedClaims,
+        unclaimedSlots: null,
+        refundLuna: '0',
+        fundingSource: 'operator',
+      })
+      return { outcome: 'closed', reservedClaims, unclaimedSlots: null, refundLuna: 0n }
+    }
 
     const { rows: committed } = await client.query<{ paid_luna: string }>(
       `SELECT COALESCE(SUM(amount_luna), 0)::TEXT AS paid_luna

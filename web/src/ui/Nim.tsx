@@ -174,9 +174,10 @@ export function Amount({
 }
 
 export interface PipsProps {
-  total: number
-  /** How many are still available. The rest render hollow. */
-  left: number
+  /** `null` for an uncapped drop — there is no total to draw marks for. */
+  total: number | null
+  /** How many are still available. The rest render hollow. `null` with `total`. */
+  left: number | null
   /** px. 13 is the size these were checked at. */
   size?: number
 }
@@ -194,6 +195,7 @@ export interface PipsProps {
  * hundred marks is a smear.
  */
 export function Pips({ total, left, size = 11 }: PipsProps) {
+  if (total === null || left === null) return null
   if (total > 12) return null
   return (
     <span className="nim-pips" aria-hidden="true">

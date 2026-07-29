@@ -278,9 +278,10 @@ export interface DropPublic {
   message: string | null
   /** Decimal NIM string, e.g. `"2.5"`. */
   amountEach: string
-  claimCount: number
-  /** Slots not yet reserved. */
-  remaining: number
+  /** `null` for an uncapped drop (migration 025) — no slot ceiling exists. */
+  claimCount: number | null
+  /** Slots not yet reserved, or `null` for an uncapped drop. */
+  remaining: number | null
   state: DropState
   /**
    * The window this drop was created with, in hours. Present on every drop,
@@ -446,7 +447,12 @@ export interface CreateOperatorFundedDropInput {
   sponsorLabel: string
   message?: string
   amountEachLuna: bigint
-  claimCount: number
+  /**
+   * `null` creates an UNCAPPED drop (migration 025): no slot ceiling, no
+   * `expected_funding_luna` total, running for as long as custody can cover
+   * the next claim. Only legal here — an operator drop — never for a sponsor.
+   */
+  claimCount: number | null
   /** Omitted means {@link DEFAULT_EXPIRY_HOURS}, same as a sponsor draft. */
   expiryHours?: number
   /**
@@ -553,7 +559,7 @@ export async function createOperatorFundedDrop(
   assertDropShape(o.amountEachLuna, o.claimCount)
   const expiryHours = o.expiryHours ?? DEFAULT_EXPIRY_HOURS
   assertExpiryHours(expiryHours)
-  const expectedFundingLuna = o.amountEachLuna * BigInt(o.claimCount)
+  const expectedFundingLuna = o.claimCount === null ? null : o.amountEachLuna * BigInt(o.claimCount)
   const publicId = newPublicId()
 
   const client: PoolClient = await pool.connect()
@@ -565,7 +571,13 @@ export async function createOperatorFundedDrop(
     // same reasoning `createDraft` uses before its own INSERT. Weighs
     // concurrent sponsors' draft reservations, which `assertSolvent` below
     // deliberately does not: see point 2 of the docstring above.
-    await assertCapacityFor(client, controls, expectedFundingLuna)
+    //
+    // Skipped for an UNCAPPED drop (migration 025): it has no fixed total, so
+    // there is nothing to reserve against the optional aggregate cap here —
+    // each claim's own `assertSolvent` call is what protects the float.
+    if (expectedFundingLuna !== null) {
+      await assertCapacityFor(client, controls, expectedFundingLuna)
+    }
 
     // Inserted BEFORE the solvency check — see the docstring above for why:
     // `funding_source = 'operator'` alone makes `outstandingPrincipalLuna`
@@ -586,7 +598,7 @@ export async function createOperatorFundedDrop(
         o.message ?? null,
         o.claimCount,
         o.amountEachLuna.toString(),
-        expectedFundingLuna.toString(),
+        expectedFundingLuna === null ? null : expectedFundingLuna.toString(),
         expiryHours,
       ],
     )
@@ -618,9 +630,11 @@ interface DropRow {
   public_id: string
   sponsor_label: string
   message: string | null
-  claim_count: number
+  /** `null` for an uncapped drop (migration 025). */
+  claim_count: number | null
   amount_each_luna: string
-  expected_funding_luna: string
+  /** `null` together with `claim_count` (migration 025). */
+  expected_funding_luna: string | null
   state: DropState
   funding_tx_hash: string | null
   activated_height: string | null
@@ -656,7 +670,7 @@ function toPublic(row: DropRow): DropPublic {
     message: row.message,
     amountEach: formatNim(BigInt(row.amount_each_luna)),
     claimCount: row.claim_count,
-    remaining: Math.max(0, row.claim_count - reserved),
+    remaining: row.claim_count === null ? null : Math.max(0, row.claim_count - reserved),
     state: row.state,
     expiryHours: row.expiry_hours,
     expiresAt: row.expires_at,
@@ -831,6 +845,12 @@ export async function submitFunding(
   }
   if (tx.recipient !== chain.custodyAddress()) {
     throw new FundingRejectedError('wrong_recipient', 'funding was not sent to the custody address')
+  }
+  // Unreachable: `ACTIVATABLE_STATES` (checked above) never includes a drop
+  // born `live`, which is the only shape a NULL `expected_funding_luna`
+  // (migration 025) can have. Guarded rather than cast, on a money path.
+  if (drop.expected_funding_luna === null) {
+    throw new FundingRejectedError('drop_not_fundable', 'drop has no fixed funding total')
   }
   const expectedFundingLuna = BigInt(drop.expected_funding_luna)
   if (tx.valueLuna !== expectedFundingLuna) {

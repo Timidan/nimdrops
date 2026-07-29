@@ -320,14 +320,22 @@ export async function readControls(db: Queryable): Promise<Controls> {
  *    operator drop and nothing may be credited for it. Counting the drop here
  *    without changing that is what makes `ledgerBalanceLuna` fall by exactly
  *    this principal instead of staying flat against a liability nobody sees.
+ *  - `claim_count IS NULL` (migration 025) — an UNCAPPED drop, which the CHECK
+ *    that migration adds only permits for `funding_source = 'operator'`. It
+ *    has no `expected_funding_luna` to sum: it never promised a total, so it
+ *    owes nothing until a claim commits a payout. Its liability is the SUM of
+ *    its payout `outgoing_transfers` that are not yet finalized — money it HAS
+ *    committed to and not yet paid, on the same "finalized" definition below.
  *
- * The outgoing side subtracts only FINALIZED principal, and only for drops in
- * that same set, so a drop's funding and its payouts leave the sum together
- * when it settles. "Finalized" requires both the intent row to be `confirmed`
- * AND a `confirmed` on-chain attempt: `broadcast` is not `paid`, and principal
- * sent in an unconfirmed attempt stays outstanding until that attempt
- * finalizes. Both conditions err toward over-reporting liability, which is the
- * safe direction for a solvency check.
+ * The outgoing side of a CAPPED drop subtracts only FINALIZED principal from
+ * its `expected_funding_luna`, so its funding and its payouts leave the sum
+ * together when it settles. "Finalized" requires both the intent row to be
+ * `confirmed` AND a `confirmed` on-chain attempt: `broadcast` is not `paid`,
+ * and principal sent in an unconfirmed attempt stays outstanding until that
+ * attempt finalizes. Both conditions err toward over-reporting liability,
+ * which is the safe direction for a solvency check. An UNCAPPED drop has no
+ * total to subtract from, so it contributes the complement — every payout
+ * that is NOT yet finalized — instead.
  *
  * Network fees are excluded on purpose — the operator pre-funds them
  * separately, and they are covered by `configured_fee_reserve_luna`.
@@ -335,24 +343,44 @@ export async function readControls(db: Queryable): Promise<Controls> {
 export async function outstandingPrincipalLuna(db: Queryable): Promise<bigint> {
   const { rows } = await db.query<{ outstanding_luna: string }>(`
     WITH open_drops AS (
-      SELECT id, expected_funding_luna
+      SELECT id, claim_count, expected_funding_luna
       FROM drops
       WHERE (activated_height IS NOT NULL OR funding_source = 'operator')
         AND state NOT IN ('settled', 'refunded', 'cancelled')
     ),
+    capped_drops AS (
+      SELECT id, expected_funding_luna FROM open_drops WHERE claim_count IS NOT NULL
+    ),
+    uncapped_drops AS (
+      SELECT id FROM open_drops WHERE claim_count IS NULL
+    ),
     finalized_out AS (
       SELECT t.amount_luna
       FROM outgoing_transfers t
-      JOIN open_drops d ON d.id = t.drop_id
+      JOIN capped_drops d ON d.id = t.drop_id
       WHERE t.state = 'confirmed'
         AND EXISTS (
           SELECT 1 FROM transaction_attempts a
           WHERE a.transfer_id = t.id AND a.state = 'confirmed'
         )
+    ),
+    unfinalized_uncapped_out AS (
+      SELECT t.amount_luna
+      FROM outgoing_transfers t
+      JOIN uncapped_drops d ON d.id = t.drop_id
+      WHERE t.purpose = 'payout'
+        AND NOT (
+          t.state = 'confirmed'
+          AND EXISTS (
+            SELECT 1 FROM transaction_attempts a
+            WHERE a.transfer_id = t.id AND a.state = 'confirmed'
+          )
+        )
     )
     SELECT (
-      COALESCE((SELECT SUM(expected_funding_luna) FROM open_drops), 0)
+      COALESCE((SELECT SUM(expected_funding_luna) FROM capped_drops), 0)
       - COALESCE((SELECT SUM(amount_luna) FROM finalized_out), 0)
+      + COALESCE((SELECT SUM(amount_luna) FROM unfinalized_uncapped_out), 0)
     )::BIGINT AS outstanding_luna
   `)
   return BigInt(rows[0].outstanding_luna)

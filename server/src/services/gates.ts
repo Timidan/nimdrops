@@ -29,7 +29,8 @@ export interface ListedGame {
   /** Trivia difficulty, or null for a kind that has no tiers. */
   tier: string | null
   amountEachLuna: string
-  slotsRemaining: number
+  /** `null` for an uncapped drop (migration 025) — no slot ceiling exists. */
+  slotsRemaining: number | null
   expiresAt: string | null
   unlockRequiresTier: string | null
   /** The sponsor's public hint for `passphrase`; null for every other kind. */
@@ -88,8 +89,9 @@ export interface GameView {
    */
   secondsPerQuestion: number | null
   amountEachLuna: string
-  claimCount: number
-  slotsRemaining: number
+  /** `null` for an uncapped drop (migration 025). */
+  claimCount: number | null
+  slotsRemaining: number | null
   expiresAt: string | null
   state: string
 }
@@ -103,8 +105,8 @@ export async function loadGameView(pool: Pool, publicId: string): Promise<GameVi
     hint: string | null
     seconds_per_question: number | null
     amount_each_luna: string
-    claim_count: number
-    slots_remaining: number
+    claim_count: number | null
+    slots_remaining: number | null
     expires_at: Date | null
     state: string
   }>(
@@ -177,7 +179,7 @@ export async function listGames(pool: Pool): Promise<ListedGame[]> {
     public_id: string
     kind: GateKind
     amount_each_luna: string
-    slots_remaining: number
+    slots_remaining: number | null
     expires_at: Date | null
     tier: string | null
     unlock_requires_tier: string | null

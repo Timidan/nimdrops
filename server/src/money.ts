@@ -77,12 +77,22 @@ export function formatNim(luna: bigint): string {
   const frac = (luna % LUNA_PER_NIM).toString().padStart(5, '0').replace(/0+$/, '')
   return frac ? `${whole}.${frac}` : `${whole}`
 }
-export function assertDropShape(amountEachLuna: bigint, claimCount: number): void {
-  if (!Number.isInteger(claimCount) || claimCount < MIN_CLAIMS)
-    throw new DropShapeError(`a drop needs at least ${MIN_CLAIMS} people`)
+/**
+ * `claimCount: null` is an uncapped drop (migration 025): no headcount to
+ * floor or ceiling, so only the per-share amount is checked against
+ * {@link MAX_LUNA} directly rather than against `MAX_LUNA / claimCount`.
+ */
+export function assertDropShape(amountEachLuna: bigint, claimCount: number | null): void {
   if (amountEachLuna <= 0n) throw new DropShapeError('the amount must be more than zero')
   if (amountEachLuna < MIN_AMOUNT_EACH_LUNA)
     throw new DropShapeError(`each person must get at least ${formatNim(MIN_AMOUNT_EACH_LUNA)} NIM`)
+  if (claimCount === null) {
+    if (amountEachLuna > MAX_LUNA)
+      throw new DropShapeError('that amount is larger than any amount of NIM that exists')
+    return
+  }
+  if (!Number.isInteger(claimCount) || claimCount < MIN_CLAIMS)
+    throw new DropShapeError(`a drop needs at least ${MIN_CLAIMS} people`)
   if (claimCount > MAX_CLAIM_COUNT)
     throw new DropShapeError(`a drop cannot record more than ${MAX_CLAIM_COUNT} people`)
   if (amountEachLuna > MAX_LUNA / BigInt(claimCount))

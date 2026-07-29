@@ -353,7 +353,9 @@ function Upper({
         <ShareButton
           publicId={publicId}
           amount={amount}
-          canForward={!outcome && drop?.state === 'live' && drop.remaining > 0}
+          canForward={
+            !outcome && drop?.state === 'live' && (drop.remaining === null || drop.remaining > 0)
+          }
         />
         <CopyLinkButton publicId={publicId} />
       </nav>
@@ -380,10 +382,18 @@ function Tiles({ drop }: { drop: DropPublic }) {
     <div className="nd-tiles">
       <div className="nd-tile">
         <p>Shares left</p>
-        <b className="nd-num" data-testid="remaining">
-          {drop.remaining} of {drop.claimCount}
-        </b>
-        <Pips total={drop.claimCount} left={drop.remaining} />
+        {drop.claimCount === null ? (
+          <b className="nd-num" data-testid="remaining">
+            Open
+          </b>
+        ) : (
+          <>
+            <b className="nd-num" data-testid="remaining">
+              {drop.remaining} of {drop.claimCount}
+            </b>
+            <Pips total={drop.claimCount} left={drop.remaining} />
+          </>
+        )}
       </div>
       {drop.expiresAt ? (
         <div className="nd-tile">

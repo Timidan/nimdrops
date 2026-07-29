@@ -1283,6 +1283,43 @@ describe.skipIf(!hasDb)('drop drafts and exact funding activation (real Postgres
       )
       await expect(operatorDrop()).resolves.toBeDefined()
     })
+
+    // ---- migration 025: uncapped operator drops ------------------------------
+
+    function uncappedOperatorDrop(o: { amountEachLuna?: bigint } = {}) {
+      return createOperatorFundedDrop(pool, {
+        sponsorLabel: 'Operator',
+        amountEachLuna: o.amountEachLuna ?? AMOUNT_EACH,
+        claimCount: null,
+        gate: GATE,
+      })
+    }
+
+    it('creates an uncapped drop with claim_count and expected_funding_luna both NULL', async () => {
+      await floatOperator(FEE_FLOAT)
+
+      const created = await uncappedOperatorDrop()
+
+      const { rows } = await pool.query<{ claim_count: number | null; expected_funding_luna: string | null }>(
+        'SELECT claim_count, expected_funding_luna FROM drops WHERE public_id = $1',
+        [created.publicId],
+      )
+      expect(rows[0].claim_count).toBeNull()
+      expect(rows[0].expected_funding_luna).toBeNull()
+      // No claims yet, so this drop owes nothing — an uncapped drop's
+      // liability is its unfinalized payouts, and there are none.
+      expect(await outstandingPrincipalLuna(pool)).toBe(0n)
+    })
+
+    it('projects remaining and claimCount as null for an uncapped drop', async () => {
+      await floatOperator(FEE_FLOAT)
+      const created = await uncappedOperatorDrop()
+
+      const pub = await getPublic(pool, created.publicId)
+      expect(pub.claimCount).toBeNull()
+      expect(pub.remaining).toBeNull()
+      expect(pub.state).toBe('live')
+    })
   })
 
   // ---- public projection ----------------------------------------------------

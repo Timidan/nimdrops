@@ -1729,7 +1729,7 @@ function Live({
         header={<h2 className="nd-sheeth">Your drop is live</h2>}
         caption={
           <p className="nd-note">
-            {drop
+            {drop && drop.claimCount !== null
               ? `${drop.remaining} of ${drop.claimCount} shares are waiting, ${drop.amountEach} NIM each. Share the link: the first ${drop.claimCount} wallets to open it each get one.`
               : 'Share the link. Each wallet that opens it can claim one fixed share.'}
           </p>

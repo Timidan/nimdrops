@@ -127,8 +127,10 @@ export interface DropPublic {
   sponsorLabel: string
   message: string | null
   amountEach: string
-  claimCount: number
-  remaining: number
+  /** `null` for an uncapped drop — no slot ceiling exists. */
+  claimCount: number | null
+  /** `null` for an uncapped drop, never a guess at how many are left. */
+  remaining: number | null
   state: DropState
   /**
    * The window the sponsor chose, in hours. Present on every drop, funded or
@@ -283,8 +285,10 @@ export interface GameView {
   /** The sponsor's public hint for `passphrase`; null for every other kind. */
   hint: string | null
   amountEachLuna: string
-  claimCount: number
-  slotsRemaining: number
+  /** `null` for an uncapped drop. */
+  claimCount: number | null
+  /** `null` for an uncapped drop — never a guess at how many are left. */
+  slotsRemaining: number | null
   expiresAt: string | null
   state: DropState
   /** False when no wallet was named — the server cannot answer without one. */
@@ -297,7 +301,8 @@ export interface ListedGame {
   kind: GateKind
   tier: string | null
   amountEachLuna: string
-  slotsRemaining: number
+  /** `null` for an uncapped drop. */
+  slotsRemaining: number | null
   expiresAt: string | null
   unlockRequiresTier: string | null
   hint: string | null

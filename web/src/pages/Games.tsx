@@ -138,7 +138,9 @@ function GameCard({ game }: { game: ListedGame }) {
 
       <p className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs tabular-nums text-chalk/55">
         <span data-testid={`slots-${game.publicId}`}>
-          {game.slotsRemaining} {game.slotsRemaining === 1 ? 'share' : 'shares'} left
+          {game.slotsRemaining === null
+            ? 'Open'
+            : `${game.slotsRemaining} ${game.slotsRemaining === 1 ? 'share' : 'shares'} left`}
         </span>
         {game.expiresAt ? (
           <>

@@ -63,8 +63,8 @@ export interface AttestationResult {
   walletAddress: string
   /** This wallet already spent its grant on a claim. A further one is pointless. */
   alreadyClaimed: boolean
-  /** Unreserved slots at the moment of this call. Advisory. */
-  slotsRemaining: number
+  /** Unreserved slots at the moment of this call, or `null` for an uncapped drop. Advisory. */
+  slotsRemaining: number | null
 }
 
 export interface AttestedConfig {
@@ -215,7 +215,7 @@ export async function submitAttestation(
 
   const nonceHash = createHash('sha256').update(attestation.nonce).digest('hex')
   let alreadyClaimed = false
-  let slotsRemaining = 0
+  let slotsRemaining: number | null = null
 
   // Burning the nonce and issuing the grant are ONE transaction.
   //
@@ -257,7 +257,7 @@ export async function submitAttestation(
     // that never coexisted with the grant just written.
     const { rows: status } = await client.query<{
       already_claimed: boolean
-      slots_remaining: number
+      slots_remaining: number | null
     }>(
       `SELECT (g.consumed_claim_id IS NOT NULL) AS already_claimed,
               d.claim_count - (SELECT count(*)::int FROM claims c WHERE c.drop_id = d.id)
@@ -268,7 +268,7 @@ export async function submitAttestation(
       [o.gate.dropId, attestation.wallet],
     )
     alreadyClaimed = status[0]?.already_claimed ?? false
-    slotsRemaining = status[0]?.slots_remaining ?? 0
+    slotsRemaining = status[0]?.slots_remaining ?? null
 
     await client.query('COMMIT')
   } catch (err) {

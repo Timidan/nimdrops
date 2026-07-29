@@ -759,7 +759,7 @@ export async function depositReport(
 
   const { rows } = await pool.query<{
     public_id: string
-    expected_funding_luna: string
+    expected_funding_luna: string | null
     funding_tx_hash: string | null
   }>('SELECT public_id, expected_funding_luna, funding_tx_hash FROM drops')
 
@@ -796,7 +796,10 @@ export async function depositReport(
 
     const publicId = tx.dataUtf8.slice(MEMO_PREFIX.length)
     const drop = byPublicId.get(publicId)
-    if (!drop) {
+    // An uncapped drop (migration 025) has no `expected_funding_luna` and can
+    // never legitimately be funded this way — same treatment as a memo naming
+    // nothing at all, since there is no total here to compare the deposit to.
+    if (!drop || drop.expected_funding_luna === null) {
       unmatched.push({ ...base, reason: 'unknown_memo' })
       continue
     }

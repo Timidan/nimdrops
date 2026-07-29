@@ -208,7 +208,8 @@ interface ClaimDropRow {
   id: string
   state: string
   closing_reason: string | null
-  claim_count: number
+  /** `null` means uncapped (migration 025): no slot ceiling. */
+  claim_count: number | null
   amount_each_luna: string
   expires_at: Date | null
 }
@@ -567,21 +568,36 @@ export async function reserveClaim(pool: Pool, o: ReserveClaimInput): Promise<Cl
       payoutPermille = held[0].payout_permille
     }
 
-    // 5. Reserve the next slot; the last one closes the drop in this same
-    //    transaction, so no later claimer can ever see capacity again.
+    // The scored amount, floored to whole luna. NULL permille — every grant
+    // issued before scoring existed, and every kind without partial success —
+    // pays the full share. The number comes off the grant ROW, so this file
+    // still knows nothing about what a score is. Computed here, ahead of slot
+    // reservation, because an uncapped drop's solvency check below needs it.
+    const payoutLuna =
+      grantId !== null && payoutPermille !== null
+        ? (BigInt(locked.amount_each_luna) * BigInt(payoutPermille)) / 1000n
+        : BigInt(locked.amount_each_luna)
+
+    // 5. Reserve the next slot. A capped drop refuses at its ceiling and the
+    //    last slot closes the drop in this same transaction, so no later
+    //    claimer can ever see capacity again. An uncapped drop (migration 025,
+    //    `claim_count IS NULL`) has neither ceiling nor closing transition —
+    //    see step 7b below for what gates it instead.
     const { rows: counted } = await client.query<{ reserved: number }>(
       'SELECT count(*)::int AS reserved FROM claims WHERE drop_id = $1',
       [drop.id],
     )
     const slotIndex = counted[0].reserved
-    if (slotIndex >= locked.claim_count) {
-      throw new ClaimRejectedError('exhausted', 'every slot in this drop is taken')
-    }
-    if (slotIndex + 1 === locked.claim_count) {
-      await client.query(
-        `UPDATE drops SET state = 'closing', closing_reason = 'exhausted' WHERE id = $1`,
-        [drop.id],
-      )
+    if (locked.claim_count !== null) {
+      if (slotIndex >= locked.claim_count) {
+        throw new ClaimRejectedError('exhausted', 'every slot in this drop is taken')
+      }
+      if (slotIndex + 1 === locked.claim_count) {
+        await client.query(
+          `UPDATE drops SET state = 'closing', closing_reason = 'exhausted' WHERE id = $1`,
+          [drop.id],
+        )
+      }
     }
 
     // 6. This request — and only this request — is now committing a NEW slot,
@@ -602,20 +618,40 @@ export async function reserveClaim(pool: Pool, o: ReserveClaimInput): Promise<Cl
        VALUES ($1, $2, $3, $4, $5, 'reserved')`,
       [claimId, drop.id, slotIndex, recipient, hashToken(token)],
     )
-    // The scored amount, floored to whole luna. NULL permille — every grant
-    // issued before scoring existed, and every kind without partial success —
-    // pays the full share. The number comes off the grant ROW, so this file
-    // still knows nothing about what a score is.
-    const payoutLuna =
-      grantId !== null && payoutPermille !== null
-        ? (BigInt(locked.amount_each_luna) * BigInt(payoutPermille)) / 1000n
-        : BigInt(locked.amount_each_luna)
     await client.query(
       `INSERT INTO outgoing_transfers (
          idempotency_key, purpose, drop_id, claim_id, recipient_address, amount_luna, state
        ) VALUES ($1, 'payout', $2, $3, $4, $5, 'queued')`,
       [`payout:${claimId}`, drop.id, claimId, recipient, payoutLuna.toString()],
     )
+
+    // 7b. Uncapped drops (migration 025) have no `expected_funding_luna` that
+    //     already counts this payout as outstanding, unlike a capped drop's —
+    //     so this is where solvency for it is asserted, exactly the way
+    //     `createOperatorFundedDrop` asserts a drop's own principal: with
+    //     `0n`, because the row just inserted above is ALREADY counted by
+    //     `outstandingPrincipalLuna` (same client, same open transaction —
+    //     Postgres always sees a session's own uncommitted writes), not
+    //     because nothing is owed. A throw here rolls back everything this
+    //     transaction has written so far — the claim row, the transfer row,
+    //     the consumed challenge, the spent grant — via the catch below, so a
+    //     refusal leaves neither the claim nor the transfer behind.
+    //
+    //     Deliberately NOT `assertSolvent(client, controls, payoutLuna)`
+    //     BEFORE this insert. `assertSolvent`'s `addLuna` is added to both
+    //     sides of its comparison (`ledger + addLuna >= outstanding + addLuna
+    //     + reserve`), so it cancels out algebraically — correct ONLY when
+    //     `addLuna` is credited to the ledger at the same instant it becomes
+    //     a liability, which is true for a sponsor's activation
+    //     (`ledgerMovementsLuna` counts it) and false for an uncapped payout
+    //     (nothing enters custody). Passing `payoutLuna` before this row
+    //     existed would have checked pre-existing solvency only, regardless
+    //     of the payout's size, and let the true post-claim liability run
+    //     past the float by exactly one share every time.
+    if (locked.claim_count === null) {
+      await assertSolvent(client, controls, 0n)
+    }
+
     // The grant is spent HERE, in the transaction that created the claim it paid
     // for. A rollback un-spends it, so a claim refused after this point — by the
     // limiter hook, by a constraint — leaves the claimant free to try again. A

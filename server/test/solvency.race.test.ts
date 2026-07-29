@@ -52,7 +52,8 @@ const CUSTODY = 'NQ07 CUSTODY'
 // ---- fixtures ---------------------------------------------------------------
 
 interface DropInput {
-  claimCount: number
+  /** `null` is an uncapped drop (migration 025) — only legal for `fundingSource: 'operator'`. */
+  claimCount: number | null
   amountEachLuna: bigint
   state?: string
   activated?: boolean
@@ -77,6 +78,8 @@ async function insertDrop(db: Queryable, o: DropInput): Promise<{ id: string }> 
       : activated
         ? new Date(Date.now() + 86_400_000)
         : null
+  const expectedFundingLuna =
+    o.claimCount === null ? null : (o.amountEachLuna * BigInt(o.claimCount)).toString()
   const { rows } = await db.query<{ id: string }>(
     `INSERT INTO drops (
        public_id, sponsor_label, claim_count, amount_each_luna, expected_funding_luna,
@@ -89,7 +92,7 @@ async function insertDrop(db: Queryable, o: DropInput): Promise<{ id: string }> 
       'Sponsor',
       o.claimCount,
       o.amountEachLuna.toString(),
-      (o.amountEachLuna * BigInt(o.claimCount)).toString(),
+      expectedFundingLuna,
       state,
       activated ? randomUUID() : null,
       activated ? '1000' : null,
@@ -372,6 +375,59 @@ describe.skipIf(!hasDb)('solvency and custody controls (real Postgres)', () => {
     })
     // The terminal one contributes nothing extra.
     expect(await outstandingPrincipalLuna(pool)).toBe(500n)
+  })
+
+  // ---- migration 025: uncapped operator drops ---------------------------------
+  //
+  // An uncapped drop (`claim_count IS NULL`) has no `expected_funding_luna` to
+  // sum: its liability is the payouts it has actually committed to and not yet
+  // finalized, so it owes nothing until a claim writes one, and it drops back
+  // out the moment that payout finalizes — the same "finalized" definition a
+  // capped drop's principal already uses.
+
+  it('an uncapped drop contributes nothing until a payout is committed, and only its unfinalized payouts after that', async () => {
+    const d = await insertDrop(pool, { claimCount: null, amountEachLuna: 100n, fundingSource: 'operator' })
+    // No claims yet: no expected_funding_luna to sum, no payouts written.
+    expect(await outstandingPrincipalLuna(pool)).toBe(0n)
+
+    const c1 = await insertClaim(pool, d.id, 0)
+    await insertTransfer(pool, { purpose: 'payout', dropId: d.id, claimId: c1.id, amountLuna: 100n, state: 'queued' })
+    // One unfinalized payout: the drop's liability rises by exactly it.
+    expect(await outstandingPrincipalLuna(pool)).toBe(100n)
+
+    const c2 = await insertClaim(pool, d.id, 1)
+    await insertTransfer(pool, { purpose: 'payout', dropId: d.id, claimId: c2.id, amountLuna: 100n, state: 'queued' })
+    // A second reservation rises the same liability again — uncapped, so
+    // nothing here stops the count.
+    expect(await outstandingPrincipalLuna(pool)).toBe(200n)
+
+    const t3 = await insertTransfer(pool, {
+      purpose: 'payout',
+      dropId: d.id,
+      claimId: (await insertClaim(pool, d.id, 2)).id,
+      amountLuna: 100n,
+      state: 'confirmed',
+    })
+    await insertAttempt(pool, { transferId: t3.id, state: 'confirmed' })
+    // A FINALIZED payout (confirmed transfer, confirmed attempt) drops back out
+    // of the liability — it is money that already left, not money still owed.
+    expect(await outstandingPrincipalLuna(pool)).toBe(200n)
+  })
+
+  it('a capped operator drop is unaffected by the uncapped arithmetic (regression)', async () => {
+    const d = await insertDrop(pool, { claimCount: 5, amountEachLuna: 100n, fundingSource: 'operator' })
+    expect(await outstandingPrincipalLuna(pool)).toBe(500n)
+
+    const c = await insertClaim(pool, d.id, 0)
+    const t = await insertTransfer(pool, { purpose: 'payout', dropId: d.id, claimId: c.id, amountLuna: 100n, state: 'confirmed' })
+    await insertAttempt(pool, { transferId: t.id, state: 'confirmed' })
+    // Exactly the pre-025 formula: expected_funding_luna minus the one
+    // finalized payout, nothing added for its being an operator drop.
+    expect(await outstandingPrincipalLuna(pool)).toBe(400n)
+  })
+
+  it('a sponsor drop cannot be created uncapped (drops_uncapped_requires_operator)', async () => {
+    await expect(insertDrop(pool, { claimCount: null, amountEachLuna: 100n, fundingSource: 'sponsor' })).rejects.toThrow()
   })
 
   // ---- migration 015: the cap is a kill switch, solvency is the invariant ----

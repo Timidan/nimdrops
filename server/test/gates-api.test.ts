@@ -140,16 +140,27 @@ describe.skipIf(!hasDb)('gate HTTP surface', () => {
     listed?: boolean
     config?: Record<string, unknown>
     gated?: boolean
+    /** `claim_count IS NULL` (migration 025) — only legal with `funding_source = 'operator'`. */
+    uncapped?: boolean
   } = {}): Promise<string> {
     const publicId = Array.from({ length: 22 }, (_, i) => 'abcdefghijklmnopqrstuvwxyz0123456789'[(i * 7 + Math.floor(Math.random() * 36)) % 36]).join('')
-    const { rows } = await pool.query<{ id: string }>(
-      `INSERT INTO drops (
-         public_id, sponsor_label, claim_count, amount_each_luna,
-         expected_funding_luna, state, expires_at
-       ) VALUES ($1, 'quiz night', 20, 100000, 2000000, 'live', now() + interval '24 hours')
-       RETURNING id`,
-      [publicId],
-    )
+    const { rows } = o.uncapped
+      ? await pool.query<{ id: string }>(
+          `INSERT INTO drops (
+             public_id, sponsor_label, claim_count, amount_each_luna,
+             expected_funding_luna, state, expires_at, funding_source
+           ) VALUES ($1, 'quiz night', NULL, 100000, NULL, 'live', now() + interval '24 hours', 'operator')
+           RETURNING id`,
+          [publicId],
+        )
+      : await pool.query<{ id: string }>(
+          `INSERT INTO drops (
+             public_id, sponsor_label, claim_count, amount_each_luna,
+             expected_funding_luna, state, expires_at
+           ) VALUES ($1, 'quiz night', 20, 100000, 2000000, 'live', now() + interval '24 hours')
+           RETURNING id`,
+          [publicId],
+        )
     if (o.gated === false) return publicId
     const kind = o.kind ?? 'trivia'
     const config =
@@ -234,6 +245,22 @@ describe.skipIf(!hasDb)('gate HTTP surface', () => {
       'unlockRequiresTier',
     ])
     expect(JSON.stringify(body)).not.toContain('NQ')
+  })
+
+  // ---- migration 025: uncapped operator drops --------------------------------
+
+  it('reports slotsRemaining and claimCount as null for an uncapped drop, in both projections', async () => {
+    const publicId = await game({ listed: true, uncapped: true })
+
+    const list = (await json(await get('/api/games'))) as {
+      games: { publicId: string; slotsRemaining: number | null }[]
+    }
+    const listed = list.games.find((g) => g.publicId === publicId)
+    expect(listed?.slotsRemaining).toBeNull()
+
+    const single = await json(await get(`/api/games/${publicId}`))
+    expect(single.claimCount).toBeNull()
+    expect(single.slotsRemaining).toBeNull()
   })
 
   it('answers the catalogue even with no gates configured', async () => {

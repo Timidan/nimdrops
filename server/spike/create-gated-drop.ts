@@ -103,7 +103,14 @@ import {
   formatNim,
   lunaFromNim,
 } from '../src/money'
-import { DEFAULT_EXPIRY_HOURS, createDraft, createOperatorFundedDrop, fundingMemoFor } from '../src/services/drops'
+import {
+  DEFAULT_EXPIRY_HOURS,
+  MAX_EXPIRY_HOURS,
+  MIN_EXPIRY_HOURS,
+  createDraft,
+  createOperatorFundedDrop,
+  fundingMemoFor,
+} from '../src/services/drops'
 import {
   type CapacitySnapshot,
   CapExceededError,
@@ -152,14 +159,17 @@ create ONE gated drop as an unfunded draft.
 
 every kind:
   --kind trivia|passphrase|attested
-  --claims <2..20>            slots, one payout each
+  --claims <n>                slots, one payout each. Not accepted with --uncapped.
   --nim-each <decimal NIM>    exact amount per claim, e.g. 1 or 0.5
   --listed[=true|false]       show it in GET /api/games (default false)
   --label <text>              sponsor label on the claim screen (default "NimDrops")
   --message <text>            optional note on the claim screen
+  --expiry-hours <n>          claim window, ${MIN_EXPIRY_HOURS}..${MAX_EXPIRY_HOURS} (default ${DEFAULT_EXPIRY_HOURS})
   --operator-funded           create it LIVE now, funded from the operator float —
                                no draft, no funding memo, no fund-one-drop.ts step.
                                Refused outright (not warned) if the float is short.
+  --uncapped                  no slot ceiling: runs while custody can cover the next
+                               claim. Only valid together with --operator-funded.
 
 --kind trivia:
   --tier novice|easy|medium|hard
@@ -185,6 +195,7 @@ const VALUE_FLAGS = new Set([
   '--nim-each',
   '--label',
   '--message',
+  '--expiry-hours',
   '--tier',
   '--unlock-requires',
   '--questions',
@@ -194,7 +205,7 @@ const VALUE_FLAGS = new Set([
   '--attester-key',
   '--max-age',
 ])
-const SWITCH_FLAGS = new Set(['--listed', '--operator-funded', '--help'])
+const SWITCH_FLAGS = new Set(['--listed', '--operator-funded', '--uncapped', '--help'])
 
 // ---------------------------------------------------------------------------
 // output
@@ -500,11 +511,34 @@ async function run(): Promise<void> {
   assert(KINDS.includes(kindRaw as Kind), `--kind must be one of ${KINDS.join(', ')}`)
   const kind = kindRaw as Kind
 
-  const claimCount = integer(flags, '--claims')
-  // `createDraft` runs `assertCaps` too. Running it first means a refusal
-  // arrives before any output rather than half way through a report — and as a
-  // REFUSAL: a `DropShapeError` is an argument an operator can fix, so it must
-  // not reach the top-level handler and print a stack trace at them.
+  const operatorFunded = boolFlag(flags, '--operator-funded')
+  const uncapped = boolFlag(flags, '--uncapped')
+  assert(
+    !uncapped || operatorFunded,
+    '--uncapped is only valid together with --operator-funded: a sponsor drop must always stay ' +
+      "bounded, because a sponsor's exposure must remain knowable (migration 025).",
+  )
+  assert(
+    !(uncapped && flags.has('--claims')),
+    '--uncapped runs with no slot count. --claims must not be given alongside it.',
+  )
+  const claimCount = uncapped ? null : integer(flags, '--claims')
+
+  const expiryHoursRaw = flags.get('--expiry-hours')
+  const expiryHours = expiryHoursRaw === undefined ? undefined : Number(expiryHoursRaw)
+  if (expiryHours !== undefined) {
+    assert(
+      Number.isInteger(expiryHours) && expiryHours >= MIN_EXPIRY_HOURS && expiryHours <= MAX_EXPIRY_HOURS,
+      `--expiry-hours must be a whole number between ${MIN_EXPIRY_HOURS} and ${MAX_EXPIRY_HOURS}, ` +
+        `got ${JSON.stringify(expiryHoursRaw)}`,
+    )
+  }
+
+  // `createDraft`/`createOperatorFundedDrop` run `assertCaps` too. Running it
+  // first means a refusal arrives before any output rather than half way
+  // through a report — and as a REFUSAL: a `DropShapeError` is an argument an
+  // operator can fix, so it must not reach the top-level handler and print a
+  // stack trace at them.
   const amountEachLuna = (() => {
     try {
       const luna = lunaFromNim(required(flags, '--nim-each'))
@@ -517,18 +551,20 @@ async function run(): Promise<void> {
         // widths of the columns. How big a drop is, is the sponsor's decision;
         // what the deployment can actually cover is the solvency invariant's.
         fail(
-          `${err.message} — ${claimCount} × ${flags.get('--nim-each')} NIM. A drop needs at least ` +
-            `${MIN_CLAIMS} claims, at most ${MAX_CLAIM_COUNT}, and a total under ` +
-            `${nim(MAX_LUNA)} (money.ts).`,
+          claimCount === null
+            ? `${err.message} — ${flags.get('--nim-each')} NIM each, uncapped. Each share must be ` +
+                `under ${nim(MAX_LUNA)} (money.ts).`
+            : `${err.message} — ${claimCount} × ${flags.get('--nim-each')} NIM. A drop needs at least ` +
+                `${MIN_CLAIMS} claims, at most ${MAX_CLAIM_COUNT}, and a total under ` +
+                `${nim(MAX_LUNA)} (money.ts).`,
         )
       }
       throw err
     }
   })()
-  const expectedFundingLuna = amountEachLuna * BigInt(claimCount)
+  const expectedFundingLuna = claimCount === null ? null : amountEachLuna * BigInt(claimCount)
 
   const listed = boolFlag(flags, '--listed')
-  const operatorFunded = boolFlag(flags, '--operator-funded')
   const sponsorLabel = flags.get('--label')?.trim() || 'NimDrops'
   assert(
     sponsorLabel.length <= MAX_LABEL_CHARS,
@@ -555,9 +591,15 @@ async function run(): Promise<void> {
   field('listed', listed)
   field('label', JSON.stringify(sponsorLabel))
   if (message !== undefined) field('message', JSON.stringify(message))
-  field('claims', claimCount)
+  field('claims', claimCount === null ? 'uncapped' : claimCount)
   field('each', `${nim(amountEachLuna)} (${amountEachLuna} luna)`)
-  field('total', `${nim(expectedFundingLuna)} (${expectedFundingLuna} luna)`)
+  field(
+    'total',
+    expectedFundingLuna === null
+      ? 'no fixed total — uncapped'
+      : `${nim(expectedFundingLuna)} (${expectedFundingLuna} luna)`,
+  )
+  field('claim window', `${expiryHours ?? DEFAULT_EXPIRY_HOURS}h`)
   for (const [label, value] of lines) field(label, value)
 
   const pool: pg.Pool = getPool()
@@ -627,6 +669,7 @@ async function run(): Promise<void> {
         ...(message === undefined ? {} : { message }),
         amountEachLuna,
         claimCount,
+        ...(expiryHours === undefined ? {} : { expiryHours }),
         gate: { kind, listed, config },
       })
     } catch (err) {
@@ -660,7 +703,8 @@ async function run(): Promise<void> {
     field('public id', drop.publicId)
     field('kind', `${kind}${listed ? ' (listed)' : ' (unlisted)'}`)
     field('funding', 'the operator float — no funding transaction, no memo, nothing to send')
-    field('claim window', `${DEFAULT_EXPIRY_HOURS}h, starting now`)
+    field('slots', uncapped ? 'uncapped — runs while custody can cover the next claim' : 'fixed')
+    field('claim window', `${expiryHours ?? DEFAULT_EXPIRY_HOURS}h, starting now`)
 
     printCapacity(
       'live principal after this drop',
@@ -676,11 +720,19 @@ async function run(): Promise<void> {
   }
 
   // -- 4. the draft ----------------------------------------------------------
+  // `uncapped` (asserted above) is only ever true together with
+  // --operator-funded, and that branch already returned — so `claimCount` is
+  // a real number on every path that reaches here. Narrowed explicitly rather
+  // than cast, since the two facts live in different flags.
+  if (claimCount === null) {
+    fail('unreachable: an uncapped run always takes --operator-funded, which returns above')
+  }
   const draft = await createDraft(pool, chain, {
     sponsorLabel,
     ...(message === undefined ? {} : { message }),
     amountEachLuna,
     claimCount,
+    ...(expiryHours === undefined ? {} : { expiryHours }),
   })
   const memo = fundingMemoFor(draft.publicId)
   assert(

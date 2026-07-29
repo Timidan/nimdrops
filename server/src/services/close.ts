@@ -354,6 +354,14 @@ export async function closeDropBySponsor(
     }
     if (result.outcome === 'skipped') throw skipRejection(o.publicId, result.reason, result.state)
 
+    if (result.unclaimedSlots === null) {
+      // Unreachable: `authorizeSponsor` above already refused any drop whose
+      // `refund_address` is NULL, which is every operator (capped or
+      // uncapped, migration 025) drop for its whole life — the only kind
+      // `closeLiveDrop` ever reports a null slot count for.
+      throw new CloseRejectedError('not_the_funder', 'only the funding wallet can close this drop')
+    }
+
     return {
       reservedClaims: result.reservedClaims,
       unclaimedSlots: result.unclaimedSlots,

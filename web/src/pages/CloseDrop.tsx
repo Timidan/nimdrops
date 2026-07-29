@@ -65,7 +65,10 @@ export interface CloseDropProps {
  */
 export function unclaimedNim(drop: DropPublic): string | null {
   const each = lunaFromNim(drop.amountEach)
-  if (each === null || drop.remaining <= 0) return null
+  // `remaining` is only ever null for an uncapped drop, and only an operator
+  // can create one — a sponsor's own drop, which is the only kind this screen
+  // is ever reached for, is always capped. Guarded rather than assumed.
+  if (each === null || drop.remaining === null || drop.remaining <= 0) return null
   return formatNim(each * BigInt(drop.remaining))
 }
 
@@ -261,7 +264,8 @@ function Confirm({
   onClose: () => void
   publicId: string
 }) {
-  const claimed = drop ? drop.claimCount - drop.remaining : 0
+  const claimed =
+    drop && drop.claimCount !== null && drop.remaining !== null ? drop.claimCount - drop.remaining : 0
 
   return (
     <>
@@ -289,7 +293,9 @@ function Confirm({
         }
         caption={
           drop
-            ? `${drop.sponsorLabel} · ${drop.remaining} of ${drop.claimCount} shares are still unclaimed`
+            ? drop.claimCount === null
+              ? `${drop.sponsorLabel} · open drop`
+              : `${drop.sponsorLabel} · ${drop.remaining} of ${drop.claimCount} shares are still unclaimed`
             : 'Reading this drop…'
         }
       >

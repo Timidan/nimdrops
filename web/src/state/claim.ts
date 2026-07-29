@@ -163,11 +163,15 @@ export function stateForDrop(drop: DropPublic): ClaimUiState {
     case 'manual_review':
       return 'paused'
     case 'live':
-      return drop.remaining > 0 ? 'ready' : 'exhausted'
+      // `null` is an uncapped drop: it has no slot count to run out of, so it
+      // stays `ready` for as long as `state` itself says `live`.
+      return drop.remaining === null || drop.remaining > 0 ? 'ready' : 'exhausted'
     case 'settled':
-      return drop.remaining === 0 ? 'exhausted' : 'expired'
     case 'closing':
     case 'refunded':
+      // An uncapped drop can never be `exhausted` — there is no count to hit
+      // zero — so `remaining === 0` is already false for it and this falls
+      // through to the ordinary expiry.
       return drop.remaining === 0 ? 'exhausted' : 'expired'
     default:
       return 'expired'
