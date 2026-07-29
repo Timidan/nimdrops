@@ -41,6 +41,7 @@ export default function MyDrops({ discoverBridge = resolveBridge }: MyDropsProps
     }
 
     try {
+      await bridge.bridge.address()
       const challenge = await requestCreatorChallenge()
       setStage('signing')
       const signed = await bridge.bridge.sign(challenge.message)
@@ -82,8 +83,8 @@ export default function MyDrops({ discoverBridge = resolveBridge }: MyDropsProps
           {stage !== 'ready' || result === null ? (
             <section data-testid="creator-auth" className="mt-5">
               <p className="max-w-[65ch] text-sm leading-relaxed text-chalk/65">
-                Approve one wallet signature to see every funded drop from that wallet. This reads
-                your history. It does not create a transaction or send NIM.
+                Approve wallet access, then one signature, to see every funded drop from that
+                account. This reads your history. It does not create a transaction or send NIM.
               </p>
               <button type="button" className="nd-action mt-7" disabled={busy} onClick={() => void load()}>
                 {stage === 'signing'

@@ -93,6 +93,40 @@ describe('MyDrops', () => {
     )
   })
 
+  it('shares the wallet account before requesting its management signature', async () => {
+    const wallet = bridge()
+    let accountShared = false
+    wallet.address = vi.fn(async () => {
+      accountShared = true
+      return WALLET
+    })
+    wallet.sign = vi.fn(async () => {
+      if (!accountShared) throw new Error('account access was not approved')
+      return { publicKey: 'a'.repeat(64), signature: 'b'.repeat(128) }
+    })
+    installFetch([
+      {
+        publicId: 'Ab3Cd4Ef5Gh6Ij7Kl8Mn9O',
+        sponsorLabel: 'Nimiq Community',
+        message: null,
+        amountEach: '2.5',
+        claimCount: 5,
+        remaining: 5,
+        state: 'live',
+        expiryHours: 24,
+        expiresAt: '2026-07-30T12:00:00.000Z',
+        closingReason: null,
+        gateKind: null,
+        createdAt: '2026-07-29T12:00:00.000Z',
+      },
+    ])
+    mount(wallet)
+
+    fireEvent.click(screen.getByRole('button', { name: /show my drops/i }))
+
+    expect(await screen.findByTestId('creator-drop-Ab3Cd4Ef5Gh6Ij7Kl8Mn9O')).toBeTruthy()
+  })
+
   it('shows an honest empty state for a wallet with no funded drops', async () => {
     installFetch([])
     mount()
