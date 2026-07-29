@@ -455,7 +455,7 @@ describe('Game — trivia outcomes', () => {
     const failed = await screen.findByTestId('trivia-failed')
     expect(failed.textContent).toMatch(/this attempt has ended/i)
     expect(failed.textContent).toMatch(/answered 2 of 5/i)
-    expect(failed.textContent).toMatch(/3 minutes/)
+    expect(failed.textContent).toMatch(/2 minutes/)
     expect(failed.textContent).toMatch(/nothing has been lost/i)
 
     // Never the wallet's fault, and never a reveal of the answer.
