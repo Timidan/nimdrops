@@ -1,257 +1,177 @@
-# NimDrops
+<div align="center">
 
-Fund one NIM campaign with a single wallet approval, share one link, and let a fixed number of wallets each claim one equal payment.
+<img src="web/public/brand/lockup.svg" alt="NimDrops" height="64">
 
-An organizer who wants to hand 100 people 2 NIM each has, today, two options inside a wallet: approve a hundred separate payments, or collect a hundred addresses first. Neither scales past a small room. NimDrops replaces both with one funding transaction and one shareable HTTPS link. The sponsor picks the amount per person and the number of people; the total is derived exactly, with no remainder and no randomness. Each wallet that opens the link may sign once and receive that exact amount, first come first served. Whatever nobody claims goes back to the sponsor.
+**One funding transaction. One link. A fixed share each.**
 
-Red packets are established prior art — Binance and WeChat have shipped them for years, and NimDrops does not claim to have invented the format. The Nimiq-specific wedge is narrower and worth stating plainly: **one sponsor approval and one funding transaction produce one externally shareable link for many deterministic recipients**, inside a payments app people already have. That is a different shape from a Nimiq Cashlink (one recipient) and from a tip page (incoming, many payers). It is also custodial, which is why the disclosure below sits above the feature list rather than under it.
+[![License: MIT](https://img.shields.io/badge/License-MIT-FF4D14.svg)](./LICENSE)
+[![Node](https://img.shields.io/badge/Node-%E2%89%A522-339933?logo=node.js&logoColor=white)](https://nodejs.org)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org)
+[![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev)
+[![Postgres](https://img.shields.io/badge/Postgres-16-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org)
+[![Nimiq](https://img.shields.io/badge/Nimiq-Albatross-FFB300)](https://nimiq.com)
+
+[How it works](#-how-it-works) · [Architecture](#-architecture) · [Quickstart](#-quickstart) · [Operating it](#-operating-it) · [Security](#-security-and-threat-boundary)
+
+</div>
 
 ---
 
-## Custody disclosure
+A sponsor who wants to hand 100 people 2 NIM each has two options inside a wallet today: approve a hundred separate payments, or collect a hundred addresses first. Neither scales past a small room.
+
+NimDrops replaces both with **one funding transaction and one shareable HTTPS link**. The sponsor picks the amount per person and the number of people; the total is derived exactly, in integer luna, with no remainder and no randomness. Each wallet that opens the link may sign once and receive that exact amount, first come first served. Whatever nobody claims goes back to the sponsor.
+
+Red packets are established prior art — Binance and WeChat have shipped them for years. The Nimiq-specific wedge is narrower and worth stating plainly: one sponsor approval produces one externally shareable link for many deterministic recipients, inside a payments app people already have. That is a different shape from a Nimiq Cashlink (one recipient) and from a tip page (incoming, many payers).
+
+<div align="center">
+<table>
+<tr>
+<td width="25%"><img src="docs/screenshots/sealed-envelope.png" alt="A sealed red envelope with a wax seal, captioned 'Hold to open — nothing is signed yet'"></td>
+<td width="25%"><img src="docs/screenshots/claim.png" alt="The claim screen showing 5 NIM, shares left, time remaining and the sponsor's message"></td>
+<td width="25%"><img src="docs/screenshots/claimed.png" alt="Confirmation that the payment is on the Nimiq blockchain, with the transaction hash"></td>
+<td width="25%"><img src="docs/screenshots/share-link.png" alt="The same link on a device without a wallet, offering a deep link and a QR code"></td>
+</tr>
+<tr>
+<td align="center"><sub><b>Sealed</b><br>Holding costs nothing<br>and signs nothing</sub></td>
+<td align="center"><sub><b>Opened</b><br>The amount is visible<br>before any signature</sub></td>
+<td align="center"><sub><b>Paid</b><br>Only after finality,<br>with the receipt</sub></td>
+<td align="center"><sub><b>No wallet</b><br>A finished state,<br>not an error</sub></td>
+</tr>
+</table>
+</div>
+
+## <img src="web/public/brand/mark.svg" width="18" alt=""> Custody disclosure
 
 Read this before funding anything.
 
-- **Funds are temporarily held by the NimDrops operator.** Between the moment your funding transaction finalizes and the moment each payout finalizes, the NIM sits in a custody wallet controlled by the operator, not in a smart contract and not in your wallet. "Environment variable" and "open-source signer" are not security boundaries.
-- **There is no on-chain escrow, and there cannot be one in this shape.** A Nimiq HTLC pays one named recipient. A drop pays a list of people nobody knows at funding time, so no contract on this chain can express it. That is the reason a person holds the money, not an implementation shortcut.
-- **Nothing caps the size of a drop, so the amount at risk is whatever sponsors have funded and nobody has claimed yet.** This used to say the mitigation was small exposure and hard caps. It is not, because the caps are gone: how much a drop holds and how many people it is split across are the sponsor's decisions. `GET /api/custody` publishes the live unclaimed total, and the create screen shows it above the fund button. What remains, and none of it is a cryptographic guarantee, is: a ledger-derived solvency check that refuses to create a liability the books cannot cover, a single advisory-locked signer, an operator pause switch that stops every payment at once, and 64 blocks of finality before any funding counts. An operator can also set `custody_controls.max_live_principal_luna` as a kill switch; it is NULL by default.
-- **Claims are fixed, first-come-first-served, and one per verified wallet.** There is **no proof of unique personhood.** A wallet signature proves control of one address. It does not prove one human. Anyone able to produce signatures from several wallets can claim several shares of the same drop.
-- **Expiry is a window the sponsor chooses, counted from finalized activation** and not from when you started the draft. It is between 1 hour and 14 days, defaulting to 24 hours; the floor stops a drop expiring before anyone could realistically open the link, and the ceiling bounds how long the operator holds a sponsor's NIM. The value is fixed when the draft is created, applied at activation, and no request body can change it afterwards (migration `016`). At expiry the drop stops accepting new claims, every already-reserved claim is still honoured, and exactly one refund is created for the unallocated value: `(claim_count − reserved_claims) × amount_each`. The refund goes to the address that sent the verified funding transaction and to no other address. No request body can change it.
-- **The sponsor can end their own drop early, and only the sponsor can.** The wallet that sent the funding transaction can close a live drop at any time — there is no minimum age — and take back the unclaimed remainder. It is the same transition expiry performs, triggered by a signature instead of by the clock, and it runs one implementation: claims already reserved are honoured and paid in full, exactly one refund is created for `(claim_count − reserved_claims) × amount_each`, and it goes to the funding address and to no other address. Authorization is a one-use, five-minute wallet signature bound to that drop and to the close action, consumed inside the same transaction that performs the close (migration `017`), and the signing address is checked against the recorded funding address under the same lock a claim takes. Closing is irreversible: a closed drop cannot be reopened. Anyone who opens the link afterwards is told the sponsor closed it.
-- **Payouts and refunds wait for chain finality and can enter manual review.** NimDrops does not call a claim "paid" until its transaction is 64 blocks deep — the wallet's own `confirmed` state is not sufficient. During an RPC or signer incident a transfer is parked in `manual_review` and an operator resolves it by hand. Money is never silently re-sent, and a reserved claimant's share is never quietly turned into a sponsor refund.
-- **Wallet addresses and transactions are public and permanent on-chain.** Anyone can see who funded a drop and who was paid from it. The app itself retains only the minimum operational records described in [PRIVACY.md](./PRIVACY.md).
+- **Funds are temporarily held by the operator.** Between the moment your funding transaction finalizes and the moment each payout finalizes, the NIM sits in a custody wallet controlled by the operator — not in a smart contract, not in your wallet. "Environment variable" and "open-source signer" are not security boundaries.
+- **There is no on-chain escrow, and there cannot be one in this shape.** A Nimiq HTLC pays one named recipient. A drop pays a list of people nobody knows at funding time, so no contract on this chain can express it. That is why a person holds the money, not an implementation shortcut.
+- **Nothing caps the size of a drop.** The amount at risk is whatever sponsors have funded and nobody has claimed yet. `GET /api/custody` publishes the live unclaimed total, and the create screen shows it above the fund button. What protects it is operational, not cryptographic: a ledger-derived solvency check that refuses to create a liability the books cannot cover, a single advisory-locked signer, an operator pause switch that stops every payment at once, and 64 blocks of finality before any funding counts.
+- **There is no proof of unique personhood.** A wallet signature proves control of one address, not one human. Anyone able to produce signatures from several wallets can claim several shares of the same drop. The promise is *one claim per verified wallet per drop*, and never more than that.
+- **Expiry is a window the sponsor chooses**, from 1 hour to 14 days, defaulting to 24, counted from finalized activation. At expiry the drop stops accepting claims, every already-reserved claim is still honoured, and exactly one refund is created for the unallocated value. It goes to the address that sent the verified funding transaction and to no other address.
+- **The sponsor can end their own drop early, and only the sponsor can.** Same transition as expiry, triggered by a one-use five-minute wallet signature bound to that drop. Claims already reserved are paid in full. Closing is irreversible.
 
----
-
-## Current status
-
-NimDrops is deployed on Nimiq mainnet at [nimdrops.timidan.xyz](https://nimdrops.timidan.xyz). The public pilot is capped at 2 NIM and one live drop. As checked on 27 July, the worker is healthy but funding is paused and the existing live drop uses all available capacity. The site is reachable; it is not yet judge-ready.
-
-**Proven.** The end-to-end settlement gate passed on the intended judging deployment (docker compose: Postgres + API + one worker) against TestAlbatross, run `s3_20260726040800` on 2026-07-26. Full evidence: [`docs/evidence/g1-vps-s3_20260726040800.md`](./docs/evidence/g1-vps-s3_20260726040800.md). In one 361.6-second run, through the shipped service functions rather than a re-implementation:
-
-| Leg | Result |
-|---|---|
-| Fail-closed solvency | Activation at operator float 0 refused with `InsolventError`; float then attested through `float set --tx cb112cce…` (200000 luna, height 7006397) |
-| Funding → activation | 6000 luna funded with memo `ND1:BWcXLVpZxQomlV2t8bJzlQ`, activated under the global principal cap that was in force at the time |
-| Kill/restart | Payout B driven across three OS processes: `kill -9` after the `signed` row committed and before broadcast, `kill -9` the instant broadcast returned, then a third process let startup reconciliation finish. Result: 1 attempt row, 1 hash `2ed5ec14…`, 1 confirmation at height 7006573 |
-| No double pay | Both claimant addresses hold **exactly 2000 luna** on chain — counted on the chain, not in our own books |
-| Pause + shortfall | A paused custody created no attempt for a queued refund; a real out-of-band debit made the chain hold less than the ledger, reconcile paused and stamped `shortfall_detected_at`, and after `unpause` signing was **still** refused until a clean reconcile |
-| Conservation | 4000 luna paid across 2 claims + 2000 luna refunded for 1 unallocated slot == 6000 luna funded; the custody wallet moved exactly 6000 luna, no unaccounted payment |
-
-Exactly one thing in that run is forced: `expires_at` is set one second into the past by a direct `UPDATE`, because the shortest window a sponsor can pick is an hour. Every transition after that `UPDATE` is produced by shipped code.
-
-**Not proven, and not claimed.**
-
-- **The complete mainnet product path has not been proven on real devices.** The public API is bound to MainAlbatross and its worker is healthy, but there is no recorded sponsor funding → external recipient claim → payout → refund run through Nimiq Pay. The finality wall-clock and cold-open behavior still need to be measured on that run. **Do not read deployment health as a claim of release readiness.**
-- **No real Nimiq Pay device signature fixture exists yet.** `SIG_SCHEME` is now set from Nimiq's own published format — a wallet signs `sha256('\x16Nimiq Signed Message:\n' + message.length + message)`, so `nimiq-signed-message` is the value, and `server/test/fixtures/device-sign.json` locks it. That fixture is **source-derived, not device-captured**: it is generated from the documented format with a throwaway key, so it proves the server verifies what the format says, not that Nimiq Pay obeys the format. A capture from a real phone is still owed. The exact return shape of `sendBasicTransactionWithData` (hash, or serialized transaction from which the hash must be derived) is likewise still to be settled on device; the bridge passes the provider's string through unchanged and logs the raw value.
-- **TLS and the public hostname work, but the external-channel path is unproven.** A clean device still has to open a real chat preview into Nimiq Pay and complete the claim without developer intervention.
-- **The real-device release matrix in [`docs/HACKATHON.md`](./docs/HACKATHON.md) is open.** Funding must stay paused until the current liability settles and the operator deliberately restores capacity.
-- **The deposit reconciliation report enumerates only against a test double.** See [Security and threat boundary](#security-and-threat-boundary).
-
----
-
-## How it works
-
-Three loops, all of them narrow on purpose.
+## <img src="web/public/brand/mark.svg" width="18" alt=""> How it works
 
 ### 1. Create and fund
 
-The sponsor enters NIM per person and number of people; the total is `amount_each × claim_count`, computed in integer luna. They add an explicitly unverified sponsor label and an optional short message, review the total and the custody disclosure, and approve **one** native Nimiq Pay transaction. That transaction pays the custody address and carries the versioned ASCII memo `ND1:<publicId>` in its data field.
+The sponsor enters NIM per person and number of people; the total is `amount_each × claim_count`, computed in integer luna. They approve **one** native Nimiq Pay transaction that pays the custody address and carries the versioned ASCII memo `ND1:<publicId>`.
 
-The backend does not activate on a memo scan. It activates on the exact hash, and only when every predicate holds: correct network, successful execution, recipient exactly the configured custody address, value exactly `expected_funding_luna`, data exactly `ND1:<publicId>` and within 64 UTF-8 bytes, a valid sender, a hash that has funded no other drop, and 64 blocks of depth. The verified sender — never a client request body — becomes the immutable creator and refund address. Partial, excess, duplicate, wrong-memo, wrong-recipient and wrong-network deposits are all refused and land in the operator's manual reconciliation report instead.
-
-Once live, the sponsor gets a canonical HTTPS link (`/d/:publicId`, an unguessable 128-bit ID, `noindex`), a QR code, a campaign-specific Open Graph preview for chat platforms, and a Nimiq Pay deep link.
+The backend does not activate on a memo scan. It activates on the exact transaction hash, and only when every predicate holds: correct network, successful execution, recipient exactly the configured custody address, value exactly `expected_funding_luna`, data exactly `ND1:<publicId>` within 64 UTF-8 bytes, a valid sender, a hash that has funded no other drop, and 64 blocks of depth. The verified sender — never a client request body — becomes the immutable creator and refund address. Partial, excess, duplicate, wrong-memo, wrong-recipient and wrong-network deposits are refused and land in the operator's reconciliation report.
 
 ### 2. Claim
 
-A claimant opens the link — in a chat, from a QR code, anywhere — and sees the sponsor label, the shortened verified funding address, the exact fixed amount, how many shares remain, the expiry and the message. No claimant addresses are shown.
+A claimant opens the link and sees the sponsor label, the shortened verified funding address, the exact amount, how many shares remain, the expiry and the message. No claimant addresses are ever shown.
 
-They tap **Claim N NIM** and approve one signature. The server issues a short-lived, single-use canonical challenge (origin, network, version, action, drop ID, random nonce, issued-at, expiry), verifies the returned signature, and **derives the payout address from the verified public key**. The claim request carries no independently trusted payout address, so there is nothing to substitute.
+They tap **Claim** and approve one signature. The server issues a short-lived, single-use canonical challenge (origin, network, version, action, drop ID, nonce, issued-at, expiry), verifies the returned signature, and **derives the payout address from the verified public key** — the request carries no independently trusted address, so there is nothing to substitute.
 
-Allocation is one Postgres transaction that locks `custody_controls` then the drop row, rechecks idempotency and the one-wallet-one-claim record under the lock, atomically consumes the challenge, reserves the next slot, and writes the deterministic `payout:<claimId>` transfer intent. Reserving the final slot flips the drop to `closing` in the same transaction. The response is `202 Reserved` plus an opaque status token; no blockchain call happens while the lock is held. The UI polls and shows "Paid" only after finality, with the transaction receipt.
+Allocation is one Postgres transaction: lock `custody_controls`, then the drop row, recheck idempotency and the one-wallet-one-claim record under the lock, atomically consume the challenge, reserve the next slot, and write the deterministic `payout:<claimId>` transfer intent. Reserving the final slot flips the drop to `closing` in the same transaction. No blockchain call happens while the lock is held. The UI shows "Paid" only after finality, with the receipt.
 
-The flow is called **tap and approve**, never "one tap" — a cold claimant can meet a deep-link warning plus one native signature confirmation, and the copy says so.
+The flow is called **tap and approve**, never "one tap" — a cold claimant can meet a deep-link warning plus a native signature confirmation, and the copy says so.
 
-### 3. Expiry and refund
+### 3. Conditional claims
 
-At `expires_at` — the sponsor's chosen window after activation, 24 hours by default — expiry locks the same drop row and moves `live → closing`. From that commit no new slot can be reserved. Reserved claims stay liabilities and continue through the payout queue. The unallocated value is computed and, if positive, exactly one refund transfer is written to the immutable verified funding sender and sent through the same persist-then-broadcast path as every payout. The drop reaches `refunded` only after every payout liability and the refund confirm — or `settled` if nothing was left over. A signer outage can never move a reserved claimant's value into a sponsor refund.
+A drop can be gated behind a condition the claimant meets first. Three kinds ship: a **passphrase** the sponsor says out loud, an **attestation** from whoever runs the drop, and **trivia** — five questions, four options each, one server-stamped deadline per question.
 
-### Nimiq Pay integration
+Trivia pays by score: three of five correct claims 60% of the share, four claims 80%, five claims all of it. Per-question correctness is never revealed during a session, and a question is never served to the same wallet twice. Meeting a condition writes a grant; the grant is consumed by the claim it pays for, in the same transaction.
 
-`web/src/sdk/adapter.ts` is the only file allowed to import `@nimiq/mini-app-sdk`, and it exposes exactly three operations:
+### 4. Expiry and refund
 
-- **`init()`** for provider detection. It deliberately does **not** call `provider.connect()`, because that calls `listAccounts()` and costs the claimant an extra native prompt for information the signature already provides.
-- **`sign(message)`** for claim authorization. The returned public key is what the server derives the payout address from.
-- **`sendBasicTransactionWithData({ recipient, value, data })`** for funding, with `data` set to the `ND1:<publicId>` memo. This is the only path that moves money from a user's wallet, and it is validated against the 64-byte memo limit before it is sent.
+At `expires_at`, expiry locks the same drop row and moves `live → closing`. Reserved claims stay liabilities and continue through the payout queue. The unallocated value is written as exactly one refund to the immutable verified funding sender, through the same persist-then-broadcast path as every payout. The drop reaches `refunded` only after every payout liability and the refund confirm. A signer outage can never move a reserved claimant's value into a sponsor refund.
 
-There is deliberately no generic `send()` that would hide which key signs a transfer: SDK calls spend the user's key, custodial payouts and refunds are signed server-side with `@nimiq/core` and broadcast over the operator's own chain client. A rejected promise and a resolved provider `ErrorResponse` both normalize into one typed `BridgeError`; a resolved value is never assumed to be success until its shape is checked.
-
-Sharing falls back through the Web Share API, a QR code and copy-link. The deep link is `nimiqpay://miniapp?url=<encoded canonical https url>`, so the campaign ID survives the round trip through the wallet.
-
----
-
-## Architecture
+## <img src="web/public/brand/mark.svg" width="18" alt=""> Architecture
 
 ```
 sponsor wallet ──Nimiq Pay SDK──> custody address ──exact-hash verification──> drop live
 custody key ──> persisted signed bytes ──> RPC broadcast ──> claimant / refund address
 ```
 
-Five components, no more: a React/Vite frontend, one always-on Node/Hono API that also renders the SSR campaign pages and OG image, Postgres, one capped hot custody wallet, and one persistent worker. No Redis, no queue service, no indexer vendor, no identity provider.
+Five components, no more: a React/Vite frontend, one always-on Node/Hono API that also renders the SSR campaign pages and OG images, Postgres, one hot custody wallet, and one persistent worker. No Redis, no queue service, no indexer vendor, no identity provider.
 
-The invariants that actually protect other people's money:
+The invariants that protect other people's money:
 
-- **Postgres is the financial source of truth.** Not the chain, not a cache. All NIM values are positive integers in luna; no JavaScript float ever crosses the money boundary.
-- **Persist signed bytes before broadcast.** The worker signs, commits the exact serialized transaction and its deterministic hash as a `signed` attempt, and only then broadcasts *those stored bytes*. A broadcast timeout is resolved by querying the stored hash or rebroadcasting the same bytes — never by constructing a replacement. `broadcast` is not `paid`.
-- **`proven_dead` requires sustained absence AND a passed validity window.** A single not-found answer is one node's opinion; the pico client cannot see the mempool for roughly the first 30 seconds after a broadcast, so acting on one lookup would double-pay. Declaring an attempt dead requires at least two recorded consecutive absences at least five minutes apart, a fresh live lookup that is also absent, *and* a head strictly past `validity_start_height + 7200` blocks so the bytes can never be included again. All of it is re-evaluated under the row locks.
-- **One lock order, everywhere: `custody_controls` → drop** on the activation and allocation paths, and `custody_controls` → attempt → transfer on the worker and recovery paths. An earlier inversion in recovery produced a real, reproducible Postgres deadlock between an operator command and a payment confirmation — resolved by killing one side at random, which on that path is a coin flip over whether the operator or the payment survives.
-- **Solvency is ledger-derived, with an attributable operator float.** The invariant is `ledger balance ≥ outstanding principal + worst-case remaining fees`, where outstanding principal counts open slots on live drops — a fully unclaimed drop still owes its whole principal — and in-flight attempts stay outstanding until they finalize. The chain balance is a cross-check that *pauses* when the chain holds less than the ledger, not the primary number. The operator's fee float is the one ledger credit no drop supplies, so it must be attested against a named finalized deposit that paid into custody and is not any drop's funding.
-- **Exactly one worker signs.** It holds a Postgres advisory lock and global concurrency one. `docker compose up --scale worker=2` is a bug, not a knob.
-- **Fail closed.** Paused custody, stale reconciliation, an exhausted fee reserve, a detected shortfall, or an unreadable chain each stop new money movement rather than guessing. `/health` stays 503 until the worker has reconciled.
+| Invariant | What it means |
+|---|---|
+| **Postgres is the financial source of truth** | Not the chain, not a cache. All values are positive integers in luna; no float ever crosses the money boundary. |
+| **Persist signed bytes before broadcast** | The worker commits the exact serialized transaction and its deterministic hash as a `signed` attempt, then broadcasts *those stored bytes*. A timeout is resolved by querying the stored hash or rebroadcasting the same bytes, never by constructing a replacement. `broadcast` is not `paid`. |
+| **`proven_dead` needs absence AND an expired window** | A single not-found is one node's opinion, and the pico client cannot see the mempool for ~30s after broadcast. Declaring an attempt dead requires two recorded absences at least five minutes apart, a fresh live lookup that is also absent, *and* a head past `validity_start_height + 7200` so the bytes can never be included again. |
+| **One lock order, everywhere** | `custody_controls` → drop on activation and allocation; `custody_controls` → attempt → transfer on the worker and recovery paths. An earlier inversion produced a reproducible deadlock between an operator command and a payment confirmation. |
+| **Solvency is ledger-derived** | `ledger balance ≥ outstanding principal + worst-case remaining fees`. A fully unclaimed drop still owes its whole principal. The chain balance is a cross-check that *pauses* when it holds less than the ledger, not the primary number. |
+| **Exactly one worker signs** | It holds a Postgres advisory lock at global concurrency one. `--scale worker=2` is a bug, not a knob. |
+| **Fail closed** | Paused custody, stale reconciliation, an exhausted fee reserve, a detected shortfall, or an unreadable chain each stop new money movement rather than guessing. `/health` stays 503 until the worker has reconciled. |
 
----
+**Nimiq Pay integration.** `web/src/sdk/adapter.ts` is the only file allowed to import `@nimiq/mini-app-sdk`, and it exposes exactly three operations: `init()` for provider detection (it deliberately does not call `connect()`, which would cost the claimant an extra native prompt for information the signature already provides), `sign(message)` for claim authorization, and `sendBasicTransactionWithData()` for funding. There is deliberately no generic `send()` that would hide which key signs a transfer: SDK calls spend the user's key, while payouts and refunds are signed server-side and broadcast over the operator's own chain client.
 
-## Running it
+## <img src="web/public/brand/mark.svg" width="18" alt=""> Quickstart
 
 **Prerequisites:** Node ≥ 22, pnpm 11, Docker with Compose, and outbound WSS to the Nimiq seed nodes. Postgres comes from compose.
 
-**Environment.** Copy `.env.example` to `.env` and fill in real values. Never commit `.env`. The names, with no values here:
+```bash
+pnpm install
+cp .env.example .env          # fill in real values; never commit this
+```
 
-| Variable | Purpose |
-|---|---|
-| `DATABASE_URL` | Postgres connection string; the financial source of truth |
-| `CUSTODY_PRIVATE_KEY_HEX` | Custody wallet key. Generate on the deployment host, back up encrypted, never in Git |
-| `STATUS_TOKEN_SECRET` | HMAC secret for opaque claim status tokens |
-| `NIMIQ_NETWORK` | `TestAlbatross` or `MainAlbatross`. No default; every process refuses to start without it |
-| `SIG_SCHEME` | Which bytes a wallet signs: `raw` or `nimiq-signed-message`. Fails closed when unset. **A deployment serving Nimiq Pay must be `nimiq-signed-message`** |
-| `PUBLIC_ORIGIN` | Canonical origin used in share links, OG tags and claim challenges |
-| `PORT` | API port. Optional, defaults to 8080 |
-| `ALERT_WEBHOOK_URL` | Operator alerts. Optional; falls back to console |
-| `POSTGRES_PASSWORD` | Compose-only; not read by the app |
-| `SPA_DIST` | Override for the built frontend directory. Optional |
-| `NIMIQ_SEED_NODES` | Comma-separated seed override. Optional |
-| `NIMIQ_FINALITY_DEPTH` | Confirmation depth. Optional; floor 64, may only be raised |
-| `NIMIQ_VALIDITY_WINDOW_BLOCKS` | Transaction validity window. Optional; floor 7200, may only be raised |
-| `NIMIQ_FEE_LUNA` | Per-transaction fee. Optional; defaults to 0, and `docker-compose.yml` does not pass it through, so both containers run at 0. **Setting it is an operator decision with a size consequence** — see below |
-
-**On `NIMIQ_FEE_LUNA` and large drops.** `configured_fee_reserve_luna` is one flat number (1 NIM on the mainnet defaults) and does not scale with claim count. At a fee of 0 that is exact: fees consume nothing, so no claim count can exhaust the reserve. At a fee of *f* luna, every payout and every refund costs *f*, the cost comes out of the attested operator float, and the invariant refuses to sign once `operator_float_luna − fees_spent_so_far < configured_fee_reserve_luna`. The number of outgoing transactions a deployment can pay is therefore `(operator_float_luna − configured_fee_reserve_luna) / f`, across all drops and for the life of the float. If you set a non-zero fee, size the float for the drops you expect: a 100-claim drop needs 100 payouts, and at the mainnet defaults (float attested to 1 NIM, reserve 1 NIM) the budget is zero, so the first payout is refused before it is broadcast and the drop funds without paying anybody.
-
-**How the fee reaches the check.** `assertSolvent` charges for two fees the ledger has not been debited for yet: the fee on the exact transaction about to be persisted (the worker builds the bytes, reads their fee off them, and only then asks whether it may commit to paying it) and the fees of every attempt already signed or broadcast and not yet confirmed. Both are structurally zero while `NIMIQ_FEE_LUNA` is 0, which is the default and what `docker-compose.yml` gives both containers. This paragraph used to claim the first transaction fails closed on a zero budget; before that change it did not, because the reserve was only compared against fees that had *already* been spent — so a deployment sitting on its reserve could sign several fee-bearing payouts before any of them reached finality, and the shortfall surfaced with an accepted, funded drop already part-paid.
-
-**Bring it up.** Set the real hostname in `Caddyfile` first — Caddy provisions TLS from that name and nothing else.
+Generate a custody key per environment, then print the address it derives to — this is what claimants are told to fund, so a mismatch sends real money to a wallet nobody controls:
 
 ```bash
-docker compose build            # ALL services — see the warning below
+cd server
+CUSTODY_PRIVATE_KEY_HEX=... NIMIQ_NETWORK=TestAlbatross pnpm exec tsx -e \
+  "import {nimiqChainFromEnv} from './src/chain/nimiq'; console.log(nimiqChainFromEnv().custodyAddress())"
+```
+
+Bring it up. Set the real hostname in `Caddyfile` first — Caddy provisions TLS from that name and nothing else:
+
+```bash
+docker compose build          # ALL services, never one at a time
 docker compose up -d
 ```
 
-> **Build every service, never one by one.** `server` and `worker` are separate
-> images built from the same Dockerfile, so `docker compose build server` leaves
-> the worker running whatever code it was last built with. On the deployment this
-> silently left the worker four hours stale — a signing process running older
-> money code than the API in front of it. Plain `docker compose build` rebuilds
-> both. The same applies to the gate harness: it runs in the **worker** image,
-> because the API is key-less.
+> **Build every service together.** `server` and `worker` are separate images from the same Dockerfile, so `docker compose build server` leaves the worker running whatever code it was last built with. On one deployment this silently left a signing process four hours behind the API in front of it.
 
-That brings up Postgres, the API and the worker, reachable only on the docker
-network. **TLS is a separate overlay** so the base stack works on a host with no
-DNS name yet:
+`.env.example` documents every variable with its purpose and failure mode. The ones without safe defaults are `DATABASE_URL`, `CUSTODY_PRIVATE_KEY_HEX` (worker only), `CUSTODY_ADDRESS`, `STATUS_TOKEN_SECRET`, `NIMIQ_NETWORK`, `SIG_SCHEME` and `PUBLIC_ORIGIN`; every process refuses to start without them rather than guessing.
+
+**On `NIMIQ_FEE_LUNA`.** It defaults to 0, and at 0 fees consume nothing, so no claim count can exhaust the reserve. At a fee of *f*, every payout and refund costs *f* out of the attested operator float, and the number of outgoing transactions a deployment can pay is `(operator_float_luna − configured_fee_reserve_luna) / f`. If you set a non-zero fee, size the float for the drops you expect: a 100-claim drop needs 100 payouts.
+
+## <img src="web/public/brand/mark.svg" width="18" alt=""> Repo map
+
+| Path | What lives there |
+|---|---|
+| `server/src/services/` | The money core: claims, drops, close, expiry, solvency, transfers |
+| `server/src/chain/` | The only chain client. Signing, broadcast, finality, reconciliation |
+| `server/src/gates/` | Conditional claims: passphrase, attested, trivia, and grant issuance |
+| `server/src/db/migrations/` | Schema, applied in filename order. Every constraint is documented in place |
+| `server/src/http/` | Hono API, SSR campaign pages, OG images |
+| `server/spike/` | Operator scripts: settlement harness, custody spikes, question-bank importer |
+| `web/src/pages/` | The screens: landing, create, drop, close, games |
+| `web/src/ui/` | The design system: field, sheet, envelope, the NIM lockup, tokens |
+| `web/src/sdk/` | The Nimiq Pay adapter, and the only import of the Mini Apps SDK |
+| `docs/architecture/` | Decision records and integration notes |
+
+## <img src="web/public/brand/mark.svg" width="18" alt=""> Operating it
+
+The CLI is `server/src/recover.ts`. Its structural constraint is one sentence: it resumes an existing transfer intent, or creates a replacement only after the prior one is `proven_dead`, and **no command may alter a recipient or an amount**. That is enforced by shape — neither `resume` nor `replace` accepts either; `replace` reads both off the immutable row.
+
+```
+pnpm tsx src/recover.ts <command> [argument]
+
+  status                    One-screen incident snapshot. Read-only; run this first.
+  resume <transferId>       Reconcile an intent against the chain, or re-queue it.
+                            Signs nothing new. Safe to run repeatedly.
+  replace <transferId>      Sign ONE replacement for a PROVEN DEAD attempt, same
+                            recipient and amount. Refuses short of certainty.
+  deposits                  Custody deposits that are no drop's accepted funding.
+  float show                Print the float attestation beside the ledger balance.
+  float set <luna> --tx     Re-attest the float, attributed to a finalized deposit.
+  pause <reason>            Global kill switch. Needs no chain node, on purpose.
+  unpause                   Release it. Does not reconcile.
+```
+
+**Incident order.** `status` first, always — it never throws on a chain problem and tells you whether custody is paused, which network the database is bound to, and what has been unsettled longest. Then `pause` if the cause is not yet understood. Then `resume` for anything in `manual_review`; it signs nothing new. Use `float show` and `deposits` to diagnose a solvency refusal. `replace` last and rarely: it is the only command that can spend the same intent's money twice, so it re-checks the whole proof under the row locks. If it refuses, look the hash up on a block explorer rather than running it again. `unpause` only after a clean reconcile.
+
+## <img src="web/public/brand/mark.svg" width="18" alt=""> Testing
 
 ```bash
-# once an A/AAAA record points here and .env has PUBLIC_HOSTNAME plus
-# PUBLIC_ORIGIN=https://<same name>
-docker compose -f docker-compose.yml -f docker-compose.tls.yml up -d
-```
-
-**Apply migrations.** They are deliberately not automatic; a financial schema change should be an operator action taken before the new image serves traffic. `migrate()` is idempotent and takes an advisory lock, so concurrent invocations are safe.
-
-```bash
-docker compose run --rm --entrypoint sh server -c "cd /app/server && pnpm tsx src/db/migrate-cli.ts"
-```
-
-**Required post-deploy step — attest the operator float.**
-
-```bash
-docker compose run --rm --entrypoint sh worker -c \
-  "cd /app/server && pnpm tsx src/recover.ts float set <luna> --tx <deposit hash>"
-```
-
-Run operator commands against **`worker`**, not `server`. The API service is deliberately key-less — it builds a read-only chain client from `CUSTODY_ADDRESS` and refuses to sign or broadcast — so `float set`, `resume`, `replace` and `deposits` all fail there. Only the worker holds `CUSTODY_PRIVATE_KEY_HEX`.
-
-A fresh database **fails closed as insolvent** until this runs, and that is intended. Network fees are paid out of money no drop ever deposited, so the ledger has to be told about it — and told in a way an auditor can check. The `--tx` hash is mandatory: it must be final, execution-ok, paid *into* custody, not sent by custody, not any drop's funding transaction, and not already attested; `<luna>` must equal the sum of every deposit backing the float; and the resulting ledger balance may not exceed the on-chain custody balance. An unreachable chain is a refusal, not a guess. Until this is done, every activation is refused with `InsolventError` — which is exactly what the settlement gate observed on a fresh schema.
-
-Verify with `recover.ts status`, then check `/health`.
-
----
-
-## Operator runbook
-
-The CLI is `server/src/recover.ts`. Its structural constraint is one sentence: it resumes an existing transfer intent, or creates a replacement attempt only after the prior one is `proven_dead`, and **no command may alter a recipient or an amount**. That is enforced by shape rather than discipline — neither `resume` nor `replace` accepts a recipient or an amount; `replace` reads both off the immutable `outgoing_transfers` row.
-
-```
-usage:
-  pnpm tsx src/recover.ts <command> [argument]
-
-commands:
-  status
-      One-screen incident snapshot: pause switch, bound network, solvency
-      numbers, per-state row counts, manual_review transfers and the oldest
-      unsettled attempt. Read-only; run this one first.
-
-  resume <transferId>
-      Reconcile an existing intent against the chain, or re-queue it when it has
-      no open attempt. Signs nothing new; cannot change recipient or amount.
-
-  replace <transferId>
-      Sign ONE replacement for a PROVEN DEAD attempt, same recipient and amount.
-      Refuses unless sustained absence and a passed validity window both hold.
-
-  deposits
-      Custody deposits that are no drop's accepted funding transaction: late,
-      partial, excess, duplicate, unknown-memo and no-memo (design §7).
-
-  float show
-      Print the operator float attestation beside the ledger balance, the
-      outstanding principal, the fee reserve, the caps and the on-chain custody
-      balance. Read-only.
-
-  float set <luna> --tx <hash>
-      Re-attest the operator float, in whole positive luna, ATTRIBUTED to a
-      finalized custody deposit. --tx is mandatory: the hash must be final, paid
-      to custody, not any drop's funding and not already attested, and <luna>
-      must equal the sum of every deposit backing the float. Also refuses any
-      value that would push the ledger balance above the on-chain custody
-      balance, and refuses outright when the chain cannot be read.
-
-  pause <reason>
-      Engage the global kill switch: every new money path fails closed. Needs no
-      chain node — pausing must work when the node is the thing that broke.
-
-  unpause
-      Release the kill switch. Does not reconcile: a stale balance keeps failing
-      closed until the worker's next successful reconcile.
-
-  --help
-      Print this block. Also printed, to stderr, on an unrecognised command.
-```
-
-**Incident order.**
-
-1. **`status` first, always.** It is read-only, it never throws on a chain problem — a node that is down is printed as a fact rather than swallowing the whole report — and it tells you whether custody is paused, which network the database is bound to, whether the ledger still covers its liabilities, what is flagged for a human, and what has been unsettled the longest.
-2. **`pause "<reason>"`** if the cause is not yet understood, or if `status` shows a shortfall or a stale reconciliation. Pausing needs no chain client on purpose.
-3. **`resume <transferId>`** for anything in `manual_review`. This is the safe move: it signs nothing new, reconciles the existing attempt against the chain, and re-queues an intent that has no open attempt. Safe to run repeatedly.
-4. **`float show`** and **`deposits`** to diagnose a solvency refusal — the first tells you whether the ledger, the float and the chain agree, the second surfaces late, partial, excess and unknown deposits that never activated anything.
-5. **`replace <transferId>` last, and rarely.** It is the only command that can spend the same intent's money twice, so it re-checks the entire proof under the row locks and refuses on anything short of certainty — an inconclusive lookup, an undecodable or foreign-network attempt, an unexpired validity window, or an absence series shorter than the threshold. If it refuses, the answer is to look the hash up on a block explorer, not to run it again.
-6. **`unpause`** only after a clean reconcile. Unpausing is permission to resume, not evidence that the balance is known — a detected shortfall keeps signing closed until reconciliation succeeds.
-
----
-
-## Testing
-
-The suite is Vitest. Unit and API tests run with no external services:
-
-```bash
-cd server && pnpm test          # or: pnpm vitest run
+cd server && pnpm test
 cd web    && pnpm test
 ```
 
@@ -261,61 +181,33 @@ The `*.race.test.ts` suites need a real Postgres and **skip silently without `DA
 docker run --rm -d --name nimdrops-test -e POSTGRES_PASSWORD=dev \
   -e POSTGRES_USER=nimdrops -e POSTGRES_DB=nimdrops -p 5432:5432 postgres:16
 
-cd server
-DATABASE_URL=postgres://nimdrops:dev@localhost:5432/nimdrops pnpm vitest run
+cd server && DATABASE_URL=postgres://nimdrops:dev@localhost:5432/nimdrops pnpm test
 ```
 
-Each race suite migrates a throwaway schema and drops it afterwards. Between them they cover: many concurrent wallets racing the last slot; a claim racing exact expiry; the same wallet and the same HTTP idempotency key retrying; the same key with a changed request returning `409`; crash after allocation, after signing and immediately after broadcast; two worker instances competing where only the advisory-lock holder signs; a broadcast timeout resolving by stored hash without a second payment; a proven-dead attempt being replaceable while an ambiguous one is not; concurrent activations being unable to exceed the globally locked principal cap; and a refund that includes only unallocated slots. Several of them are mutation-verified — the test is checked to fail when the invariant is removed.
+Each race suite migrates a throwaway schema and drops it afterwards. Between them they cover: many concurrent wallets racing the last slot; a claim racing exact expiry; the same wallet and the same idempotency key retrying; the same key with a changed request returning `409`; crash after allocation, after signing, and immediately after broadcast; two workers competing where only the advisory-lock holder signs; a broadcast timeout resolving by stored hash without a second payment; a proven-dead attempt being replaceable while an ambiguous one is not; and a refund that includes only unallocated slots. Several are mutation-verified — the test is checked to fail when the invariant is removed.
 
-One known flake, verified on an unmodified baseline and not introduced by any fix batch: `expiry.race.test.ts > resolves claim-versus-expiry one way or the other, 20 times` fails roughly one run in ten. It is owed a fix.
+**Settlement harness.** `server/spike/s3-settlement-e2e.ts` drives the real service functions against Postgres and a real chain, in a throwaway schema, with real testnet NIM. It runs fail-closed solvency, float attestation, activation, a normal payout, a payout driven across two `kill -9` windows in separate child processes, forced expiry, the pause switch, a real out-of-band shortfall and its recovery, the refund, and a conservation audit against the custody wallet's own balance.
 
-**Settlement harness.** `server/spike/s3-settlement-e2e.ts` is the end-to-end gate: it drives the real service functions against Postgres and a real chain, in a throwaway schema, with real testnet NIM.
+## <img src="web/public/brand/mark.svg" width="18" alt=""> Security and threat boundary
 
-```bash
-cd server
-DATABASE_URL=postgres://nimdrops:dev@localhost:5432/nimdrops \
-NIMIQ_NETWORK=TestAlbatross CUSTODY_PRIVATE_KEY_HEX=<testnet key> \
-pnpm tsx spike/s3-settlement-e2e.ts
-```
+**What a wallet signature proves.** Control of one address at one moment, bound to one drop, one nonce, one origin and one network. That is all. A client-supplied device identifier is not server-attested and can be forged by a direct API caller, so `requestDeviceIdentifier` is deliberately unused in this codebase.
 
-It runs fail-closed solvency, float attestation, activation, a normal payout, a payout driven across two `kill -9` windows in separate child processes, forced expiry, the pause switch, a real out-of-band shortfall and its recovery, the refund, and a conservation audit against the custody wallet's own balance — then writes an evidence file. `S3_KEEP_SCHEMA=1` keeps the schema for inspection; `S3_EVIDENCE_PATH` redirects the output. It needs funded testnet custody; the testnet faucet has no captcha, so this does not require operator involvement.
-
----
-
-## Security and threat boundary
-
-**What a wallet signature proves.** Control of one address at one moment, bound to one drop, one nonce, one origin and one network. That is all. It does not prove one human, and NimDrops therefore promises *one claim per verified wallet per drop* — never one claim per person. A device identifier supplied by a client is not server-attested and can be forged by a direct API caller, so `requestDeviceIdentifier` is deliberately not used anywhere in this codebase.
-
-**Controls actually in place.**
-
-- Unguessable 128-bit links, `noindex`, and no public feed. A public drop index would be a faucet index, which is an abuse feature.
-- One claim per wallet per drop, enforced by a database unique constraint rather than by application logic.
-- Per-IP, per-wallet and per-drop rate limits. The per-drop bucket is consumed only after signature verification, so a malformed request cannot be aimed at locking out a specific drop. The client IP is never taken from a header the client can send: the API buckets by socket peer unless the address was nominated by our own Caddy and authenticated with a shared secret, which is how the real client survives a CDN in front. Getting that configuration wrong over-limits everyone into one bucket; it cannot let a client choose its own.
-- Two shape rules, and both are floors rather than ceilings: at least two claims per drop, and at least 0.1 NIM per person. There is no ceiling on the drop's size or headcount. The minimum share is what makes headcount cost something — with a one-luna share, a 14,400-person drop (the most the default claim limits allow inside a day) cost 0.144 NIM and 14,400 payouts in a worker every other drop shares; at 0.1 NIM it costs 1,440 NIM, and that NIM is escrowed and paid to whoever claims rather than spent on the attack. What is checked under the singleton lock before every activation, allocation and signature is the solvency invariant and the fee reserve. The aggregate principal cap is still there as an operator kill switch (`max_live_principal_luna`), NULL by default; it stops new liabilities without stopping the payouts already owed, which `pause` cannot do.
-- A wall-clock bound on every chain call the worker makes, and a bounded per-tick scan of open attempts. One tick polls every unresolved payment sequentially and carries refunds, expiry, settlement and signing for the whole deployment, so an unbounded lookup or an unbounded scan is a way for one drop to stop every other. Attempts are scanned oldest-first, and one whose last lookup failed sorts to the back so it cannot hold the front of the queue.
-- A global pause switch that works with the chain node down, and automatic pausing on a detected shortfall or stale reconciliation.
-- Uniform generic API responses where address enumeration would leak claim status; public drop state never returns claimant addresses, signatures or internal errors. Status tokens never appear in URLs or logs — only their hashes are stored.
-- Log redaction as a discipline at the call sites: alerts and error logs carry internal IDs, route names and on-chain hashes, never signatures, raw transactions, bearer tokens or full claimant addresses. A dedicated serializer that would enforce this structurally is planned and not yet written.
+**Controls in place.** Unguessable 128-bit links, `noindex`, and no public feed — a public drop index would be a faucet index. One claim per wallet per drop, enforced by a database unique constraint rather than by application logic. Per-IP, per-wallet and per-drop rate limits, where the per-drop bucket is consumed only after signature verification so a malformed request cannot lock out a specific drop. The client IP is never taken from a header the client can send. A wall-clock bound on every chain call and a bounded per-tick scan, oldest-first, so one drop cannot stall every other. A global pause switch that works with the chain node down. Uniform generic responses where address enumeration would leak claim status; status tokens appear in no URL and no log, only their hashes are stored.
 
 **Known gaps, stated rather than buried.**
 
-- **The deposit report enumerates only via a test double.** `recover.ts deposits` needs to list every transaction paid to the custody address, but the frozen `ChainClient` interface answers only about a hash you already know, and the pico client indexes by hash rather than by address. `FakeChain` satisfies the enumeration shape, so the report is proven against the test double; `NimiqChain` does not implement it yet, and on mainnet the command raises `DepositEnumerationUnavailableError`. The intended fix is a non-interface `accountTransactions(address, limit)` backed by the explorer API, and it is a pre-mainnet requirement.
-- The API process currently holds the signing key even though it signs nothing; a read-only chain client for that process is an open hardening item.
-- Rate-limit buckets are in-memory and per-process. With one API process that is correct; it would not survive horizontal scaling.
-- Custody is custody, and it is now uncapped. The honest mitigation for a hot wallet used to be exposure you can afford to lose; with the caps removed there is no such bound, and the remaining protections are operational rather than cryptographic. Read the custody disclosure at the top of this file as the whole of it.
+- **The deposit report enumerates only via a test double.** `recover.ts deposits` needs every transaction paid to the custody address, but the frozen `ChainClient` interface answers only about a hash you already know. `FakeChain` satisfies the shape; `NimiqChain` does not implement it yet and raises `DepositEnumerationUnavailableError`. The intended fix is an explorer-backed `accountTransactions(address, limit)`.
+- The API process holds the signing key even though it signs nothing; a read-only chain client for that process is an open hardening item.
+- Rate-limit buckets are in-memory and per-process. Correct for one API process; would not survive horizontal scaling.
+- **No real Nimiq Pay device signature fixture exists yet.** `server/test/fixtures/device-sign.json` is generated from Nimiq's published format with a throwaway key, so it proves the server verifies what the format says — not that the wallet obeys the format. A capture from a real phone is still owed.
+- Custody is custody. The mitigations above are operational, not cryptographic. Read the custody disclosure as the whole of it.
 
-**Reporting a problem.** Open an issue on this repository. If it concerns custody or a live drop, say so in the title and do not include a claimant's full address. No separate security contact address has been published yet.
+**Reporting a problem.** Open an issue. If it concerns custody or a live drop, say so in the title and do not include a claimant's full address.
 
----
+**What is stored about a claimant** — and what deliberately is not — is in [PRIVACY.md](./PRIVACY.md). In short: no claimant address is ever shown on a public surface, and `GET /api/games` selects none at all.
 
-## License
+## <img src="web/public/brand/mark.svg" width="18" alt=""> License
 
 MIT. See [LICENSE](./LICENSE).
 
-## Contributing and roadmap
-
-The roadmap is in [design §14](./docs/superpowers/specs/2026-07-25-nimdrops-design.md#14-sustainable-roadmap) and it is deliberately demand-led: nothing on it gets built before mainnet reliability is proven and a named partner actually asks for it. Sponsor-chosen expiry already ships. Next are campaign operations (creator history, incident drills, signed allowlists, external security review), then one distribution adapter for a named partner, then merchant campaigns with real purchase verification. Direct tips and group jars may reuse the wallet-auth, funding-verifier and transfer-ledger pieces but get their own domain models and threat reviews; they are not new values of a `kind` column. The submission-ready maintenance boundary is in [`docs/submission/maintenance.md`](./docs/submission/maintenance.md).
-
-Explicitly not planned until a concrete use case forecloses the simpler path: bot platforms, OAuth identity vendors, indexers, other chains, other assets.
-
-If you want to contribute, the highest-value work right now is the mainnet re-measurements and the device signature fixture listed under [Current status](#current-status) — everything else is downstream of those.
+Brand assets in `web/public/brand/` and the imagery in `web/public/images/` carry their own terms — see [`IMAGERY-LICENSES.md`](./web/public/images/nimdrops/IMAGERY-LICENSES.md) and [`BADGES.md`](./web/public/badges/BADGES.md).

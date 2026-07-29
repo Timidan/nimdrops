@@ -10,3 +10,22 @@ server/spike/g1-local-evidence.md
 # `server/src/gates/trivia/questions.example.json` is the only committed bank.
 questions.v*.json
 !server/src/gates/trivia/questions.example.json
+
+# Working documents. The published repository carries the README, the
+# architecture notes, the privacy policy and the screenshots the README shows.
+# Everything below is process material — plans, specs, review transcripts,
+# research, and the design archive of several hundred megabytes of renders. It
+# stays on the author's disk and out of a reader's clone.
+/docs/design/
+/docs/evidence/
+/docs/goals/
+/docs/research/
+/docs/submission/
+/docs/superpowers/
+/docs/ATTESTATIONS.md
+/docs/CUTOVER.md
+/docs/HACKATHON.md
+/PRODUCT.md
+
+# Agent scratch space.
+/.superpowers/
