@@ -6,7 +6,7 @@
 #
 # Schema migrations are NOT run automatically: a financial schema change should
 # be a deliberate operator action, taken before the new image starts serving.
-#   docker compose run --rm --entrypoint sh server -c "cd /app/server && pnpm tsx src/db/migrate-cli.ts"
+#   docker compose run --rm --entrypoint /app/server/node_modules/.bin/tsx server src/db/migrate-cli.ts
 
 x-app: &app
   build:
@@ -101,7 +101,12 @@ services:
   # HTTP only: API, SSR campaign pages, SPA assets. Signs nothing.
   server:
     <<: *app
-    command: ["pnpm", "exec", "tsx", "src/index.ts"]
+    # The tsx binary directly, never `pnpm exec`. pnpm re-verifies the lockfile
+    # on every invocation and writes a temp file into /app, which the unprivileged
+    # runtime user cannot do — the container then dies at boot with EACCES. Going
+    # straight to the binary also stops corepack fetching pnpm from the network
+    # while the service is trying to start.
+    command: ["/app/server/node_modules/.bin/tsx", "src/index.ts"]
     expose:
       - "8080"
     # The trivia bank, read-only, from wherever the operator generated it.
@@ -134,7 +139,7 @@ services:
   #     "cd /app/server && pnpm tsx src/recover.ts status"
   worker:
     <<: *app
-    command: ["pnpm", "exec", "tsx", "src/worker.ts"]
+    command: ["/app/server/node_modules/.bin/tsx", "src/worker.ts"]
     # A full block, not an addition: a YAML merge key is replaced wholesale by a
     # sibling of the same name, never deep-merged. CUSTODY_ADDRESS is
     # deliberately ABSENT — the worker derives the address from the key it

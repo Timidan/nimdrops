@@ -123,8 +123,8 @@ Build, migrate, then start. Migrations are never automatic: a financial schema c
 
 ```bash
 docker compose build          # ALL services, never one at a time
-docker compose run --rm --entrypoint sh server \
-  -c "cd /app/server && pnpm tsx src/db/migrate-cli.ts"
+docker compose run --rm \
+  --entrypoint /app/server/node_modules/.bin/tsx server src/db/migrate-cli.ts
 docker compose up -d
 ```
 
