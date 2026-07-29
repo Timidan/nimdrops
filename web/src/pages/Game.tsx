@@ -756,6 +756,23 @@ function Trivia({
         Start
       </button>
 
+      <p className="mt-5 text-center text-[0.6875rem] leading-relaxed text-chalk/45">
+        Some questions are adapted from{' '}
+        <a href="https://opentdb.com/" target="_blank" rel="noreferrer" className="underline">
+          Open Trivia DB
+        </a>{' '}
+        under{' '}
+        <a
+          href="https://creativecommons.org/licenses/by-sa/4.0/"
+          target="_blank"
+          rel="noreferrer"
+          className="underline"
+        >
+          CC BY-SA 4.0
+        </a>
+        . They may be filtered, reordered, or retiered.
+      </p>
+
       {session.error ? (
         <p data-testid="trivia-start-error" role="alert" className="mt-4 text-sm leading-relaxed text-chalk/75">
           {session.error}

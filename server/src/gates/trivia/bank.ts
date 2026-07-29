@@ -5,9 +5,10 @@
  * `questions.example.json` is committed, and the real file is read from
  * `TRIVIA_BANK_PATH` at runtime. That keeps one deployment's questions out of the
  * repository; it does NOT make them secret, and no security argument here may
- * assume it does. The shipped bank is imported from Open Trivia DB, whose answers
- * anyone can download — so a determined farmer already holds the answer key, and
- * a script answers five questions inside their deadlines trivially.
+ * assume it does. The shipped bank combines Open Trivia DB questions with
+ * original questions backed by public reference pages. A determined farmer can
+ * still harvest the answer key, and a script answers five questions inside their
+ * deadlines trivially.
  *
  * Which is the honest position for this whole kind: trivia is an ENGAGEMENT
  * MECHANIC, not an authorization control (spec §6). What bounds the money is the
@@ -51,11 +52,10 @@ export interface Question {
    * addresses; the per-wallet cooldown does not touch a Sybil at all. Learning a
    * whole tier costs roughly `ceil(N/5)` sessions, not 1024 guesses.
    *
-   * Today that is harmless, because the bank IS Open Trivia DB and its answers are
-   * downloadable from opentdb.com whatever this server does. It stops being
-   * harmless the moment one question is written by hand — the `novice` tier is
-   * exactly that case. So the condition is enforced here rather than written down
-   * in a comment and forgotten.
+   * Today every shipped question either comes from Open Trivia DB or cites a
+   * public page containing the answer. A private or unpublished question must not
+   * inherit that assumption, so the condition is enforced here rather than left
+   * to an operator comment.
    *
    * Absent means false. That is the direction to be wrong in: a hand-written
    * question that says nothing about publication keeps its answer, and the cost of

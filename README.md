@@ -220,6 +220,12 @@ Each race suite migrates a throwaway schema and drops it afterwards. Between the
 
 ## <img src="web/public/brand/mark.svg" width="18" alt=""> License
 
-MIT. See [LICENSE](./LICENSE).
+The software is MIT. See [LICENSE](./LICENSE).
+
+Trivia content is licensed separately. Questions adapted from [Open Trivia
+DB](https://opentdb.com/) remain under [CC BY-SA
+4.0](https://creativecommons.org/licenses/by-sa/4.0/) and may be filtered,
+reordered, or retiered. The generated operator bank is not covered by the
+software's MIT license.
 
 Brand assets in `web/public/brand/` and the imagery in `web/public/images/` carry their own terms — see [`IMAGERY-LICENSES.md`](./web/public/images/nimdrops/IMAGERY-LICENSES.md) and [`BADGES.md`](./web/public/badges/BADGES.md).

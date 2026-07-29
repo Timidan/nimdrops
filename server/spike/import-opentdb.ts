@@ -44,9 +44,11 @@
  *     WITHIN a run. Across runs, the stable `id` does that job instead.
  *
  * ── stability, and why it is worth the extra step ───────────────────────────
- * `id` is `otdb-<sha256(prompt)[:12]>` and the option order is a permutation
- * derived from that id, so re-importing produces a byte-identical file for the
- * same question. That matters twice over: a gate's per-wallet question selection
+ * `id` hashes the prompt, correct answer and sorted option set, and the option
+ * order is a permutation derived from that id. Re-importing therefore produces
+ * a byte-identical question only while the source content is identical; an
+ * upstream answer or distractor edit becomes a new question. That matters twice
+ * over: a gate's per-wallet question selection
  * is an HMAC over an index into the sorted bank, and any "seen question" history
  * an operator keeps is keyed by id. A reshuffle on re-import would move the
  * correct answer under a session that had already been served the old order.
@@ -86,6 +88,7 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { type Bank, type Question, type Tier, parseBank } from '../src/gates/trivia/bank'
 import { exitAfterTeardown } from '../src/exit'
+import { openTriviaQuestionId } from './opentdb-id'
 
 // ---------------------------------------------------------------------------
 // configuration
@@ -638,10 +641,6 @@ function decodeItem(raw: unknown): RawItem | null {
 // mapping
 // ---------------------------------------------------------------------------
 
-function questionId(prompt: string): string {
-  return `otdb-${createHash('sha256').update(prompt, 'utf8').digest('hex').slice(0, 12)}`
-}
-
 function slugify(name: string): string {
   const slug = name
     .toLowerCase()
@@ -734,7 +733,7 @@ function convert(item: RawItem, ctx: ConvertContext): { question: Question } | {
   if (matches(NEGATION_PATTERNS, texts)) return { drop: 'negation' }
   if (matches(TIME_SENSITIVE_PATTERNS, texts)) return { drop: 'time-sensitive' }
 
-  const id = questionId(prompt)
+  const id = openTriviaQuestionId(prompt, item.correct_answer, item.incorrect_answers)
   if (ctx.seen.has(id)) return { drop: 'duplicate-id' }
 
   const category = categoryFor(item.category)
