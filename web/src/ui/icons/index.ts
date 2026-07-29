@@ -25,5 +25,3 @@ export {
   type IconComponent,
   type IconProps,
 } from './Icons'
-
-export { IconPreview } from './IconPreview'

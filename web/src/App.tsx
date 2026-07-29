@@ -1,33 +1,16 @@
 import { BrowserRouter, Navigate, Route, Routes, useParams } from 'react-router-dom'
 import CloseDrop from './pages/CloseDrop'
 import Create from './pages/Create'
-import DirectionA from './pages/design/DirectionA'
-import DirectionB from './pages/design/DirectionB'
-import DirectionC from './pages/design/DirectionC'
-import Reveal from './pages/design/Reveal'
-import Treatment from './pages/design/Treatments'
 import Drop from './pages/Drop'
 import Game from './pages/Game'
 import Games from './pages/Games'
 import Landing from './pages/Landing'
-import Preview from './pages/Preview'
-import Spike from './pages/Spike'
 
 /**
  * The routes the server actually serves a shell for (`http/ssr.ts`): `/`,
  * `/create`, `/drop/:publicId`, `/drop/:publicId/close`, `/game/:publicId` and
  * `/games`. Anything else is a mistyped or stale link, and the useful answer to
  * that is the create screen, not a 404 page.
- *
- * `/preview` is the envelope's states board and must never ship. The guard is
- * `import.meta.env.DEV`, which Vite substitutes with the literal `false` in a
- * production build; the branch is then dead code and `Preview` is tree-shaken
- * out. The same rule the `MockBridge` lives under, verified the same way — by
- * grepping `web/dist` for the module's sentinel string.
- *
- * `/design/a|b|c` are the three rendered redesign directions and live under the
- * same guard, with their own sentinel (`nd-design-only-surface`) so the same
- * dist grep proves the same thing about them.
  *
  * `AppRoutes` is exported without the router so tests can mount it inside a
  * `MemoryRouter` at any path.
@@ -75,15 +58,6 @@ export function AppRoutes() {
       */}
       <Route path="/game/:publicId" element={<Game />} />
       <Route path="/games" element={<Games />} />
-      {import.meta.env.DEV ? <Route path="/spike" element={<Spike />} /> : null}
-      {import.meta.env.DEV ? <Route path="/preview" element={<Preview />} /> : null}
-      {import.meta.env.DEV ? <Route path="/design/a" element={<DirectionA />} /> : null}
-      {import.meta.env.DEV ? <Route path="/design/b" element={<DirectionB />} /> : null}
-      {import.meta.env.DEV ? <Route path="/design/c" element={<DirectionC />} /> : null}
-      {/* Static beats dynamic in the router's own ranking, so this wins over
-          `/design/:treatment` below it whatever the order. */}
-      {import.meta.env.DEV ? <Route path="/design/reveal" element={<Reveal />} /> : null}
-      {import.meta.env.DEV ? <Route path="/design/:treatment" element={<Treatment />} /> : null}
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   )
