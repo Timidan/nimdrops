@@ -13,6 +13,7 @@ import {
   ensureNetworkBinding,
   inFlightOutgoingLuna,
   ledgerMovementsLuna,
+  lockControls,
   outstandingPrincipalLuna,
   pause,
   readControls,
@@ -619,6 +620,54 @@ export async function pauseCustody(pool: Pool, reason: string): Promise<Controls
 export async function unpauseCustody(pool: Pool): Promise<Controls> {
   await unpause(pool)
   return readControls(pool)
+}
+
+/** Only an operator-funded drop can be retired this way: it has no sponsor to sign. */
+export class NotAnOperatorGameError extends Error {}
+
+export async function closeOperatorGame(
+  pool: Pool,
+  publicId: string,
+): Promise<{ publicId: string; state: string; releasedLuna: string }> {
+  const client = await pool.connect()
+  try {
+    await client.query('BEGIN')
+    await lockControls(client)
+    const { rows } = await client.query<{
+      id: string
+      state: string
+      funding_source: string
+      unpaid_luna: string
+    }>(
+      `SELECT d.id, d.state, d.funding_source,
+              COALESCE(d.claim_count * d.amount_each_luna, 0)::TEXT AS unpaid_luna
+         FROM drops d
+        WHERE d.public_id = $1
+        FOR UPDATE`,
+      [publicId],
+    )
+    const drop = rows[0]
+    if (!drop) throw new NotAnOperatorGameError(`no drop with public id ${publicId}`)
+    if (drop.funding_source !== 'operator') {
+      throw new NotAnOperatorGameError(
+        `drop ${publicId} was funded by a sponsor; close it with a signature from the funding address`,
+      )
+    }
+    if (drop.state !== 'live') {
+      throw new NotAnOperatorGameError(`drop ${publicId} is ${drop.state}, not live`)
+    }
+    await client.query(
+      `UPDATE drops SET state = 'closing', closing_reason = 'closed_by_sponsor' WHERE id = $1`,
+      [drop.id],
+    )
+    await client.query('COMMIT')
+    return { publicId, state: 'closing', releasedLuna: drop.unpaid_luna }
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {})
+    throw err
+  } finally {
+    client.release()
+  }
 }
 
 // ---- deposit reconciliation report --------------------------------------------------
@@ -1987,6 +2036,13 @@ commands:
       closed until the worker's next successful reconcile.
       example: pnpm tsx src/recover.ts unpause
 
+  close-game <publicId>
+      Retire an operator-funded game. It stops accepting claims and its
+      unclaimed principal returns to the float. Refuses a sponsor-funded drop:
+      that one closes with a signature from its funding address. Writes no
+      refund — an operator drop's NIM never left custody.
+      example: pnpm tsx src/recover.ts close-game CcR-62uUTn0yDGkfM-vnZg
+
   --help
       Print this block. Also printed, to stderr, on an unrecognised command.
 
@@ -2018,10 +2074,11 @@ const COMMANDS = [
   'float',
   'pause',
   'unpause',
+  'close-game',
 ] as const
 const HELP_FLAGS = new Set<string>(['--help', '-h', 'help'])
 /** Commands whose second word is required. `pause` takes a reason, not an id. */
-const NEEDS_ARGUMENT = new Set<string>(['resume', 'replace', 'pause'])
+const NEEDS_ARGUMENT = new Set<string>(['resume', 'replace', 'pause', 'close-game'])
 /** Commands that cannot run without a chain client. Pause must work with the node down. */
 const NEEDS_CHAIN = new Set<string>(['resume', 'replace', 'deposits'])
 /**
@@ -2562,6 +2619,8 @@ export async function main(argv: string[]): Promise<RecoverOutcome> {
       result = await depositReport(pool, needChain())
     } else if (command === 'pause') {
       result = await pauseCustody(pool, argument)
+    } else if (command === 'close-game') {
+      result = await closeOperatorGame(pool, argument)
     } else {
       result = await unpauseCustody(pool)
     }

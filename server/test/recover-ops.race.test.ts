@@ -278,6 +278,7 @@ describe('recover CLI help', () => {
     'float lower',
     'pause',
     'unpause',
+    'close-game',
   ]
 
   it('names every subcommand, with a description and an example for each', () => {
