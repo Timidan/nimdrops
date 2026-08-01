@@ -47,6 +47,12 @@
 	}
 }
 
+# Public route for the primary Hexkit EDB bridge. Caddy provisions and renews
+# the certificate after edb.hexkit.tech points at this host.
+edb.hexkit.tech {
+	reverse_proxy edb-primary:5789
+}
+
 {$PUBLIC_HOSTNAME} {
 	encode zstd gzip
 
