@@ -18,6 +18,9 @@ services:
     restart: unless-stopped
     depends_on:
       - server
+    networks:
+      - default
+      - public_proxy
     environment:
       # Caddy substitutes this into the site block in ./Caddyfile. Required here
       # rather than defaulted: a placeholder name would burn ACME rate limits on
@@ -52,3 +55,7 @@ services:
 volumes:
   caddy_data:
   caddy_config:
+
+networks:
+  public_proxy:
+    external: true

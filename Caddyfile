@@ -53,6 +53,23 @@ edb.hexkit.tech {
 	reverse_proxy edb-primary:5789
 }
 
+# Findling shares this edge through the external public_proxy network. The
+# application container publishes no host port; Caddy reaches it by its Compose
+# service name instead.
+findling.timidan.xyz {
+	request_body {
+		max_size 80MB
+	}
+
+	reverse_proxy findling:3000 {
+		transport http {
+			dial_timeout 180s
+			read_timeout 180s
+			write_timeout 180s
+		}
+	}
+}
+
 {$PUBLIC_HOSTNAME} {
 	encode zstd gzip
 
