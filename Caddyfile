@@ -91,8 +91,77 @@ findling.timidan.xyz {
 # through Cloudflare and rejects direct-origin application requests.
 overcode.timidan.xyz {
 	import cloudflare_only
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=15552000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+	}
+
+	@immutable_assets path_regexp immutable_assets \.((?i:css|js|svg|png|jpe?g|webp|ico|mp4))$
+	header @immutable_assets Cache-Control "public, max-age=2592000, immutable"
+
 	root * /srv/overcode
+	try_files {path} {path}/ /index.html
 	file_server
+}
+
+# Nyx's private Nginx service preserves the original SPA, agent path rewrites,
+# order-route bearer injection, body limit, and rate limit. Caddy authenticates
+# Cloudflare and replaces X-Forwarded-For with the verified client address so
+# the internal limiter cannot be influenced by a caller-supplied header.
+nyx.timidan.xyz {
+	import cloudflare_only
+
+	reverse_proxy nyx-web:8080 {
+		header_up X-Forwarded-For {client_ip}
+		transport http {
+			dial_timeout 30s
+			read_timeout 30s
+			write_timeout 30s
+		}
+	}
+}
+
+# AgentPay's private Nginx gateway is the only project container exposed to
+# the shared proxy network. It preserves the original SPA fallback, /api and
+# /bridge rewrites, rate limits, and long settlement/tool timeouts; the report,
+# MCP, and facilitator processes remain on AgentPay's private networks.
+agentpay.timidan.xyz {
+	import cloudflare_only
+
+	request_body {
+		max_size 1MB
+	}
+
+	reverse_proxy agentpay-web:8080 {
+		header_up X-Forwarded-For {client_ip}
+		transport http {
+			dial_timeout 30s
+			read_timeout 240s
+			write_timeout 240s
+		}
+	}
+}
+
+# Baton-X exposes only its ASP container to the proxy network. A2A, Hermes,
+# OnchainOS, wallets, sessions, and encrypted replay stores remain on the
+# project's private state/network boundary. Keep the loopback readiness probe
+# unreachable from the public hostname, matching the source Nginx behavior.
+baton.timidan.xyz {
+	import cloudflare_only
+
+	@internal_ready path /internal/ready
+	respond @internal_ready 404
+
+	reverse_proxy baton-x:3002 {
+		transport http {
+			dial_timeout 30s
+			read_timeout 180s
+			write_timeout 180s
+		}
+	}
 }
 
 {$PUBLIC_HOSTNAME} {
