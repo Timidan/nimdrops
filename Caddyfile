@@ -55,8 +55,12 @@ edb.hexkit.tech {
 
 # Findling shares this edge through the external public_proxy network. The
 # application container publishes no host port; Caddy reaches it by its Compose
-# service name instead.
+# service name instead. Its DNS record remains proxied by Cloudflare, so this
+# site uses a Cloudflare Origin CA certificate instead of a public ACME
+# challenge. The key is generated and stored on the host, outside this repo.
 findling.timidan.xyz {
+	tls /etc/caddy/origin-certs/findling-origin.pem /etc/caddy/origin-certs/findling-origin.key
+
 	request_body {
 		max_size 80MB
 	}

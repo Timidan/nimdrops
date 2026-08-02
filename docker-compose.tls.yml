@@ -49,6 +49,13 @@ services:
       - '443:443/udp'
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Host-managed Origin CA material is intentionally outside the repo and
+      # mounted read-only. Only the Findling site block references these files;
+      # the other sites continue using Caddy's automatic certificate storage.
+      - type: bind
+        source: ${CADDY_ORIGIN_CERT_DIR:-/home/agentops/.config/nimdrops-caddy/tls}
+        target: /etc/caddy/origin-certs
+        read_only: true
       - caddy_data:/data
       - caddy_config:/config
 
