@@ -49,6 +49,12 @@ services:
       - '443:443/udp'
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # The host-managed Cloudflare Origin CA wildcard certificate covers the
+      # proxied timidan.xyz sites and is deliberately kept outside this repo.
+      - type: bind
+        source: ${CADDY_ORIGIN_CERT_DIR:-/home/agentops/.config/nimdrops-caddy/tls}
+        target: /etc/caddy/origin-certs
+        read_only: true
       - type: bind
         source: /home/agentops/overcode/site
         target: /srv/overcode
