@@ -86,6 +86,15 @@ findling.timidan.xyz {
 	}
 }
 
+# Overcode is a versioned static release checked out on the host. It has no
+# backend process or writable state; Caddy serves the repository's site tree
+# through Cloudflare and rejects direct-origin application requests.
+overcode.timidan.xyz {
+	import cloudflare_only
+	root * /srv/overcode
+	file_server
+}
+
 {$PUBLIC_HOSTNAME} {
 	encode zstd gzip
 

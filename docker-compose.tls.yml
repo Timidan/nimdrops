@@ -49,6 +49,10 @@ services:
       - '443:443/udp'
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - type: bind
+        source: /home/agentops/overcode/site
+        target: /srv/overcode
+        read_only: true
       - caddy_data:/data
       - caddy_config:/config
 
