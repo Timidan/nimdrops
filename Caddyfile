@@ -57,10 +57,6 @@ edb.hexkit.tech {
 # application container publishes no host port; Caddy reaches it by its Compose
 # service name instead.
 findling.timidan.xyz {
-	# Keep private staging off the public ACME issuers while DNS still targets
-	# the source droplet. Remove this line immediately before DNS cutover.
-	tls internal
-
 	request_body {
 		max_size 80MB
 	}
